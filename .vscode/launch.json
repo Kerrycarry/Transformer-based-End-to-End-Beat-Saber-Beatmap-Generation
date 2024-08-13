@@ -1,0 +1,58 @@
+{
+    // Use IntelliSense to learn about possible attributes.
+    // Hover to view descriptions of existing attributes.
+    // For more information, visit: https://go.microsoft.com/fwlink/?linkid=830387
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "finetune_precompute_token.sh",
+            "type": "python",
+            "request": "launch",
+            //"program": "dora",
+            "module": "dora",
+            "justMyCode": false,
+            "args": [
+                "run",
+                "solver=musicgen/musicgen_base_32khz_test",
+                "model/lm/model_scale=xsmall",
+                "conditioner=none",
+                "cache.path=/tmp/cache/interleave_stereo_nv_32k",
+                "cache.write=True",
+                "--clear"
+            ],
+        },
+        {
+            "name": "finetune.sh",
+            "type": "python",
+            "request": "launch",
+            //"program": "dora",
+            "module": "dora",
+            "justMyCode": false,
+            "args": [
+                "run",
+                "solver=musicgen/musicgen_base_32khz_test",
+                "model/lm/model_scale=small",
+                "continue_from=//pretrained/facebook/musicgen-small",
+                "conditioner=text2music",
+                "--clear"
+            ],
+        },
+        {
+            "name": "finetune_with_precomputed_token.sh",
+            "type": "python",
+            "request": "launch",
+            //"program": "dora",
+            "module": "dora",
+            "justMyCode": false,
+            "args": [
+                "run",  
+                "solver=musicgen/musicgen_base_32khz_test", 
+                "model/lm/model_scale=small", 
+                "continue_from=//pretrained/facebook/musicgen-small", 
+                "conditioner=text2music", 
+                "cache.path=/tmp/cache/interleave_stereo_nv_32k", 
+                "--clear",
+            ],
+        },
+    ]
+}

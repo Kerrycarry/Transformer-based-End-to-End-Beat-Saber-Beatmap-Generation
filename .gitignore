@@ -56,7 +56,6 @@ dataset/*
 # personal notebooks & scripts
 */local_scripts
 */notes
-.vscode/
 /notebooks
 /local_scripts
 /notes
