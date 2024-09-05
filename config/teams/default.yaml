@@ -1,5 +1,5 @@
 default:
-  dora_dir: /mnt/workspace/audiocraft_${oc.env:USER}
+  dora_dir: /root/workspace/audiocraft_${oc.env:USER}
   partitions:
     global: debug
     team: debug
