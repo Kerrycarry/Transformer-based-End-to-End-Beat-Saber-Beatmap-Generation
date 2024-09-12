@@ -475,7 +475,7 @@ class LMModel(StreamingModule):
             prompt = torch.zeros((num_samples, self.num_codebooks, 0), dtype=torch.long, device=device)
 
         B, K, T = prompt.shape
-        start_offset = T
+        start_offset = T # start offset控制续写功能
         assert start_offset < max_gen_len
 
         pattern = self.pattern_provider.get_pattern(max_gen_len)
@@ -483,14 +483,14 @@ class LMModel(StreamingModule):
         unknown_token = -1
 
         # we generate codes up to the max_gen_len that will be mapped to the pattern sequence
-        gen_codes = torch.full((B, K, max_gen_len), unknown_token, dtype=torch.long, device=device)
+        gen_codes = torch.full((B, K, max_gen_len), unknown_token, dtype=torch.long, device=device) # gencodes.shape [3, 4, 400] max_gen_len = 400
         # filling the gen_codes with the prompt if needed
         gen_codes[..., :start_offset] = prompt
         # create the gen_sequence with proper interleaving from the pattern: [B, K, S]
-        gen_sequence, indexes, mask = pattern.build_pattern_sequence(gen_codes, self.special_token_id)
+        gen_sequence, indexes, mask = pattern.build_pattern_sequence(gen_codes, self.special_token_id) # gen_sequence.shape 如果没有prompt, [3,4,404] 3
         # retrieve the start_offset in the sequence:
         # it is the first sequence step that contains the `start_offset` timestep
-        start_offset_sequence = pattern.get_first_step_with_timesteps(start_offset)
+        start_offset_sequence = pattern.get_first_step_with_timesteps(start_offset) # start_offset = 1, start_offset_sequence = 1
         assert start_offset_sequence is not None
 
         with self.streaming():
@@ -499,7 +499,7 @@ class LMModel(StreamingModule):
             gen_sequence_len = gen_sequence.shape[-1]  # gen_sequence shape is [B, K, S]
             for offset in range(start_offset_sequence, gen_sequence_len):
                 # get current sequence (note that the streaming API is providing the caching over previous offsets)
-                curr_sequence = gen_sequence[..., prev_offset:offset]
+                curr_sequence = gen_sequence[..., prev_offset:offset] # shape is [B, K, 1]
                 curr_mask = mask[None, ..., prev_offset:offset].expand(B, -1, -1)
                 if check:
                     # check coherence between mask and sequence
