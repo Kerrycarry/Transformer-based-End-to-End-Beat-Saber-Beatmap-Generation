@@ -34,3 +34,12 @@ transformer_lm:
   depthwise_init: current
   zero_bias_init: true
   attention_as_float32: false
+
+  difficulty_num: 5
+  output_lm:
+    dim: 64
+    num_heads: 1
+    num_layers: 4
+    hidden_scale: 4
+    card: 3
+    

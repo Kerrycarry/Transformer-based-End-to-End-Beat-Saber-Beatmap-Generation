@@ -16,6 +16,7 @@ from torch import nn
 from ..utils import utils
 from ..modules.streaming import StreamingModule, State
 from ..modules.transformer import StreamingTransformer, create_norm_fn
+from ..modules.beatmapgen_modules import OutputLMModel
 from ..modules.conditioners import (
     ConditionFuser,
     ClassifierFreeGuidanceDropout,
@@ -116,7 +117,7 @@ class LMOutput:
     mask: torch.Tensor  # [B, K, T]
 
 
-class LMModel(StreamingModule):
+class BeatmapLMModel(StreamingModule):
     """Transformer-based language model on multiple streams of codes.
 
     Args:
@@ -142,12 +143,12 @@ class LMModel(StreamingModule):
         **kwargs: Additional parameters for the transformer encoder.
     """
     def __init__(self, pattern_provider: CodebooksPatternProvider, condition_provider: ConditioningProvider,
-                 fuser: ConditionFuser, n_q: int = 8, card: int = 1024, dim: int = 128, num_heads: int = 8,
+                 fuser: ConditionFuser, outputLM_kwargs: dict, n_q: int = 8, card: int = 1024, dim: int = 128, num_heads: int = 8,
                  hidden_scale: int = 4, norm: str = 'layer_norm', norm_first: bool = False,
                  emb_lr: tp.Optional[float] = None, bias_proj: bool = True,
                  weight_init: tp.Optional[str] = None, depthwise_init: tp.Optional[str] = None,
                  zero_bias_init: bool = False, cfg_dropout: float = 0, cfg_coef: float = 1.0,
-                 attribute_dropout: tp.Dict[str, tp.Dict[str, float]] = {}, two_step_cfg: bool = False,
+                 attribute_dropout: tp.Dict[str, tp.Dict[str, float]] = {}, two_step_cfg: bool = False, difficulty_num: int = 5,
                  **kwargs):
         super().__init__()
         self.cfg_coef = cfg_coef
@@ -160,8 +161,10 @@ class LMModel(StreamingModule):
         self.n_q = n_q
         self.dim = dim
         self.pattern_provider = pattern_provider
-        self.two_step_cfg = two_step_cfg
+        # self.two_step_cfg = two_step_cfg
         self.emb = nn.ModuleList([ScaledEmbedding(embed_dim, dim, lr=emb_lr) for _ in range(n_q)])
+        self.difficulty_num = difficulty_num
+        self.difficulty_emb = ScaledEmbedding(self.difficulty_num, self.dim, lr=emb_lr)
         if 'activation' in kwargs:
             kwargs['activation'] = get_activation_fn(kwargs['activation'])
         self.transformer = StreamingTransformer(
@@ -170,7 +173,13 @@ class LMModel(StreamingModule):
         self.out_norm: tp.Optional[nn.Module] = None
         if norm_first:
             self.out_norm = create_norm_fn(norm, dim)
-        self.linears = nn.ModuleList([nn.Linear(dim, self.card, bias=bias_proj) for _ in range(n_q)])
+        # self.linears = nn.ModuleList([nn.Linear(dim, self.card, bias=bias_proj) for _ in range(n_q)])
+        self.outputLM = OutputLMModel(
+            input_dim=self.dim,
+            dtype=kwargs['dtype'],
+            device=kwargs['device'],
+            **outputLM_kwargs,
+        ).to(kwargs['device'])
         self._init_weights(weight_init, depthwise_init, zero_bias_init)
         self._fsdp: tp.Optional[nn.Module]
         self.__dict__['_fsdp'] = None
@@ -196,6 +205,7 @@ class LMModel(StreamingModule):
 
         for emb_layer in self.emb:
             init_layer(emb_layer, method=weight_init, init_depth=None, zero_bias_init=zero_bias_init)
+        init_layer(self.difficulty_emb, method=weight_init, init_depth=None, zero_bias_init=zero_bias_init)
 
         for layer_idx, tr_layer in enumerate(self.transformer.layers):
             depth = None
@@ -206,8 +216,8 @@ class LMModel(StreamingModule):
             init_fn = partial(init_layer, method=weight_init, init_depth=depth, zero_bias_init=zero_bias_init)
             tr_layer.apply(init_fn)
 
-        for linear in self.linears:
-            init_layer(linear, method=weight_init, init_depth=None, zero_bias_init=zero_bias_init)
+        # for linear in self.linears:
+        #     init_layer(linear, method=weight_init, init_depth=None, zero_bias_init=zero_bias_init)
 
     @property
     def special_token_id(self) -> int:
@@ -218,13 +228,17 @@ class LMModel(StreamingModule):
         return self.n_q
 
     def forward(self, sequence: torch.Tensor,
-                conditions: tp.List[ConditioningAttributes],
-                condition_tensors: tp.Optional[ConditionTensors] = None,
+                image: torch.Tensor,
+                difficulty: torch.Tensor,
+                # conditions: tp.List[ConditioningAttributes],
+                # condition_tensors: tp.Optional[ConditionTensors] = None,
                 stage: int = -1) -> torch.Tensor:
         """Apply language model on sequence and conditions.
         Given a tensor of sequence of shape [B, K, S] with K the number of codebooks and
-        S the sequence steps, return the logits with shape [B, card, K, S].
-
+        S the sequence steps, a tensor of image of shape [B, S, I] with S the sequence steps and
+        I the number of images, difficulty with shape [B, 1]
+        return the logits with shape [B, S, I, card].
+        
         Args:
             indices (torch.Tensor): Indices of the codes to model.
             conditions (list of ConditioningAttributes): Conditions to use when modeling
@@ -240,38 +254,26 @@ class LMModel(StreamingModule):
         """
         B, K, S = sequence.shape
         assert K == self.num_codebooks, "Sequence shape must match the specified number of codebooks"
-        input_ = sum([self.emb[k](sequence[:, k]) for k in range(K)])
-        if condition_tensors is None:
-            assert not self._is_streaming, "Conditions tensors should be precomputed when streaming."
-            # apply dropout modules
-            conditions = self.cfg_dropout(conditions)
-            conditions = self.att_dropout(conditions)
-            tokenized = self.condition_provider.tokenize(conditions)
-            # encode conditions and fuse, both have a streaming cache to not recompute when generating.
-            condition_tensors = self.condition_provider(tokenized)
-        else:
-            assert not conditions, "Shouldn't pass both conditions and condition_tensors."
-
-        input_, cross_attention_input = self.fuser(input_, condition_tensors)
-
+        input_ = sum([self.emb[k](sequence[:, k]) for k in range(K)]) # batch, sequence, dim
+        
+        cross_attention_input = self.difficulty_emb(difficulty) # [B, 1, dim]
         out = self.transformer(input_, cross_attention_src=cross_attention_input,
                                src_mask=(self.attn_mask_per_stage[stage] if stage >= 0 else None))
         if self.out_norm:
             out = self.out_norm(out)
-        logits = torch.stack([self.linears[k](out) for k in range(K)], dim=1)  # [B, K, S, card]
+        
+        out = out[:,4:,:]
+        logits = self.outputLM.compute_predictions(image,out)
+        
 
-        # remove the prefix from the model outputs
-        if len(self.fuser.fuse2cond['prepend']) > 0:
-            logits = logits[:, :, -S:]
-
-        return logits  # [B, K, S, card]
+        return logits  #[B, S, I, card]
 
     def compute_predictions(
             self, codes: torch.Tensor,
-            conditions: tp.List[ConditioningAttributes],
-            condition_tensors: tp.Optional[ConditionTensors] = None,
+            image: torch.Tensor,
+            difficulty: torch.Tensor,
             stage: int = -1,
-            keep_only_valid_steps: bool = True) -> LMOutput:
+            keep_only_valid_steps: bool = True):
         """Given an input tensor of codes [B, K, T] and list of conditions, runs the model
         forward using the specified codes interleaving pattern.
 
@@ -302,22 +304,13 @@ class LMModel(StreamingModule):
         # map codes [B, K, T] into pattern sequence [B, K, S] using special_token_id for masked tokens
         pattern = self.pattern_provider.get_pattern(T)
         sequence_codes, sequence_indexes, sequence_mask = pattern.build_pattern_sequence(
-            codes, self.special_token_id, keep_only_valid_steps=keep_only_valid_steps,
+            codes, self.special_token_id
         )
-
         # apply model on pattern sequence
         model = self if self._fsdp is None else self._fsdp
-        logits = model(sequence_codes, conditions, condition_tensors, stage=stage)  # [B, K, S, card]
-        # map back the logits on pattern sequence to logits on original codes: [B, K, S, card] -> [B, K, T, card]
-        # and provide the corresponding mask over invalid positions of tokens
-        logits = logits.permute(0, 3, 1, 2)  # [B, card, K, S]
-        # note: we use nans as special token to make it obvious if we feed unexpected logits
-        logits, logits_indexes, logits_mask = pattern.revert_pattern_logits(
-            logits, float('nan'), keep_only_valid_steps=keep_only_valid_steps
-        )
-        logits = logits.permute(0, 2, 3, 1)  # [B, K, T, card]
-        logits_mask = logits_mask[None, :, :].expand(B, -1, -1)  # [K, T] -> [B, K, T]
-        return LMOutput(logits, logits_mask)
+        logits = model(sequence_codes, image, difficulty, stage=stage)  # [B, K, S, card]
+        
+        return logits
 
     def _sample_next_token(self,
                            sequence: torch.Tensor,
@@ -392,156 +385,33 @@ class LMModel(StreamingModule):
 
         return next_token
 
+
     @torch.no_grad()
-    def generate(self,
-                 prompt: tp.Optional[torch.Tensor] = None,
-                 conditions: tp.List[ConditioningAttributes] = [],
-                 num_samples: tp.Optional[int] = None,
-                 max_gen_len: int = 256,
-                 use_sampling: bool = True,
-                 temp: float = 1.0,
-                 top_k: int = 250,
-                 top_p: float = 0.0,
-                 cfg_coef: tp.Optional[float] = None,
-                 two_step_cfg: tp.Optional[bool] = None,
-                 remove_prompts: bool = False,
-                 check: bool = False,
-                 callback: tp.Optional[tp.Callable[[int, int], None]] = None,
-                 **kwargs) -> torch.Tensor:
-        """Generate tokens sampling from the model given a prompt or unconditionally. Generation can
-        be performed in a greedy fashion or using sampling with top K and top P strategies.
+    def generate(
+            self, codes: torch.Tensor,
+            difficulty: torch.Tensor,
+            stage: int = -1,
+            keep_only_valid_steps: bool = True,
+            **kwargs):
+        B, K, T = codes.shape
+        codes = codes.contiguous()
+        # map codes [B, K, T] into pattern sequence [B, K, S] using special_token_id for masked tokens
+        pattern = self.pattern_provider.get_pattern(T)
+        sequence_codes, sequence_indexes, sequence_mask = pattern.build_pattern_sequence(
+            codes, self.special_token_id, 
+        )
 
-        Args:
-            prompt (torch.Tensor, optional): Prompt tokens of shape [B, K, T].
-            conditions_tensors (list of ConditioningAttributes, optional): List of conditions.
-            num_samples (int, optional): Number of samples to generate when no prompt and no conditions are given.
-            max_gen_len (int): Maximum generation length.
-            use_sampling (bool): Whether to use a sampling strategy or not.
-            temp (float): Sampling temperature.
-            top_k (int): K for "top-k" sampling.
-            top_p (float): P for "top-p" sampling.
-            cfg_coeff (float, optional): Classifier-free guidance coefficient.
-            two_step_cfg (bool, optional): Whether to perform classifier-free guidance with two steps generation.
-            remove_prompts (bool): Whether to remove prompts from generation or not.
-            check (bool): Whether to apply further checks on generated sequence.
-            callback (Callback, optional): Callback function to report generation progress.
-        Returns:
-            torch.Tensor: Generated tokens.
-        """
-        assert not self.training, "generation shouldn't be used in training mode."
-        first_param = next(iter(self.parameters()))
-        device = first_param.device
+        B, K, S = sequence_codes.shape
+        assert K == self.num_codebooks, "Sequence shape must match the specified number of codebooks"
+        input_ = sum([self.emb[k](sequence_codes[:, k]) for k in range(K)]) # batch, sequence, dim
 
-        # Checking all input shapes are consistent.
-        possible_num_samples = []
-        if num_samples is not None:
-            possible_num_samples.append(num_samples)
-        elif prompt is not None:
-            possible_num_samples.append(prompt.shape[0])
-        elif conditions:
-            possible_num_samples.append(len(conditions))
-        else:
-            possible_num_samples.append(1)
-        assert [x == possible_num_samples[0] for x in possible_num_samples], "Inconsistent inputs shapes"
-        num_samples = possible_num_samples[0]
+        cross_attention_input = self.difficulty_emb(difficulty) # [B, 1, dim]
+        out = self.transformer(input_, cross_attention_src=cross_attention_input,
+                               src_mask=(self.attn_mask_per_stage[stage] if stage >= 0 else None))
+        if self.out_norm:
+            out = self.out_norm(out) # [B, S, dim]
+        out = out[:,4:,:]
+        out_codes = self.outputLM.generate(out,**kwargs) # [B, S, I]
 
-        # below we create set of conditions: one conditional and one unconditional
-        # to do that we merge the regular condition together with the null condition
-        # we then do 1 forward pass instead of 2.
-        # the reason for that is two-fold:
-        # 1. it is about x2 faster than doing 2 forward passes
-        # 2. avoid the streaming API treating the 2 passes as part of different time steps
-        # We also support doing two different passes, in particular to ensure that
-        # the padding structure is exactly the same between train and test.
-        # With a batch size of 1, this can be slower though.
-        cfg_conditions: CFGConditions
-        two_step_cfg = self.two_step_cfg if two_step_cfg is None else two_step_cfg
-        if conditions:
-            null_conditions = ClassifierFreeGuidanceDropout(p=1.0)(conditions)
-            if two_step_cfg:
-                cfg_conditions = (
-                    self.condition_provider(self.condition_provider.tokenize(conditions)),
-                    self.condition_provider(self.condition_provider.tokenize(null_conditions)),
-                )
-            else:
-                conditions = conditions + null_conditions
-                tokenized = self.condition_provider.tokenize(conditions)
-                cfg_conditions = self.condition_provider(tokenized)
-        else:
-            cfg_conditions = {}
-
-        if prompt is None:
-            assert num_samples > 0
-            prompt = torch.zeros((num_samples, self.num_codebooks, 0), dtype=torch.long, device=device)
-
-        B, K, T = prompt.shape
-        start_offset = T
-        assert start_offset < max_gen_len
-
-        pattern = self.pattern_provider.get_pattern(max_gen_len)
-        # this token is used as default value for codes that are not generated yet
-        unknown_token = -1
-
-        # we generate codes up to the max_gen_len that will be mapped to the pattern sequence
-        gen_codes = torch.full((B, K, max_gen_len), unknown_token, dtype=torch.long, device=device)
-        # filling the gen_codes with the prompt if needed
-        gen_codes[..., :start_offset] = prompt
-        # create the gen_sequence with proper interleaving from the pattern: [B, K, S]
-        gen_sequence, indexes, mask = pattern.build_pattern_sequence(gen_codes, self.special_token_id)
-        # retrieve the start_offset in the sequence:
-        # it is the first sequence step that contains the `start_offset` timestep
-        start_offset_sequence = pattern.get_first_step_with_timesteps(start_offset)
-        assert start_offset_sequence is not None
-
-        with self.streaming():
-            unconditional_state = self.get_streaming_state()
-            prev_offset = 0
-            gen_sequence_len = gen_sequence.shape[-1]  # gen_sequence shape is [B, K, S]
-            for offset in range(start_offset_sequence, gen_sequence_len):
-                # get current sequence (note that the streaming API is providing the caching over previous offsets)
-                curr_sequence = gen_sequence[..., prev_offset:offset]
-                curr_mask = mask[None, ..., prev_offset:offset].expand(B, -1, -1)
-                if check:
-                    # check coherence between mask and sequence
-                    assert (curr_sequence == torch.where(curr_mask, curr_sequence, self.special_token_id)).all()
-                    # should never happen as gen_sequence is filled progressively
-                    assert not (curr_sequence == unknown_token).any()
-                # sample next token from the model, next token shape is [B, K, 1]
-                next_token = self._sample_next_token(
-                    curr_sequence, cfg_conditions, unconditional_state, use_sampling, temp, top_k, top_p,
-                    cfg_coef=cfg_coef, two_step_cfg=two_step_cfg)
-                # ensure the tokens that should be masked are properly set to special_token_id
-                # as the model never output special_token_id
-                valid_mask = mask[..., offset:offset+1].expand(B, -1, -1)
-                next_token[~valid_mask] = self.special_token_id
-                # ensure we don't overwrite prompt tokens, we only write over unknown tokens
-                # (then mask tokens should be left as is as well, which is correct)
-                gen_sequence[..., offset:offset+1] = torch.where(
-                    gen_sequence[..., offset:offset+1] == unknown_token,
-                    next_token, gen_sequence[..., offset:offset+1]
-                )
-                prev_offset = offset
-                if callback is not None:
-                    callback(1 + offset - start_offset_sequence, gen_sequence_len - start_offset_sequence)
-        unconditional_state.clear()
-
-        # ensure sequence has been entirely filled
-        assert not (gen_sequence == unknown_token).any()
-        # ensure gen_sequence pattern and mask are matching
-        # which means the gen_sequence is valid according to the pattern
-        assert (
-            gen_sequence == torch.where(mask[None, ...].expand(B, -1, -1), gen_sequence, self.special_token_id)
-        ).all()
-        # get back the codes, trimming the prompt if needed and cutting potentially incomplete timesteps
-        out_codes, out_indexes, out_mask = pattern.revert_pattern_sequence(gen_sequence, special_token=unknown_token)
-
-        # sanity checks over the returned codes and corresponding masks
-        assert (out_codes[..., :max_gen_len] != unknown_token).all()
-        assert (out_mask[..., :max_gen_len] == 1).all()
-
-        out_start_offset = start_offset if remove_prompts else 0
-        out_codes = out_codes[..., out_start_offset:max_gen_len]
-
-        # ensure the returned codes are all valid
-        assert (out_codes >= 0).all() and (out_codes <= self.card).all()
         return out_codes
+        

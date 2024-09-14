@@ -12,9 +12,9 @@ from audiocraft.data.audio import audio_write
 model = audiocraft.models.MusicGen.get_pretrained('/checkpoints/my_audio_lm/')
 
 model.set_generation_params(duration=8)  # generate 8 seconds.
-wav = model.generate_unconditional(4)    # generates 4 unconditional audio samples
-# descriptions = ['happy rock', 'energetic EDM', 'sad jazz']
-# wav = model.generate(descriptions)  # generates 3 samples.
+# wav = model.generate_unconditional(4)    # generates 4 unconditional audio samples
+descriptions = ['happy rock', 'energetic EDM', 'sad jazz']
+wav = model.generate(descriptions)  # generates 3 samples.
 
 # melody, sr = torchaudio.load('./assets/bach.mp3')
 # # generates using the melody from the given audio and the provided descriptions.

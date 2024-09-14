@@ -14,6 +14,7 @@ from .encodec import (
 from .audiogen import AudioGen
 from .lm import LMModel
 from .lm_magnet import MagnetLMModel
+from .lm_beatmapgen import BeatmapLMModel
 from .multibanddiffusion import MultiBandDiffusion
 from .musicgen import MusicGen
 from .magnet import MAGNeT

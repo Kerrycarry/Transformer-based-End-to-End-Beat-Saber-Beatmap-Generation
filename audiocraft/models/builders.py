@@ -8,6 +8,7 @@
 All the functions to build the relevant models and modules
 from the Hydra config.
 """
+import copy
 
 import typing as tp
 
@@ -33,6 +34,7 @@ from .encodec import (CompressionModel, EncodecModel,
                       InterleaveStereoCompressionModel)
 from .lm import LMModel
 from .lm_magnet import MagnetLMModel
+from .lm_beatmapgen import BeatmapLMModel
 from .unet import DiffusionUnet
 from .watermark import WMModel
 
@@ -127,7 +129,58 @@ def get_lm_model(cfg: omegaconf.DictConfig) -> LMModel:
         ).to(cfg.device)
     else:
         raise KeyError(f"Unexpected LM model {cfg.lm_model}")
+    
+#在这里初始化beatmapmodule, beatmaplm
+def get_beatmapgen_lm_model(cfg: omegaconf.DictConfig) -> LMModel:
+    """Instantiate a transformer LM."""
+    if cfg.lm_model in ["transformer_lm", "transformer_lm_magnet"]:
+        kwargs = dict_from_config(getattr(cfg, "transformer_lm"))
+        n_q = kwargs["n_q"]
+        q_modeling = kwargs.pop("q_modeling", None)
+        codebooks_pattern_cfg = getattr(cfg, "codebooks_pattern")
+        attribute_dropout = dict_from_config(getattr(cfg, "attribute_dropout"))
+        cls_free_guidance = dict_from_config(getattr(cfg, "classifier_free_guidance"))
+        cfg_prob, cfg_coef = (
+            cls_free_guidance["training_dropout"],
+            cls_free_guidance["inference_coef"],
+        )
+        fuser = get_condition_fuser(cfg)
+        condition_provider = get_conditioner_provider(kwargs["dim"], cfg).to(cfg.device)
+        if len(fuser.fuse2cond["cross"]) > 0:  # enforce cross-att programmatically
+            kwargs["cross_attention"] = True
+        if codebooks_pattern_cfg.modeling is None:
+            assert (
+                q_modeling is not None
+            ), "LM model should either have a codebook pattern defined or transformer_lm.q_modeling"
+            codebooks_pattern_cfg = omegaconf.OmegaConf.create(
+                {"modeling": q_modeling, "delay": {"delays": list(range(n_q))}}
+            )
 
+        pattern_provider = get_codebooks_pattern_provider(n_q, codebooks_pattern_cfg)
+        
+        difficulty_num = kwargs.pop("difficulty_num", None)
+        temp = kwargs.pop("output_lm", None)
+        outputLM_kwargs = copy.deepcopy(kwargs)
+        outputLM_kwargs['dim'] = temp['dim']
+        outputLM_kwargs['num_heads'] = temp['num_heads']
+        outputLM_kwargs['num_layers'] = temp['num_layers']
+        outputLM_kwargs['card'] = temp['card']
+        outputLM_kwargs.pop("n_q")
+        return BeatmapLMModel(
+            pattern_provider=pattern_provider,
+            condition_provider=condition_provider,
+            fuser=fuser,
+            cfg_dropout=cfg_prob,
+            cfg_coef=cfg_coef,
+            attribute_dropout=attribute_dropout,
+            dtype=getattr(torch, cfg.dtype),
+            device=cfg.device,
+            difficulty_num = difficulty_num,
+            outputLM_kwargs = outputLM_kwargs,
+            **kwargs,
+        ).to(cfg.device)
+    else:
+        raise KeyError(f"Unexpected LM model {cfg.lm_model}")
 
 def get_conditioner_provider(
     output_dim: int, cfg: omegaconf.DictConfig

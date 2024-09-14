@@ -5,6 +5,13 @@
     "version": "0.2.0",
     "configurations": [
         {
+            "name": "Python Debugger: Current File",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${file}",
+            "console": "integratedTerminal"
+        },
+        {
             "name": "finetune_precompute_token.sh",
             "type": "python",
             "request": "launch",
@@ -45,12 +52,28 @@
             "module": "dora",
             "justMyCode": false,
             "args": [
-                "run",  
-                "solver=musicgen/musicgen_base_32khz_test", 
-                "model/lm/model_scale=small", 
-                "continue_from=//pretrained/facebook/musicgen-small", 
-                "conditioner=text2music", 
-                "cache.path=/tmp/cache/interleave_stereo_nv_32k", 
+                "run",
+                "solver=musicgen/musicgen_base_32khz_test",
+                "model/lm/model_scale=small",
+                "continue_from=//pretrained/facebook/musicgen-small",
+                "conditioner=text2music",
+                "cache.path=/tmp/cache/interleave_stereo_nv_32k",
+                "--clear",
+            ],
+        },
+        {
+            "name": "beatmapgen_finetune.sh",
+            "type": "python",
+            "request": "launch",
+            //"program": "dora",
+            "module": "dora",
+            "justMyCode": false,
+            "args": [
+                "run",
+                "solver=beatmapgen/beatmapgen_base_32khz_test",
+                "model/lm/model_scale=small",
+                "continue_from=/root/workspace/audiocraft_download/beatmapgen_finetune_musicgen-small.th",
+                "conditioner=text2music",
                 "--clear",
             ],
         },

@@ -4,13 +4,13 @@ defaults:
   - /solver/default
   - /conditioner: none
   - _self_
-  - /solver/musicgen/evaluation: none
+  - /solver/beatmapgen/evaluation: none
   - override /dset: audio/default
 
 autocast: true
 autocast_dtype: float16
 
-solver: musicgen
+solver: beatmapgen
 sample_rate: ???
 channels: ???
 compression_model_checkpoint: ???

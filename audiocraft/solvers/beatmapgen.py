@@ -28,7 +28,7 @@ from ..utils.samples.manager import SampleManager
 from ..utils.utils import get_dataset_from_loader, is_jsonable, warn_once, model_hash
 
 
-class MusicGenSolver(base.StandardSolver):
+class BeatmapGenSolver(base.StandardSolver):
     """Solver for MusicGen training task.
 
     Used in: https://arxiv.org/abs/2306.05284
@@ -135,7 +135,7 @@ class MusicGenSolver(base.StandardSolver):
                          self.compression_model.num_codebooks, self.compression_model.cardinality,
                          self.compression_model.frame_rate)
         # instantiate LM model
-        self.model: models.LMModel = models.builders.get_lm_model(self.cfg).to(self.device)
+        self.model: models.BeatmapLMModel = models.builders.get_beatmapgen_lm_model(self.cfg).to(self.device)
         if self.cfg.fsdp.use:
             assert not self.cfg.autocast, "Cannot use autocast with fsdp"
             self.model = self.wrap_with_fsdp(self.model)
@@ -160,6 +160,24 @@ class MusicGenSolver(base.StandardSolver):
             else:
                 self.scaler = torch.cuda.amp.GradScaler()
             self.register_stateful('scaler')
+        
+        #transfer learning
+        with open('model_architecture.txt', 'w') as f:
+            f.write(str(self.model))
+        # 冻结模型中的所有参数
+        for param in self.model.parameters():
+            param.requires_grad = False
+
+        # 仅解冻 outputLM, difficulty_emb, crossattention 的参数
+        for param in self.model.outputLM.parameters():
+            param.requires_grad = True
+
+        for param in self.model.difficulty_emb.parameters():
+            param.requires_grad = True
+
+        # for layer in self.model.transformer.layers:
+        #     for param in layer.cross_attention.parameters():
+        #         param.requires_grad = True
 
     def build_dataloaders(self) -> None:
         """Instantiate audio dataloaders for each stage."""
@@ -210,7 +228,7 @@ class MusicGenSolver(base.StandardSolver):
         return state
 
     def _compute_cross_entropy(
-        self, logits: torch.Tensor, targets: torch.Tensor, mask: torch.Tensor
+        self, logits: torch.Tensor, targets: torch.Tensor
     ) -> tp.Tuple[torch.Tensor, tp.List[torch.Tensor]]:
         """Compute cross entropy between multi-codebook targets and model's logits.
         The cross entropy is computed per codebook to provide codebook-level cross entropy.
@@ -218,30 +236,23 @@ class MusicGenSolver(base.StandardSolver):
         timesteps are set to 0.
 
         Args:
-            logits (torch.Tensor): Model's logits of shape [B, K, T, card].
-            targets (torch.Tensor): Target codes, of shape [B, K, T].
-            mask (torch.Tensor): Mask for valid target codes, of shape [B, K, T].
+            logits (torch.Tensor): Model's logits of shape [B, S, I, card].
+            targets (torch.Tensor): Target codes, of shape [B, S, I].
+            
         Returns:
             ce (torch.Tensor): Cross entropy averaged over the codebooks
             ce_per_codebook (list of torch.Tensor): Cross entropy per codebook (detached).
         """
-        B, K, T = targets.shape
+        B, S, I = targets.shape
         assert logits.shape[:-1] == targets.shape
-        assert mask.shape == targets.shape
         ce = torch.zeros([], device=targets.device)
-        ce_per_codebook: tp.List[torch.Tensor] = []
-        for k in range(K):
-            logits_k = logits[:, k, ...].contiguous().view(-1, logits.size(-1))  # [B x T, card]
-            targets_k = targets[:, k, ...].contiguous().view(-1)  # [B x T]
-            mask_k = mask[:, k, ...].contiguous().view(-1)  # [B x T]
-            ce_targets = targets_k[mask_k]
-            ce_logits = logits_k[mask_k]
-            q_ce = F.cross_entropy(ce_logits, ce_targets)
-            ce += q_ce
-            ce_per_codebook.append(q_ce.detach())
-        # average cross entropy across codebooks
-        ce = ce / K
-        return ce, ce_per_codebook
+
+        logits_k = logits.contiguous().view(-1,logits.size(-1))
+        targets_k = targets.view(-1)
+        ce = F.cross_entropy(logits_k, targets_k)
+        # average cross entropy across images
+        ce = ce / I
+        return ce
 
     def _prepare_tokens_and_attributes(
         self, batch: tp.Tuple[torch.Tensor, tp.List[SegmentWithAttributes]],
@@ -362,10 +373,15 @@ class MusicGenSolver(base.StandardSolver):
             torch.cuda.set_sync_debug_mode('warn')
 
         with self.autocast:
-            model_output = self.model.compute_predictions(audio_tokens, [], condition_tensors)  # type: ignore
-            logits = model_output.logits
-            mask = padding_mask & model_output.mask
-            ce, ce_per_codebook = self._compute_cross_entropy(logits, audio_tokens, mask)
+            # dummy input
+            B, _, S = audio_tokens.shape
+            values = torch.tensor([0, 1, 2, 0, 1, 2, 0, 1, 2, 0, 1, 2], dtype=torch.int64)
+            images = values.unsqueeze(0).unsqueeze(0).expand(B, S, -1)
+            images = images.cuda()
+
+            difficulty = torch.zeros(B, 1, dtype=torch.int64).cuda()
+            logits = self.model.compute_predictions(audio_tokens, images, difficulty)  # type: ignore # [B, S, I, card]
+            ce = self._compute_cross_entropy(logits, images)
             loss = ce
         self.deadlock_detect.update('loss')
 
@@ -416,9 +432,6 @@ class MusicGenSolver(base.StandardSolver):
 
         metrics['ce'] = ce
         metrics['ppl'] = torch.exp(ce)
-        for k, ce_q in enumerate(ce_per_codebook):
-            metrics[f'ce_q{k + 1}'] = ce_q
-            metrics[f'ppl_q{k + 1}'] = torch.exp(ce_q)
 
         return metrics
 
@@ -446,34 +459,18 @@ class MusicGenSolver(base.StandardSolver):
             f"Mismatch between number of items in audio batch ({audio.size(0)})",
             f" and in metadata ({len(meta)})"
         )
-        # prepare attributes
-        attributes = [x.to_condition_attributes() for x in meta]
-        # TODO: Add dropout for chroma?
-
-        # prepare audio prompt
-        if prompt_duration is None:
-            prompt_audio = None
-        else:
-            assert prompt_duration < gen_duration, "Prompt duration must be lower than target generation duration"
-            prompt_audio_frames = int(prompt_duration * self.compression_model.sample_rate)
-            prompt_audio = audio[..., :prompt_audio_frames]
-
-        # get audio tokens from compression model
-        if prompt_audio is None or prompt_audio.nelement() == 0:
-            num_samples = len(attributes)
-            prompt_tokens = None
-        else:
-            num_samples = None
-            prompt_audio = prompt_audio.to(self.device)
-            prompt_tokens, scale = self.compression_model.encode(prompt_audio)
-            assert scale is None, "Compression model in MusicGen should not require rescaling."
-
+        
+        #dummy test
+        difficulty = torch.zeros(audio.size(0), 1, dtype=torch.int64).cuda()
+        audio = audio.to(self.device)
+        codes, scale = self.compression_model.encode(audio)
+        assert scale is None, "Compression model in MusicGen should not require rescaling."
         # generate by sampling from the LM
         with self.autocast:
-            total_gen_len = math.ceil(gen_duration * self.compression_model.frame_rate)
+            
             gen_tokens = self.model.generate(
-                prompt_tokens, attributes, max_gen_len=total_gen_len,
-                num_samples=num_samples, **self.generation_params)
+                codes, difficulty, max_gen_len=12,
+                **self.generation_params)
 
         # generate audio from tokens
         assert gen_tokens.dim() == 3
