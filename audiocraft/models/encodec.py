@@ -21,7 +21,7 @@ from transformers import EncodecModel as HFEncodecModel
 
 from .. import quantization as qt
 
-from ..data.audio_utils import convert_audio
+
 
 logger = logging.getLogger()
 
@@ -343,13 +343,6 @@ class HFEncodecCompressionModel(CompressionModel):
         raise NotImplementedError("Forward and training with HF EncodecModel not supported.")
 
     def encode(self, x: torch.Tensor) -> tp.Tuple[torch.Tensor, tp.Optional[torch.Tensor]]:
-        #preprocess x in accordance with BPM
-        #dummy input BPM
-        #假设BPM是120
-        BPM = 120
-        ratio = 375/BPM
-        x = convert_audio(x, self.sample_rate, self.sample_rate/ratio, self.channels)
-
         bandwidth_index = self.possible_num_codebooks.index(self.num_codebooks)
         bandwidth = self.model.config.target_bandwidths[bandwidth_index]
         res = self.model.encode(x, None, bandwidth)

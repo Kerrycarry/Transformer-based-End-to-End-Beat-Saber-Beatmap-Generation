@@ -19,7 +19,7 @@ from . import base, builders
 from .compression import CompressionSolver
 from .. import metrics as eval_metrics
 from .. import models
-from ..data.audio_dataset import AudioDataset
+from ..data.audio_dataset_beatmap import AudioDataset
 from ..data.music_dataset import MusicDataset, MusicInfo, AudioInfo
 from ..data.audio_utils import normalize_audio
 from ..modules.conditioners import JointEmbedCondition, SegmentWithAttributes, WavCondition
@@ -33,10 +33,11 @@ class BeatmapGenSolver(base.StandardSolver):
 
     Used in: https://arxiv.org/abs/2306.05284
     """
-    DATASET_TYPE: builders.DatasetType = builders.DatasetType.MUSIC
+    DATASET_TYPE: builders.DatasetType = builders.DatasetType.BEATMAP
 
     def __init__(self, cfg: omegaconf.DictConfig):
         super().__init__(cfg)
+        self.count =0
         # easier access to sampling parameters
         self.generation_params = {
             'use_sampling': self.cfg.generate.lm.use_sampling,
@@ -162,8 +163,8 @@ class BeatmapGenSolver(base.StandardSolver):
             self.register_stateful('scaler')
         
         #transfer learning
-        with open('model_architecture.txt', 'w') as f:
-            f.write(str(self.model))
+        # with open('model_architecture.txt', 'w') as f:
+        #     f.write(str(self.model))
         # 冻结模型中的所有参数
         for param in self.model.parameters():
             param.requires_grad = False

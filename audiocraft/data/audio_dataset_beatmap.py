@@ -9,6 +9,7 @@ without having to scan again the folders, we precompute some metadata
 """
 import argparse
 import copy
+import requests
 from concurrent.futures import ThreadPoolExecutor, Future
 from dataclasses import dataclass, fields
 from contextlib import ExitStack
@@ -21,6 +22,7 @@ from pathlib import Path
 import random
 import sys
 import typing as tp
+import math
 
 import torch
 import torch.nn.functional as F
@@ -59,9 +61,14 @@ class BaseInfo:
 
 @dataclass(order=True)
 class AudioMeta(BaseInfo):
-    path: str
-    duration: float
+    path: str # path to song
     sample_rate: int
+    difficulty_path: str # path to difficulty
+    difficulty: str
+    bpm: float
+    njs: float
+    njsoffset: float
+    duration: tp.Optional[float] = None
     amplitude: tp.Optional[float] = None
     weight: tp.Optional[float] = None
     # info_path is used to load additional information about the audio file that is stored in zip files.
@@ -85,20 +92,244 @@ class AudioMeta(BaseInfo):
 class SegmentInfo(BaseInfo):
     meta: AudioMeta
     seek_time: float
-    # The following values are given once the audio is processed, e.g.
-    # at the target sample rate and target number of channels.
+    # 这里的frame是八分音符的数量
     n_frames: int      # actual number of frames without padding
     total_frames: int  # total number of frames, padding included
+    # 原始音频对应被抽取的片段的信息
     sample_rate: int   # actual sample rate
     channels: int      # number of audio channels.
 
 
-DEFAULT_EXTS = ['.wav', '.mp3', '.flac', '.ogg', '.m4a']
+@dataclass
+class beatmap_token:
+    tokens: torch.Tensor
+    minimum_note: float # 最小的beat eg 0.125 =>八分音符
+    duration: int # 时间长度 用note的数量计量 eg 100 => 100个八分音符
+    # (posX, posY) => token pos
+    position_map = {(0, 0): 0, (1, 0): 1, (2, 0): 2, (3, 0): 3, (0, 1): 4, (1, 1): 5, (2, 1): 6, (3, 1): 7, (0, 2): 8, (1, 2): 9, (2, 2): 10, (3, 2): 11}
+    position_map_reversed = {value:key for key, value in position_map.items()}
+    # (color, direction) => token id
+    color_note_map = {(0, 0): 0, (0, 1): 1, (0, 2): 2, (0, 3): 3, (0, 4): 4, (0, 5): 5, (0, 6): 6, (0, 7): 7, (0, 8): 8, (1, 0): 10, (1, 1): 11, (1, 2): 12, (1, 3): 13, (1, 4): 14, (1, 5): 15, (1, 6): 16, (1, 7): 17, (1, 8): 18}
+    color_note_map_reversed = {value:key for key, value in color_note_map.items()}
+    # chain, color => tokenid
+    chain_color_map = {0: 9, 1: 19}
+    chain_color_map_reversed = {value:key for key, value in chain_color_map.items()}
+    threadhold_duration_chain = 0.5
+    # bomb
+    bomb_note_id = 22
+    # obstacles
+    obstacle_head_id = 23
+    obstacle_tail_id = 24 # if no tail follows, assume obstacle occupies only one time spot
+    # arc 
+    arc_head_id = 20
+    arc_tail_id = 21
+    # from 0 to 24,
+    token_id_size = 25
+
+    image_length: int = 12
+    unsupported_note = []
+    def time_map(self, time: float):
+        time_after = time / self.minimum_note
+        if time_after.is_integer():
+            return int(time_after)
+        else:
+            return False
+        
+    def tokenize(self, beatmap_origin: json):
+        """
+        :param beatmap data: JSON
+        """
+        self.tokens = torch.full((self.duration, self.image_length), self.token_id_size, dtype=torch.int32)
+        # tokenize color note 
+        for color_note in beatmap_origin['difficulty']['colorNotes']:
+            time_after = self.time_map(color_note['time'])
+            if time_after:
+                token_pos = self.position_map[(color_note['posX'], color_note['posY'])]
+                token_id = self.color_note_map[(color_note['color'], color_note['direction'])]
+                self.tokens[time_after, token_pos] = token_id
+            else:
+                self.unsupported_note.append(color_note)
+        # tokenize chain note 
+        for chain in beatmap_origin['difficulty']['chains']:
+            head_time_after = self.time_map(chain['time'])
+            tail_time_after = self.time_map(chain['tailTime'])
+            if head_time_after and tail_time_after:
+                # 确保head time对应的note存在
+                token_pos = self.position_map[(chain['posX'], chain['posY'])]
+                token_id = self.color_note_map[(chain['color'], chain['direction'])]
+                if self.tokens[head_time_after, token_pos] == token_id:
+                    token_pos = self.position_map[(chain['tailPosX'], chain['tailPosY'])]
+                    self.tokens[tail_time_after, token_pos] = self.chain_color_map[chain['color']]
+                else:
+                    self.unsupported_note.append(chain)
+            else:
+                self.unsupported_note.append(chain)
+        # tokenize bomb note
+        for bomb in beatmap_origin['difficulty']['bombNotes']:
+            time_after = self.time_map(bomb['time'])
+            if time_after:
+                token_pos = self.position_map[(bomb['posX'], bomb['posY'])]
+                token_id = self.bomb_note_id
+                self.tokens[time_after, token_pos] = token_id
+            else:
+                self.unsupported_note.append(bomb)
+        # tokenize obstacle note
+        # for obstacle in beatmap_origin['difficulty']['obstacles']:
+            
+        # tokenize arc note
+        for arc in beatmap_origin['difficulty']['arcs']:
+            head_time_after = self.time_map(arc['time'])
+            tail_time_after = self.time_map(arc['tailTime'])
+            if head_time_after and tail_time_after:
+                # 确保head time和tail time对应的note存在
+                head_token_pos = self.position_map[(arc['posX'], arc['posY'])]
+                head_token_id = self.color_note_map[(arc['color'], arc['direction'])]
+                tail_token_pos = self.position_map[(arc['tailPosX'], arc['tailPosY'])]
+                tail_token_id = self.color_note_map[(arc['color'], arc['tailDirection'])]
+                if self.tokens[head_time_after, head_token_pos] == head_token_id and self.tokens[tail_time_after, tail_token_pos] == tail_token_id:
+                    # 在tail note 后一个时间单位同一个位置添加，先检查是否有note
+                    if self.tokens[head_time_after+1, head_token_pos] == self.token_id_size and self.tokens[tail_time_after-1, tail_token_pos] == self.token_id_size:
+                        self.tokens[head_time_after+1, head_token_pos] = self.arc_head_id
+                        self.tokens[tail_time_after-1, tail_token_pos] = self.arc_tail_id
+                    else:
+                        self.unsupported_note.append((arc, "arc添加的位置已经有note了"))
+                else:
+                    self.unsupported_note.append((arc, "arc的head time和tail time对应的note不存在"))
+            else:
+                self.unsupported_note.append((arc, "时间不是minimum note的倍数"))
+        print("beatmap.unsupported_note:")
+        unsupported_note = [(tuple((key, value) for key, value in sorted(note.items()) if not isinstance(value, dict)),msg) for note, msg in beatmap.unsupported_note]
+        for item, msg in unsupported_note:
+            print(item, msg)
+    def detokenize(self):
+        beatmap_reconstructe = {'difficulty':{}}
+        colorNotes = []
+        chains = []
+        bombNotes = []
+        arcs = []
+        hold_stack = {}
+        
+        for time in range(self.duration):
+            for pos in range(self.image_length):
+                token_id = int(self.tokens[time][pos])
+                time_after = time * self.minimum_note
+                posX, posY = self.position_map_reversed[pos]
+                # look for color note
+                if token_id in self.color_note_map_reversed:
+                    color, direction = self.color_note_map_reversed[token_id]
+                    colorNotes.append({
+                        "color": color,
+                        "direction": direction,
+                        "posX": posX,
+                        "posY": posY,
+                        "time": time_after,
+                        "angleOffset": 0,
+                        "laneRotation": 0,
+                        "customData": {}
+                        })
+                    # look for arc at the same time
+                    if hold_stack and color in hold_stack and self.tokens[time-1][pos] == self.arc_tail_id:
+                        head_color_note = hold_stack.pop(color)
+                        arcs.append({
+                            "color": color,
+                            "time": head_color_note['time'],
+                            "posX": head_color_note['posX'],
+                            "posY": head_color_note['posY'],
+                            "direction": head_color_note['direction'],
+                            "lengthMultiplier": 1,
+                            "tailTime": time_after,
+                            "tailPosX": posX,
+                            "tailPosY": posY,
+                            "tailDirection": direction,
+                            "tailLengthMultiplier": 1,
+                            "midAnchor": 0,
+                            "laneRotation": 0,
+                            "tailLaneRotation": 0,
+                            "customData": {}
+                            })
+                # look for chain note
+                elif token_id in self.chain_color_map_reversed:
+                    color = self.chain_color_map_reversed[token_id]
+                    for color_note in reversed(colorNotes):
+                        if time_after == color_note['time'] or color_note['color'] != color:
+                            continue
+                        elif time_after - color_note['time'] > self.threadhold_duration_chain:
+                            break
+                        chains.append({
+                            "color": color,
+                            "time": color_note['time'],
+                            "posX": color_note['posX'],
+                            "posY": color_note['posY'],
+                            "direction": color_note['direction'],
+                            "tailTime": time_after,
+                            "tailPosX": posX,
+                            "tailPosY": posY,
+                            "sliceCount": 5,
+                            "squish": 1,
+                            "tailLaneRotation": 0,
+                            "laneRotation": 0,
+                            "customData": {}
+                            })
+                # look for bomb note
+                elif token_id == self.bomb_note_id:
+                    bombNotes.append({
+                        "posX": posX,
+                        "posY": posY,
+                        "time": time_after,
+                        "customData": {},
+                        "laneRotation": 0,
+                        "color": -1,
+                        "direction": 0
+                        })
+                # look for arc 
+                elif token_id == self.arc_head_id:
+                    # 遇到arc head token，找上一个时间同一位置的token
+                    for color_note in reversed(colorNotes):
+                        if time_after - color_note['time'] == self.minimum_note and posX == color_note['posX'] and posY == color_note['posY']:
+                            # 放入stack中直到遇到连接着的color note 和arc tail note再处理
+                            hold_stack[color_note['color']] = color_note
+                        elif time_after - color_note['time'] > self.minimum_note:
+                            break
+                
+        
+        beatmap_reconstructe['difficulty']['colorNotes'] = colorNotes
+        beatmap_reconstructe['difficulty']['chains'] = chains
+        beatmap_reconstructe['difficulty']['bombNotes'] = bombNotes
+        beatmap_reconstructe['difficulty']['arcs'] = arcs
+        return beatmap_reconstructe
+
+    def check_difference(self, data: json, note_types = ['colorNotes', 'chains', 'bombNotes', 'arcs']):
+        # data is origin beatmap 
+        for note_type in note_types:
+            data2 = self.detokenize()
+        with open('beatmap_origin.json', 'w') as json_file:
+            json.dump(data['difficulty'][note_type], json_file)
+        with open('beatmap_reconstructed.json', 'w') as json_file:
+            json.dump(data2['difficulty'][note_type], json_file)
+
+        print(data['difficulty'][note_type] == data2['difficulty'][note_type])
+
+        data1 = [tuple((key, float(value) if key == 'time' or key == 'tailTime' else value ) for key, value in sorted(note.items()) if not isinstance(value, dict)) for note in data['difficulty'][note_type]]
+        data2 = [tuple((key, float(value) if key == 'time' or key == 'tailTime' else value ) for key, value in sorted(note.items()) if not isinstance(value, dict)) for note in data2['difficulty'][note_type]]
+        counter1 = set(data1)
+        counter2 = set(data2)
+        if counter1 == counter2:
+            print("两个字典相同")
+        else:
+            print("两个字典不同")
+            print("原始数据 中有而 还原数据 中没有的元素:")
+            for item in counter1 - counter2:
+                print(item)
+            print("还原数据 中有而 原始数据 中没有的元素:")
+            for item in counter2 - counter1:
+                print(item)
+                
+DEFAULT_EXTS = ['.wav', '.mp3', '.flac', '.ogg', '.m4a', '.egg']
 
 logger = logging.getLogger(__name__)
 
 
-def _get_audio_meta(file_path: str, minimal: bool = True) -> AudioMeta:
+def _get_audio_meta(audio_meta: dict) -> AudioMeta:
     """AudioMeta from a path to an audio file.
 
     Args:
@@ -107,12 +338,15 @@ def _get_audio_meta(file_path: str, minimal: bool = True) -> AudioMeta:
     Returns:
         AudioMeta: Audio file path and its metadata.
     """
-    info = audio_info(file_path)
+    info = audio_info(audio_meta['path'])
+    audio_meta['sample_rate'] = info.sample_rate
+    audio_meta['duration'] = info.duration
     amplitude: tp.Optional[float] = None
-    if not minimal:
-        wav, sr = audio_read(file_path)
+    if not audio_meta['minimal']:
+        wav, sr = audio_read(audio_meta['path'])
         amplitude = wav.abs().max().item()
-    return AudioMeta(file_path, info.duration, info.sample_rate, amplitude)
+        audio_meta['amplitude'] = info.amplitude
+    return AudioMeta.from_dict(audio_meta)
 
 
 def _resolve_audio_meta(m: AudioMeta, fast: bool = True) -> AudioMeta:
@@ -142,7 +376,7 @@ def _resolve_audio_meta(m: AudioMeta, fast: bool = True) -> AudioMeta:
     return m
 
 
-def find_audio_files(path: tp.Union[Path, str],
+def find_audio_files(input_meta: tp.List[dict], 
                      exts: tp.List[str] = DEFAULT_EXTS,
                      resolve: bool = True,
                      minimal: bool = True,
@@ -170,29 +404,29 @@ def find_audio_files(path: tp.Union[Path, str],
 
         if progress:
             print("Finding audio files...")
-        for root, folders, files in os.walk(path, followlinks=True):
-            for file in files:
-                full_path = Path(root) / file
-                if full_path.suffix.lower() in exts:
-                    audio_files.append(full_path)
-                    if pool is not None:
-                        futures.append(pool.submit(_get_audio_meta, str(audio_files[-1]), minimal))
-                    if progress:
-                        print(format(len(audio_files), " 8d"), end='\r', file=sys.stderr)
-
+        for item in input_meta:
+            file_path = item['path']
+            full_path = Path(file_path)
+            if full_path.suffix.lower() in exts:
+                item['minimal'] = minimal
+                audio_files.append(item)
+                if pool is not None:
+                    futures.append(pool.submit(_get_audio_meta, audio_files[-1]))
+                if progress:
+                    print(format(len(audio_files), " 8d"), end='\r', file=sys.stderr)
         if progress:
             print("Getting audio metadata...")
         meta: tp.List[AudioMeta] = []
-        for idx, file_path in enumerate(audio_files):
+        for idx, item in enumerate(audio_files):
             try:
                 if pool is None:
-                    m = _get_audio_meta(str(file_path), minimal)
+                    m = _get_audio_meta(item)
                 else:
                     m = futures[idx].result()
                 if resolve:
                     m = _resolve_audio_meta(m)
             except Exception as err:
-                print("Error with", str(file_path), err, file=sys.stderr)
+                print("Error with", str(item), err, file=sys.stderr)
                 continue
             meta.append(m)
             if progress:
@@ -310,6 +544,9 @@ class AudioDataset:
                  shuffle_seed: int = 0,
                  load_wav: bool = True,
                  permutation_on_files: bool = False,
+                 merge_text_p: float = 0,
+                 drop_desc_p: float = 0., 
+                 drop_other_p: float = 0.,
                  ):
         assert len(meta) > 0, "No audio meta provided to AudioDataset. Please check loading of audio meta."
         assert segment_duration is None or segment_duration > 0
@@ -409,55 +646,62 @@ class AudioDataset:
             assert self.segment_duration is not None
             n_frames = int(self.sample_rate * self.segment_duration)
             return torch.zeros(self.channels, n_frames), self.sample_rate
+    
+    def calculate_resample_rate(self, from_rate: float, bpm: float ) -> float:
+        quaver_pre_second = bpm / 60 * 8# 每秒八分音符的数量
+        sample_pre_quaver = from_rate / quaver_pre_second
+        ratio = sample_pre_quaver / 640
+        to_rate = from_rate / ratio
+        return to_rate
 
     def __getitem__(self, index: int) -> tp.Union[torch.Tensor, tp.Tuple[torch.Tensor, SegmentInfo]]:
-        if self.segment_duration is None:
-            file_meta = self.meta[index]
-            out, sr = audio_read(file_meta.path)
-            out = convert_audio(out, sr, self.sample_rate, self.channels)
-            n_frames = out.shape[-1]
-            segment_info = SegmentInfo(file_meta, seek_time=0., n_frames=n_frames, total_frames=n_frames,
-                                       sample_rate=self.sample_rate, channels=out.shape[0])
-        else:
-            rng = torch.Generator()
-            if self.shuffle:
-                # We use index, plus extra randomness, either totally random if we don't know the epoch.
-                # otherwise we make use of the epoch number and optional shuffle_seed.
-                if self.current_epoch is None:
-                    rng.manual_seed(index + self.num_samples * random.randint(0, 2**24))
-                else:
-                    rng.manual_seed(index + self.num_samples * (self.current_epoch + self.shuffle_seed))
+        # 返回抽取的时间点，resample后的整个音频，原始音频对应被抽取的片段，beatmap的片段
+        rng = torch.Generator()
+        if self.shuffle:
+            # We use index, plus extra randomness, either totally random if we don't know the epoch.
+            # otherwise we make use of the epoch number and optional shuffle_seed.
+            if self.current_epoch is None:
+                rng.manual_seed(index + self.num_samples * random.randint(0, 2**24))
             else:
-                # We only use index
-                rng.manual_seed(index)
-
-            for retry in range(self.max_read_retry):
-                file_meta = self.sample_file(index, rng)
-                # We add some variance in the file position even if audio file is smaller than segment
-                # without ending up with empty segments
-                max_seek = max(0, file_meta.duration - self.segment_duration * self.min_segment_ratio)
-                seek_time = torch.rand(1, generator=rng).item() * max_seek
-                try:
-                    out, sr = audio_read(file_meta.path, seek_time, self.segment_duration, pad=False)
-                    out = convert_audio(out, sr, self.sample_rate, self.channels)
-                    n_frames = out.shape[-1]
-                    target_frames = int(self.segment_duration * self.sample_rate)
-                    if self.pad:
-                        out = F.pad(out, (0, target_frames - n_frames))
-                    segment_info = SegmentInfo(file_meta, seek_time, n_frames=n_frames, total_frames=target_frames,
-                                               sample_rate=self.sample_rate, channels=out.shape[0])
-                except Exception as exc:
-                    logger.warning("Error opening file %s: %r", file_meta.path, exc)
-                    if retry == self.max_read_retry - 1:
-                        raise
-                else:
-                    break
-
-        if self.return_info:
-            # Returns the wav and additional information on the wave segment
-            return out, segment_info
+                rng.manual_seed(index + self.num_samples * (self.current_epoch + self.shuffle_seed))
         else:
-            return out
+            # We only use index
+            rng.manual_seed(index)
+        # 随机抽取一个difficulty
+        file_meta = self.sample_file(index, rng)
+        out, sr = audio_read(file_meta.path) 
+        #sample in accordance with BPM so that every 640 samples correspond to a quaver
+        resample_rate = self.calculate_resample_rate(sr, file_meta.bpm)
+        out_in_beat = convert_audio(out, sr, resample_rate, self.channels)
+        duration_in_quaver = math.ceil(out_in_beat.shape[-1]/640) # 音频长度用八分音符的数量来衡量
+        
+        #选择抽取的时间点
+        
+        for retry in range(self.max_read_retry):
+            window = 32
+            duration_in_quaver_window = int(duration_in_quaver /window)
+            segment_duration_window = int(self.segment_duration / window)
+            max_seek = max(0, int(duration_in_quaver_window - segment_duration_window * self.min_segment_ratio))
+            seek_time_in_quaver_window = torch.randint(0, max_seek + 1, (1,), generator=rng).item()  # +1 because randint upper bound is exclusive
+            seek_time_in_quaver = seek_time_in_quaver_window * window
+            #拿原始音频对应被抽取的片段
+            seek_time_in_second = seek_time_in_quaver /8 / file_meta.bpm * 60 
+            segment_duration_in_second = self.segment_duration /8 / file_meta.bpm * 60
+            try:
+                out, sr = audio_read(file_meta.path, seek_time_in_second, segment_duration_in_second, pad=False)
+                # from .audio import audio_write
+                # for idx, one_wav in enumerate(out):
+                #     # Will save under {idx}.wav, with loudness normalization at -14 db LUFS.
+                #     audio_write(f'{idx}', one_wav.cpu(), sr, strategy="loudness", loudness_compressor=True)
+                segment_info = SegmentInfo(file_meta, seek_time_in_quaver, n_frames=duration_in_quaver, total_frames=duration_in_quaver,
+                                               sample_rate=sr, channels=out.shape[0])
+            except Exception as exc:
+                logger.warning("Error opening file %s: %r", file_meta.path, exc)
+                if retry == self.max_read_retry - 1:
+                    raise
+            else:
+                break
+        return
 
     def collater(self, samples):
         """The collater function has to be provided to the dataloader
@@ -558,7 +802,7 @@ class AudioDataset:
             meta = find_audio_files(root, exts, minimal=minimal_meta, resolve=True)
         return cls(meta, **kwargs)
 
-
+url = "http://localhost:8000/read"
 def main():
     logging.basicConfig(stream=sys.stderr, level=logging.INFO)
     parser = argparse.ArgumentParser(
@@ -577,8 +821,27 @@ def main():
     parser.add_argument('--workers',
                         default=10, type=int,
                         help='Number of workers.')
+    parser.add_argument('complex_beat_number', default=0.125, type=float,
+                        help='Output file to store the metadata, ')
+    parser.add_argument('--write_parse_switch', default=False, action=argparse.BooleanOptionalAction)
     args = parser.parse_args()
-    meta = find_audio_files(args.root, DEFAULT_EXTS, progress=True,
+    # use deno api to parse beatmap
+    request_data = {
+        "directory": args.root, 
+        "complex_beat_number": args.complex_beat_number,
+        "write_parse_switch": args.write_parse_switch
+    }
+    response = requests.get(url, params=request_data)
+    if response.status_code == 200:
+        data = response.json()
+        output_meta = data.pop('output_meta', None)  # 提取并删除 output_meta
+
+        print(data)
+
+    else:
+        print(f"Error: {response.status_code}, {response.text}")
+    
+    meta = find_audio_files(output_meta, DEFAULT_EXTS, progress=True,
                             resolve=args.resolve, minimal=args.minimal, workers=args.workers)
     save_audio_meta(args.output_meta_file, meta)
 
