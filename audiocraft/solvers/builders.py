@@ -312,8 +312,8 @@ def get_audio_datasets(cfg: omegaconf.DictConfig,
     max_sample_rate = cfg.datasource.max_sample_rate
     max_channels = cfg.datasource.max_channels
 
-    assert cfg.dataset is not None, "Could not find dataset definition in config"
-
+    assert cfg.dataset is not None, "Could not find dataset definition in config"    
+    
     dataset_cfg = dict_from_config(cfg.dataset)
     splits_cfg: dict = {}
     splits_cfg['train'] = dataset_cfg.pop('train')
@@ -359,7 +359,9 @@ def get_audio_datasets(cfg: omegaconf.DictConfig,
         elif dataset_type == DatasetType.AUDIO:
             dataset = data.info_audio_dataset.InfoAudioDataset.from_meta(path, return_info=return_info, **kwargs)
         elif dataset_type == DatasetType.BEATMAP:
-            dataset = data.audio_dataset_beatmap.AudioDataset.from_meta(path, **kwargs)
+            transformer_lm_kwargs = dict_from_config(getattr(cfg, "transformer_lm"))
+            output_lm_kwargs = transformer_lm_kwargs.pop("output_lm")
+            dataset = data.audio_dataset_beatmap.AudioDataset.from_meta(path,return_info=return_info, **kwargs, token_id_size = output_lm_kwargs['token_id_size'], position_size = output_lm_kwargs['position_size'])
         else:
             raise ValueError(f"Dataset type is unsupported: {dataset_type}")
 

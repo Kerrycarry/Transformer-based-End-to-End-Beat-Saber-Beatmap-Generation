@@ -112,7 +112,7 @@ class ScaledEmbedding(nn.Embedding):
 class LMOutput:
     # The logits are already re-aligned with the input codes
     # hence no extra shift is required, e.g. when computing CE
-    logits: torch.Tensor  # [B, K, T, card]
+    logits: torch.Tensor  # [B, K, T, token_id_size]
     mask: torch.Tensor  # [B, K, T]
 
 
@@ -123,7 +123,7 @@ class OutputLMModel(StreamingModule):
         pattern_provider (CodebooksPatternProvider): Pattern provider for codebook interleaving.
         condition_provider (MusicConditioningProvider): Conditioning provider from metadata.
         fuser (ConditionFuser): Fuser handling the fusing of conditions with language model input.
-        card (int): Cardinality, vocabulary size.
+        token_id_size (int): token_id_size, vocabulary size.
         dim (int): Dimension of the transformer encoder.
         num_heads (int): Number of heads for the transformer encoder.
         hidden_scale (int): Scale for hidden feed forward dimension of the transformer encoder.
@@ -140,7 +140,7 @@ class OutputLMModel(StreamingModule):
         two_step_cfg (bool): Whether to run classifier free-guidance with 2 distinct steps.
         **kwargs: Additional parameters for the transformer encoder.
     """
-    def __init__(self, input_dim: int, card: int = 1024, dim: int = 128, num_heads: int = 8,
+    def __init__(self, input_dim: int, position_size: int, token_id_size: int = 1024, dim: int = 128, num_heads: int = 8,
                  hidden_scale: int = 4, norm: str = 'layer_norm', norm_first: bool = False,
                  emb_lr: tp.Optional[float] = None, bias_proj: bool = True,
                  weight_init: tp.Optional[str] = None, depthwise_init: tp.Optional[str] = None,
@@ -149,8 +149,9 @@ class OutputLMModel(StreamingModule):
                  **kwargs):
         super().__init__()
         self.input_dim = input_dim
-        self.card = card
-        embed_dim = self.card + 1
+        self.position_size = position_size
+        self.token_id_size = token_id_size
+        embed_dim = self.token_id_size + 1
         self.dim = dim
         self.num_heads = num_heads
         self.hidden_scale = hidden_scale
@@ -163,7 +164,7 @@ class OutputLMModel(StreamingModule):
         self.out_norm: tp.Optional[nn.Module] = None
         if norm_first:
             self.out_norm = create_norm_fn(norm, self.dim)
-        self.linear = nn.Linear(self.dim, self.card, bias=bias_proj)
+        self.linear = nn.Linear(self.dim, embed_dim, bias=bias_proj)
         self.input_linear = nn.Linear(self.input_dim, self.dim, bias=bias_proj)
 
         self._init_weights(weight_init, depthwise_init, zero_bias_init)
@@ -209,49 +210,49 @@ class OutputLMModel(StreamingModule):
 
     @property
     def special_token_id(self) -> int:
-        return self.card
+        return self.token_id_size
 
-    def forward(self, image: torch.Tensor,
+    def forward(self, beatmap: torch.Tensor,
                 condition: torch.Tensor,
                 stage: int = -1) -> torch.Tensor:
-        """Apply language model on image and conditions.
-        Given a tensor of image of shape [B*S, I] with S the sequence steps and
-        I the number of images, condition of shape [B* S,1, dim], return the logits with shape [B* S, I, card].
-        1 <=I <=13(12+1)
+        """Apply language model on beatmap and conditions.
+        Given a tensor of beatmap of shape [B*S, P] with S the sequence steps and
+        P the number of beatmap positions, condition of shape [B* S,1, dim], return the logits with shape [B* S, P, token_id_size].
+        1 <=P <=13(12+1)
         """
         
-        input_ = self.emb(image)
+        input_ = self.emb(beatmap)
         cross_attention_input = self.input_linear(condition)
-        #input_ shape [B*S,I,dim], condition shape [B*S, 1, dim]
+        #input_ shape [B*S,P,dim], condition shape [B*S, 1, dim]
         out = self.transformer(input_, cross_attention_src=cross_attention_input,
                                src_mask=(self.attn_mask_per_stage[stage] if stage >= 0 else None))
         if self.out_norm:
             out = self.out_norm(out)
 
-        logits = self.linear(out) #[B*S, I, card]
+        logits = self.linear(out) #[B*S, P, token_id_size]
 
         # remove the prefix from the model outputs
         # if len(self.fuser.fuse2cond['prepend']) > 0:
         #     logits = logits[:, :, -S:]
         
-        return logits  #[B*S, I, card]
+        return logits  #[B*S, P, token_id_size]
 
-    def compute_predictions(self, image: torch.Tensor,
+    def compute_predictions(self, beatmap: torch.Tensor,
                 condition: torch.Tensor,
                 stage: int = -1) -> torch.Tensor:
-        """Given a tensor of image of shape [B, S, I] with S the sequence steps and
-        I the number of images, condition of shape [B, S, dim], return the logits with shape [B, S, I, card].
+        """Given a tensor of beatmap of shape [B, S, P] with S the sequence steps and
+        P the number of beatmap positions, condition of shape [B, S, dim], return the logits with shape [B, S, P, token_id_size].
 
         """
-        B, S, I  = image.shape
-        image = image.view(B*S,I)
-        condition = condition.view(B*S,1,-1)
+        B, S, P  = beatmap.shape
+        beatmap = beatmap.view(B*S,P)
+        condition = condition.reshape(B*S,1,-1)
         prepend_special_token = torch.tensor([[self.special_token_id]] * (B*S)).cuda()
-        image = torch.cat((prepend_special_token, image), dim=1)
+        beatmap = torch.cat((prepend_special_token, beatmap), dim=1)
         model = self if self._fsdp is None else self._fsdp
-        logits = model(image,condition)
+        logits = model(beatmap,condition)
         logits = logits[:,:-1]
-        logits = logits.view(B, S, I, -1)
+        logits = logits.view(B, S, P, -1)
         return logits
 
     def _sample_next_token(self,
@@ -287,7 +288,7 @@ class OutputLMModel(StreamingModule):
         
         logits = model(
             sequence,
-            conditions) # B*S,1, card
+            conditions) # B*S,1, token_id_size
         
         # Apply softmax for sampling if temp > 0. Else, do greedy sampling to avoid zero division error.
         if use_sampling and temp > 0.0:
@@ -344,7 +345,7 @@ class OutputLMModel(StreamingModule):
         device = first_param.device
 
         B, S, _ = conditions.shape
-        conditions = conditions.view(B*S,1,-1)
+        conditions = conditions.reshape(B*S,1,-1)
         unknown_token = -1
         prepend_special_token = torch.tensor([[self.special_token_id]] * (B*S)).cuda()
         gen_codes = torch.full((B*S, max_gen_len), unknown_token, dtype=torch.long, device=device)
@@ -354,7 +355,7 @@ class OutputLMModel(StreamingModule):
         with self.streaming():
             unconditional_state = self.get_streaming_state()
             prev_offset = 0
-            gen_sequence_len = gen_sequence.shape[-1]  # gen_sequence shape is [B*S, I]
+            gen_sequence_len = gen_sequence.shape[-1]  # gen_sequence shape is [B*S, P]
             for offset in range(start_offset_sequence, gen_sequence_len):
                 # get current sequence (note that the streaming API is providing the caching over previous offsets)
                 curr_sequence = gen_sequence[..., prev_offset:offset]
@@ -382,5 +383,6 @@ class OutputLMModel(StreamingModule):
         assert (out_codes[..., :max_gen_len] != unknown_token).all()
         
         # ensure the returned codes are all valid
-        assert (out_codes >= 0).all() and (out_codes <= self.card).all()
+        assert (out_codes >= 0).all() and (out_codes <= self.token_id_size).all()
+        out_codes = out_codes.view(B, S, -1)
         return out_codes

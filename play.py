@@ -1,7 +1,7 @@
 from audiocraft.utils import export
 from audiocraft import train
 
-xp = train.main.get_xp_from_sig('f414f290')
+xp = train.main.get_xp_from_sig('c12ce80a')
 export.export_lm(xp.folder / 'checkpoint.th', '/checkpoints/my_audio_lm/state_dict.bin')
 ## Case 2) you used a pretrained model. Give the name you used without the //pretrained/ prefix.
 ## This will actually not dump the actual model, simply a pointer to the right model to download.
@@ -11,9 +11,10 @@ import audiocraft.models
 from audiocraft.data.audio import audio_write
 model = audiocraft.models.MusicGen.get_pretrained('/checkpoints/my_audio_lm/')
 
-model.set_generation_params(duration=8)  # generate 8 seconds.
+model.set_generation_params(duration=30)  # generate 8 seconds.
 # wav = model.generate_unconditional(4)    # generates 4 unconditional audio samples
-descriptions = ['happy rock', 'energetic EDM', 'sad jazz']
+# descriptions = ['happy rock', 'energetic EDM', 'sad jazz']
+descriptions = ['a cool song from voyager']
 wav = model.generate(descriptions)  # generates 3 samples.
 
 # melody, sr = torchaudio.load('./assets/bach.mp3')

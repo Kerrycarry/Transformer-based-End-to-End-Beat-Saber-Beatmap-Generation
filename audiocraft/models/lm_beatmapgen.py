@@ -228,16 +228,16 @@ class BeatmapLMModel(StreamingModule):
         return self.n_q
 
     def forward(self, sequence: torch.Tensor,
-                image: torch.Tensor,
+                beatmap: torch.Tensor,
                 difficulty: torch.Tensor,
                 # conditions: tp.List[ConditioningAttributes],
                 # condition_tensors: tp.Optional[ConditionTensors] = None,
                 stage: int = -1) -> torch.Tensor:
         """Apply language model on sequence and conditions.
         Given a tensor of sequence of shape [B, K, S] with K the number of codebooks and
-        S the sequence steps, a tensor of image of shape [B, S, I] with S the sequence steps and
-        I the number of images, difficulty with shape [B, 1]
-        return the logits with shape [B, S, I, card].
+        S the sequence steps, a tensor of beatmap of shape [B, S, P] with S the sequence steps and
+        P the number of beatmap positions, difficulty with shape [B, 1]
+        return the logits with shape [B, S, P, card].
         
         Args:
             indices (torch.Tensor): Indices of the codes to model.
@@ -263,14 +263,14 @@ class BeatmapLMModel(StreamingModule):
             out = self.out_norm(out)
         
         out = out[:,4:,:]
-        logits = self.outputLM.compute_predictions(image,out)
+        logits = self.outputLM.compute_predictions(beatmap,out)
         
 
-        return logits  #[B, S, I, card]
+        return logits  #[B, S, P, card]
 
     def compute_predictions(
             self, codes: torch.Tensor,
-            image: torch.Tensor,
+            beatmap: torch.Tensor,
             difficulty: torch.Tensor,
             stage: int = -1,
             keep_only_valid_steps: bool = True):
@@ -308,7 +308,7 @@ class BeatmapLMModel(StreamingModule):
         )
         # apply model on pattern sequence
         model = self if self._fsdp is None else self._fsdp
-        logits = model(sequence_codes, image, difficulty, stage=stage)  # [B, K, S, card]
+        logits = model(sequence_codes, beatmap, difficulty, stage=stage)  # [B, K, S, card]
         
         return logits
 
@@ -411,7 +411,7 @@ class BeatmapLMModel(StreamingModule):
         if self.out_norm:
             out = self.out_norm(out) # [B, S, dim]
         out = out[:,4:,:]
-        out_codes = self.outputLM.generate(out,**kwargs) # [B, S, I]
+        out_codes = self.outputLM.generate(out,**kwargs) # [B, S, P]
 
         return out_codes
         

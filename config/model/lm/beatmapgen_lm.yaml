@@ -41,5 +41,6 @@ transformer_lm:
     num_heads: 1
     num_layers: 4
     hidden_scale: 4
-    card: 3
+    token_id_size: 18
+    position_size: 12
     

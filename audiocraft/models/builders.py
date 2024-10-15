@@ -164,8 +164,10 @@ def get_beatmapgen_lm_model(cfg: omegaconf.DictConfig) -> LMModel:
         outputLM_kwargs['dim'] = temp['dim']
         outputLM_kwargs['num_heads'] = temp['num_heads']
         outputLM_kwargs['num_layers'] = temp['num_layers']
-        outputLM_kwargs['card'] = temp['card']
+        outputLM_kwargs['token_id_size'] = temp['token_id_size']
+        outputLM_kwargs['position_size'] = temp['position_size']
         outputLM_kwargs.pop("n_q")
+        outputLM_kwargs.pop("card")
         return BeatmapLMModel(
             pattern_provider=pattern_provider,
             condition_provider=condition_provider,

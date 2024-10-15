@@ -99,7 +99,7 @@ router.get("/read", async (context) => {
           await Deno.writeTextFile(difficultyPath, jsonData);
         }
         //更新meta, egg, diff json位置，bpm, njs, njsoffset
-        output_meta.push({path: songPath, difficulty_path : difficultyPath, difficulty : difficultyTuple[1], bpm : info.audio.bpm, njs : difficultyTuple[2], njsoffset : difficultyTuple[3]})
+        output_meta.push({path: songPath, beatmap_file_path : difficultyPath, difficulty : difficultyTuple[1], bpm : info.audio.bpm, njs : difficultyTuple[2], njsoffset : difficultyTuple[3]})
         load++;
       }
       

@@ -19,7 +19,7 @@ from . import base, builders
 from .compression import CompressionSolver
 from .. import metrics as eval_metrics
 from .. import models
-from ..data.audio_dataset_beatmap import AudioDataset
+from ..data.audio_dataset_beatmap import AudioDataset, SegmentInfo
 from ..data.music_dataset import MusicDataset, MusicInfo, AudioInfo
 from ..data.audio_utils import normalize_audio
 from ..modules.conditioners import JointEmbedCondition, SegmentWithAttributes, WavCondition
@@ -169,13 +169,14 @@ class BeatmapGenSolver(base.StandardSolver):
         for param in self.model.parameters():
             param.requires_grad = False
 
-        # 仅解冻 outputLM, difficulty_emb, crossattention 的参数
+        # 仅解冻 outputLM, difficulty_emb,  的参数
         for param in self.model.outputLM.parameters():
             param.requires_grad = True
 
         for param in self.model.difficulty_emb.parameters():
             param.requires_grad = True
 
+        # crossattention 在text condition 打开的情况下才解冻
         # for layer in self.model.transformer.layers:
         #     for param in layer.cross_attention.parameters():
         #         param.requires_grad = True
@@ -237,28 +238,46 @@ class BeatmapGenSolver(base.StandardSolver):
         timesteps are set to 0.
 
         Args:
-            logits (torch.Tensor): Model's logits of shape [B, S, I, card].
-            targets (torch.Tensor): Target codes, of shape [B, S, I].
+            logits (torch.Tensor): Model's logits of shape [B, S, P, card].
+            targets (torch.Tensor): Target codes, of shape [B, S, P].
             
         Returns:
             ce (torch.Tensor): Cross entropy averaged over the codebooks
             ce_per_codebook (list of torch.Tensor): Cross entropy per codebook (detached).
         """
-        B, S, I = targets.shape
+        B, S, P = targets.shape
         assert logits.shape[:-1] == targets.shape
         ce = torch.zeros([], device=targets.device)
 
         logits_k = logits.contiguous().view(-1,logits.size(-1))
         targets_k = targets.view(-1)
         ce = F.cross_entropy(logits_k, targets_k)
-        # average cross entropy across images
-        ce = ce / I
+        # average cross entropy across position
+        ce = ce / P
         return ce
-
+    
+    def tokenize_audio_in_beat(self, segment_infos, wav_origin_in_beats):
+        audio_tokens = []
+        for segment_info, wav_origin_in_beat in zip(segment_infos, wav_origin_in_beats):
+            wav_origin_in_beat = wav_origin_in_beat.unsqueeze(0).to(self.device)
+            with torch.no_grad():
+                audio_token, scale = self.compression_model.encode(wav_origin_in_beat)
+                assert scale is None, "Scaled compression model not supported with LM."
+                audio_tokens.append(audio_token[:,:,segment_info.seek_time:segment_info.end_seek_time])
+    
+        audio_tokens = torch.cat(audio_tokens, dim=0)
+        return audio_tokens
+    
+    def tokenize_difficulty(self, segment_infos):
+        difficulty_map = {'Easy': 0, 'Normal': 1, 'Hard': 2, 'Expert': 3, 'ExpertPlus': 4}
+        difficulty = [difficulty_map[segment_info.meta.difficulty] for segment_info in segment_infos]
+        difficulty = torch.tensor(difficulty, dtype=torch.int64).unsqueeze(1).to(self.device)
+        return difficulty
+    
     def _prepare_tokens_and_attributes(
-        self, batch: tp.Tuple[torch.Tensor, tp.List[SegmentWithAttributes]],
+        self, batch: tp.Tuple[tp.List[SegmentInfo], tp.List[torch.Tensor], torch.Tensor],
         check_synchronization_points: bool = False
-    ) -> tp.Tuple[dict, torch.Tensor, torch.Tensor]:
+    ) -> tp.Tuple[torch.Tensor, list, list, torch.Tensor, torch.Tensor]:
         """Prepare input batchs for language model training.
 
         Args:
@@ -271,78 +290,32 @@ class BeatmapGenSolver(base.StandardSolver):
                 with B the batch size, K the number of codebooks, T_s the token timesteps.
             Padding mask (torch.Tensor): Mask with valid positions in the tokens tensor, of shape [B, K, T_s].
         """
-        if self.model.training:
-            warnings.warn(
-                "Up to version 1.0.1, the _prepare_tokens_and_attributes was evaluated with `torch.no_grad()`. "
-                "This is inconsistent with how model were trained in the MusicGen paper. We removed the "
-                "`torch.no_grad()` in version 1.1.0. Small changes to the final performance are expected. "
-                "Really sorry about that.")
+        
         if self._cached_batch_loader is None or self.current_stage != "train":
-            audio, infos = batch
-            audio = audio.to(self.device)
+            segment_infos, wav_origin_in_beats, beatmap_tokens = batch
             audio_tokens = None
-            assert audio.size(0) == len(infos), (
-                f"Mismatch between number of items in audio batch ({audio.size(0)})",
-                f" and in metadata ({len(infos)})"
+            assert len(wav_origin_in_beats) == len(segment_infos) == beatmap_tokens.size(0), (
+                f"Mismatch between number of items in audio batch ({wav_origin_in_beats.size(0)})",
+                f" and in metadata ({len(segment_infos)})"
             )
         else:
-            audio = None
             # In that case the batch will be a tuple coming from the _cached_batch_writer bit below.
-            infos, = batch  # type: ignore
-            assert all([isinstance(info, AudioInfo) for info in infos])
-            assert all([info.audio_tokens is not None for info in infos])  # type: ignore
-            audio_tokens = torch.stack([info.audio_tokens for info in infos]).to(self.device)  # type: ignore
+            segment_infos, = batch  # type: ignore
+            assert all([isinstance(info, SegmentInfo) for info in segment_infos])
+            assert all([info.audio_token is not None for info in segment_infos])  # type: ignore
+            assert all([info.beatmap_token is not None for info in segment_infos])  # type: ignore
+            audio_tokens = torch.stack([info.audio_token for info in segment_infos]).to(self.device)  # type: ignore
+            beatmap_tokens = torch.stack([info.beatmap_token for info in segment_infos]).to(self.device)  # type: ignore
             audio_tokens = audio_tokens.long()
-            for info in infos:
-                if isinstance(info, MusicInfo):
-                    # Careful here, if you want to use this condition_wav (e.b. chroma conditioning),
-                    # then you must be using the chroma cache! otherwise the code will try
-                    # to use this segment and fail (by that I mean you will see NaN everywhere).
-                    info.self_wav = WavCondition(
-                        torch.full([1, info.channels, info.total_frames], float('NaN')),
-                        length=torch.tensor([info.n_frames]),
-                        sample_rate=[info.sample_rate],
-                        path=[info.meta.path],
-                        seek_time=[info.seek_time])
-                    dataset = get_dataset_from_loader(self.dataloaders['original_train'])
-                    assert isinstance(dataset, MusicDataset), type(dataset)
-                    if dataset.paraphraser is not None and info.description is not None:
-                        # Hackingly reapplying paraphraser when using cache.
-                        info.description = dataset.paraphraser.sample_paraphrase(
-                            info.meta.path, info.description)
-        # prepare attributes
-        attributes = [info.to_condition_attributes() for info in infos]
-        attributes = self.model.cfg_dropout(attributes)
-        attributes = self.model.att_dropout(attributes)
-        tokenized = self.model.condition_provider.tokenize(attributes)
+            beatmap_tokens = beatmap_tokens.long()
+        
 
         # Now we should be synchronization free.
         if self.device == "cuda" and check_synchronization_points:
             torch.cuda.set_sync_debug_mode("warn")
 
         if audio_tokens is None:
-            with torch.no_grad():
-                audio_tokens, scale = self.compression_model.encode(audio)
-                assert scale is None, "Scaled compression model not supported with LM."
-
-        with self.autocast:
-            condition_tensors = self.model.condition_provider(tokenized)
-
-        # create a padding mask to hold valid vs invalid positions
-        padding_mask = torch.ones_like(audio_tokens, dtype=torch.bool, device=audio_tokens.device)
-        # replace encodec tokens from padded audio with special_token_id
-        if self.cfg.tokens.padding_with_special_token:
-            audio_tokens = audio_tokens.clone()
-            padding_mask = padding_mask.clone()
-            token_sample_rate = self.compression_model.frame_rate
-            B, K, T_s = audio_tokens.shape
-            for i in range(B):
-                n_samples = infos[i].n_frames
-                audio_sample_rate = infos[i].sample_rate
-                # take the last token generated from actual audio frames (non-padded audio)
-                valid_tokens = math.floor(float(n_samples) / audio_sample_rate * token_sample_rate)
-                audio_tokens[i, :, valid_tokens:] = self.model.special_token_id
-                padding_mask[i, :, valid_tokens:] = 0
+            audio_tokens = self.tokenize_audio_in_beat(segment_infos, wav_origin_in_beats)
 
         if self.device == "cuda" and check_synchronization_points:
             torch.cuda.set_sync_debug_mode("default")
@@ -350,39 +323,37 @@ class BeatmapGenSolver(base.StandardSolver):
         if self._cached_batch_writer is not None and self.current_stage == 'train':
             assert self._cached_batch_loader is None
             assert audio_tokens is not None
-            for info, one_audio_tokens in zip(infos, audio_tokens):
-                assert isinstance(info, AudioInfo)
-                if isinstance(info, MusicInfo):
-                    assert not info.joint_embed, "joint_embed and cache not supported yet."
-                    info.self_wav = None
-                assert one_audio_tokens.max() < 2**15, one_audio_tokens.max().item()
-                info.audio_tokens = one_audio_tokens.short().cpu()
-            self._cached_batch_writer.save(infos)
+            for segment_info, audio_token, beatmap_token in zip(segment_infos, audio_tokens, beatmap_tokens):
+                assert isinstance(segment_info, SegmentInfo)
+                assert audio_token.max() < 2**15, audio_token.max().item()
+                assert beatmap_token.max() < 2**15, beatmap_token.max().item()
+                segment_info.audio_token = audio_token.short().cpu()
+                segment_info.beatmap_token = beatmap_token.short().cpu()
+                
+            self._cached_batch_writer.save(segment_infos)
+        
+        # get difficulty token
+        difficulty = self.tokenize_difficulty(segment_infos)
+        
+        return audio_tokens, beatmap_tokens, difficulty
 
-        return condition_tensors, audio_tokens, padding_mask
-
-    def run_step(self, idx: int, batch: tp.Tuple[torch.Tensor, tp.List[SegmentWithAttributes]], metrics: dict) -> dict:
+    def run_step(self, idx: int, batch: tp.Tuple[tp.List[SegmentInfo], tp.List[torch.Tensor], torch.Tensor], metrics: dict) -> dict:
         """Perform one training or valid step on a given batch."""
         check_synchronization_points = idx == 1 and self.device == 'cuda'
 
-        condition_tensors, audio_tokens, padding_mask = self._prepare_tokens_and_attributes(
+        audio_tokens, beatmap_tokens, difficulty = self._prepare_tokens_and_attributes(
             batch, check_synchronization_points)
 
         self.deadlock_detect.update('tokens_and_conditions')
 
         if check_synchronization_points:
             torch.cuda.set_sync_debug_mode('warn')
-
+        # Debug: Add assertions or print to check the target values
+        assert (beatmap_tokens >= 0).all(), "beatmap_tokens contains negative values!"
+        assert (beatmap_tokens <= self.model.outputLM.token_id_size).all(), f"beatmap_tokens contains invalid class indices! Max target: {beatmap_tokens.max()}"
         with self.autocast:
-            # dummy input
-            B, _, S = audio_tokens.shape
-            values = torch.tensor([0, 1, 2, 0, 1, 2, 0, 1, 2, 0, 1, 2], dtype=torch.int64)
-            images = values.unsqueeze(0).unsqueeze(0).expand(B, S, -1)
-            images = images.cuda()
-
-            difficulty = torch.zeros(B, 1, dtype=torch.int64).cuda()
-            logits = self.model.compute_predictions(audio_tokens, images, difficulty)  # type: ignore # [B, S, I, card]
-            ce = self._compute_cross_entropy(logits, images)
+            logits = self.model.compute_predictions(audio_tokens, beatmap_tokens, difficulty)  # type: ignore # [B, S, P, card]
+            ce = self._compute_cross_entropy(logits, beatmap_tokens)
             loss = ce
         self.deadlock_detect.update('loss')
 
@@ -437,7 +408,7 @@ class BeatmapGenSolver(base.StandardSolver):
         return metrics
 
     @torch.no_grad()
-    def run_generate_step(self, batch: tp.Tuple[torch.Tensor, tp.List[SegmentWithAttributes]],
+    def run_generate_step(self, batch: tp.Tuple[tp.List[SegmentInfo], tp.List[torch.Tensor], torch.Tensor],
                           gen_duration: float, prompt_duration: tp.Optional[float] = None,
                           remove_prompt: bool = False,
                           **generation_params) -> dict:
@@ -455,36 +426,32 @@ class BeatmapGenSolver(base.StandardSolver):
                 and the prompt along with additional information.
         """
         bench_start = time.time()
-        audio, meta = batch
-        assert audio.size(0) == len(meta), (
-            f"Mismatch between number of items in audio batch ({audio.size(0)})",
-            f" and in metadata ({len(meta)})"
-        )
+        segment_infos, wav_origin_in_beats, beatmap_tokens = batch
+        assert len(wav_origin_in_beats) == len(segment_infos) == beatmap_tokens.size(0), (
+                f"Mismatch between number of items in audio batch ({wav_origin_in_beats.size(0)})",
+                f" and in metadata ({len(segment_infos)})"
+            )
         
-        #dummy test
-        difficulty = torch.zeros(audio.size(0), 1, dtype=torch.int64).cuda()
-        audio = audio.to(self.device)
-        codes, scale = self.compression_model.encode(audio)
-        assert scale is None, "Compression model in MusicGen should not require rescaling."
-        # generate by sampling from the LM
+        audio_tokens = self.tokenize_audio_in_beat(segment_infos, wav_origin_in_beats)
+        difficulty = self.tokenize_difficulty(segment_infos)
+
         with self.autocast:
-            
-            gen_tokens = self.model.generate(
-                codes, difficulty, max_gen_len=12,
+            gen_beatmap_tokens = self.model.generate(
+                audio_tokens, difficulty, max_gen_len=self.model.outputLM.position_size,
                 **self.generation_params)
 
         # generate audio from tokens
-        assert gen_tokens.dim() == 3
-        gen_audio = self.compression_model.decode(gen_tokens, None)
-
+        assert gen_beatmap_tokens.dim() == 3
+        
+        ref_audio = [segment_info.wav_origin for segment_info in segment_infos]
+        ref_beatmap_file = [segment_info.beatmap_file for segment_info in segment_infos]
+        gen_beatmap_file = [segment_info.beatmap_class.detokenize(gen_beatmap_token) for gen_beatmap_token, segment_info in zip(gen_beatmap_tokens, segment_infos) ]
         bench_end = time.time()
         gen_outputs = {
             'rtf': (bench_end - bench_start) / gen_duration,
-            'ref_audio': audio,
-            'gen_audio': gen_audio,
-            'gen_tokens': gen_tokens,
-            'prompt_audio': prompt_audio,
-            'prompt_tokens': prompt_tokens,
+            'ref_audio': ref_audio,
+            'ref_beatmap_file': ref_beatmap_file,
+            'gen_beatmap_file': gen_beatmap_file
         }
         return gen_outputs
 
@@ -537,9 +504,10 @@ class BeatmapGenSolver(base.StandardSolver):
         metrics: dict = {}
         average = flashy.averager()
         for batch in lp:
-            audio, meta = batch
+            # audio, meta = batch
             # metadata for sample manager
-            hydrated_conditions = get_hydrated_conditions(meta)
+            # hydrated_conditions = get_hydrated_conditions(meta)
+            hydrated_conditions = []
             sample_generation_params = {
                 **{f'classifier_free_guidance_{k}': v for k, v in self.cfg.classifier_free_guidance.items()},
                 **self.generation_params
@@ -549,28 +517,28 @@ class BeatmapGenSolver(base.StandardSolver):
                     # get the ground truth instead of generation
                     self.logger.warn(
                         "Use ground truth instead of audio generation as generate.lm.gen_gt_samples=true")
-                    gen_unprompted_audio = audio
+                    gen_unprompted_audio = batch.wav_origin
                     rtf = 1.
                 else:
                     gen_unprompted_outputs = self.run_generate_step(
                         batch, gen_duration=target_duration, prompt_duration=None,
                         **self.generation_params)
-                    gen_unprompted_audio = gen_unprompted_outputs['gen_audio'].cpu()
+                    gen_unprompted_audio = wav_origins.cpu()
                     rtf = gen_unprompted_outputs['rtf']
                 sample_manager.add_samples(
                     gen_unprompted_audio, self.epoch, hydrated_conditions,
-                    ground_truth_wavs=audio, generation_args=sample_generation_params)
+                    ground_truth_wavs=gen_unprompted_audio, generation_args=sample_generation_params)
 
-            if self.cfg.generate.lm.prompted_samples:
-                gen_outputs = self.run_generate_step(
-                    batch, gen_duration=target_duration, prompt_duration=prompt_duration,
-                    **self.generation_params)
-                gen_audio = gen_outputs['gen_audio'].cpu()
-                prompt_audio = gen_outputs['prompt_audio'].cpu()
-                sample_manager.add_samples(
-                    gen_audio, self.epoch, hydrated_conditions,
-                    prompt_wavs=prompt_audio, ground_truth_wavs=audio,
-                    generation_args=sample_generation_params)
+            # if self.cfg.generate.lm.prompted_samples:
+            #     gen_outputs = self.run_generate_step(
+            #         batch, gen_duration=target_duration, prompt_duration=prompt_duration,
+            #         **self.generation_params)
+            #     gen_audio = wav_origins.cpu()
+            #     prompt_audio = wav_origins.cpu()
+            #     sample_manager.add_samples(
+            #         gen_audio, self.epoch, hydrated_conditions,
+            #         prompt_wavs=prompt_audio, ground_truth_wavs=audio,
+            #         generation_args=sample_generation_params)
 
             metrics['rtf'] = rtf
             metrics = average(metrics)
