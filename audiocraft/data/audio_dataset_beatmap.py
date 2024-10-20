@@ -61,6 +61,7 @@ class BaseInfo:
 
 @dataclass(order=True)
 class AudioMeta(BaseInfo):
+    id: str
     path: str # path to song
     sample_rate: int
     beatmap_file_path: str # path to beatmap_file

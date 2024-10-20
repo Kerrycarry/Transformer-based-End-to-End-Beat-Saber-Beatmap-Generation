@@ -1,10 +1,12 @@
 //deno run --allow-net --allow-read --allow-write beatmap_parser.ts 
 //deno run --allow-net --allow-read --allow-write beatmap_parser.ts &
 
-import { Application, Router } from "https://deno.land/x/oak/mod.ts";
+import { Application, Router, Request, Response, Context } from "https://deno.land/x/oak/mod.ts";
 import * as bsmap from '../../../BeatSaber-JSMap/src/mod.ts';
 import { join, basename, dirname } from "https://deno.land/std@0.201.0/path/mod.ts";
 import { exists, copy } from "https://deno.land/std/fs/mod.ts";
+
+
 
 
 
@@ -33,15 +35,17 @@ function generateNewDirectoryName(directory: string): string {
   const baseName = basename(directory);
   return join(parentDir, `${baseName}_copy`);
 }
-const router = new Router();
-router.get("/read", async (context) => {
-  const queryParams = context.request.url.searchParams;
+
+export const read = async (
+  { request, response }: { request: Request; response: Response },
+) => {
+  const queryParams = request.url.searchParams;
   const directory = queryParams.get("directory");  // Fetch the 'name' parameter from the URL
   const write_parse_switch: boolean = queryParams.get("write_parse_switch")==="True";
   const complex_beat_number = queryParams.get("complex_beat_number");
   if (!directory) {
-    context.response.status = 400;
-    context.response.body = "Directory path are required.";
+    response.status = 400;
+    response.body = "Directory path are required.";
     return;
   }
   // 自动生成新目录名
@@ -99,7 +103,16 @@ router.get("/read", async (context) => {
           await Deno.writeTextFile(difficultyPath, jsonData);
         }
         //更新meta, egg, diff json位置，bpm, njs, njsoffset
-        output_meta.push({path: songPath, beatmap_file_path : difficultyPath, difficulty : difficultyTuple[1], bpm : info.audio.bpm, njs : difficultyTuple[2], njsoffset : difficultyTuple[3]})
+        const regex = /^[a-zA-Z0-9]+/;
+        const match = dir.name.match(regex);
+        let id
+        if (match) {
+          id = match[0]
+        }
+        else{
+          id = dir.name
+        }
+        output_meta.push({id: id, path: songPath, beatmap_file_path : difficultyPath, difficulty : difficultyTuple[1], bpm : info.audio.bpm, njs : difficultyTuple[2], njsoffset : difficultyTuple[3]})
         load++;
       }
       
@@ -110,8 +123,8 @@ router.get("/read", async (context) => {
   }
 
   // summary
-  context.response.status = 200;
-  context.response.body = { 
+  response.status = 200;
+  response.body = { 
     dir_num : directories.length,
     total_num : load+fail_dir_error.length+fail_audio_offset.length+fail_bpm_events.length+fail_complex_beats.length,
     load : load,
@@ -125,8 +138,62 @@ router.get("/read", async (context) => {
     fail_complex_beats: fail_complex_beats,
     output_meta: output_meta // 直接将 output_meta 数据添加到响应体中
    };
+}
+export const generate_difficulty = async (
+  { request, response }: { request: Request; response: Response },
+) => {
+  const queryParams = request.url.searchParams;
+  const filePath = queryParams.get("beatmap_file_path")||'';
+  const difficulty = queryParams.get("difficulty")|| '';
+  const save_directory = queryParams.get("save_directory")|| '';
+  const version = parseInt(queryParams.get("version")||'3');
+
+  // bsmap.globals.directory = save_directory|| '';
+  let parsedDifficulty, difficultyFile
+  try {
+    difficultyFile = await Deno.readTextFile(filePath);
+  } catch (error) {    
+    response.status = 400;
+    response.body = { error: "JSON not found" };
+    return;
+  }
+  try {
+    parsedDifficulty = JSON.parse(difficultyFile); // Parse the string as JSON
+  } catch (error) {    
+    response.status = 400;
+    response.body = { error: "Invalid JSON format" };
+    return;
+  }
+  const difficultyData = new bsmap.Beatmap
+  parsedDifficulty.difficulty.colorNotes.forEach((colorNote: any) => {
+      const colorNotes = bsmap.ColorNote.create(colorNote);
+      difficultyData.colorNotes.push(...colorNotes);
+    });
+  const name_mapping: { [key: string]: string } = {
+    "Easy": "EasyStandard.dat",
+    "Normal": "NormalStandard.dat",
+    "Hard": "HardStandard.dat",
+    "Expert": "ExpertStandard.dat",
+    "ExpertPlus": "ExpertPlusStandard.dat"
+  };
+  await bsmap.writeDifficultyFile(difficultyData, version, {
+    directory: save_directory,
+    filename: name_mapping[difficulty]
+  });
+
+  response.status = 200;
+  response.body = {
+    success: true
+  };
+};
+
+const router = new Router();
+router
+.get("/read", read)
+.get("/generate_difficulty", generate_difficulty)
   
-});
+
+
 
 const app = new Application();
 app.use(router.routes());

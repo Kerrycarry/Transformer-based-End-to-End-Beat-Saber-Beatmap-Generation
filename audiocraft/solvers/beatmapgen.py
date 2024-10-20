@@ -24,7 +24,7 @@ from ..data.music_dataset import MusicDataset, MusicInfo, AudioInfo
 from ..data.audio_utils import normalize_audio
 from ..modules.conditioners import JointEmbedCondition, SegmentWithAttributes, WavCondition
 from ..utils.cache import CachedBatchWriter, CachedBatchLoader
-from ..utils.samples.manager import SampleManager
+from ..utils.samples.manager_beatmap import SampleManager
 from ..utils.utils import get_dataset_from_loader, is_jsonable, warn_once, model_hash
 
 
@@ -446,12 +446,16 @@ class BeatmapGenSolver(base.StandardSolver):
         ref_audio = [segment_info.wav_origin for segment_info in segment_infos]
         ref_beatmap_file = [segment_info.beatmap_file for segment_info in segment_infos]
         gen_beatmap_file = [segment_info.beatmap_class.detokenize(gen_beatmap_token) for gen_beatmap_token, segment_info in zip(gen_beatmap_tokens, segment_infos) ]
+        sample_id = [f"{segment_info.meta.id}_{segment_info.meta.difficulty}_{segment_info.seek_time}_{segment_info.end_seek_time}" for segment_info in segment_infos]
+        meta = [segment_info.meta for segment_info in segment_infos]
         bench_end = time.time()
         gen_outputs = {
             'rtf': (bench_end - bench_start) / gen_duration,
             'ref_audio': ref_audio,
             'ref_beatmap_file': ref_beatmap_file,
-            'gen_beatmap_file': gen_beatmap_file
+            'gen_beatmap_file': gen_beatmap_file,
+            'sample_id': sample_id,
+            'meta': meta
         }
         return gen_outputs
 
@@ -517,29 +521,16 @@ class BeatmapGenSolver(base.StandardSolver):
                     # get the ground truth instead of generation
                     self.logger.warn(
                         "Use ground truth instead of audio generation as generate.lm.gen_gt_samples=true")
-                    gen_unprompted_audio = batch.wav_origin
                     rtf = 1.
                 else:
                     gen_unprompted_outputs = self.run_generate_step(
                         batch, gen_duration=target_duration, prompt_duration=None,
                         **self.generation_params)
-                    gen_unprompted_audio = wav_origins.cpu()
                     rtf = gen_unprompted_outputs['rtf']
                 sample_manager.add_samples(
-                    gen_unprompted_audio, self.epoch, hydrated_conditions,
-                    ground_truth_wavs=gen_unprompted_audio, generation_args=sample_generation_params)
-
-            # if self.cfg.generate.lm.prompted_samples:
-            #     gen_outputs = self.run_generate_step(
-            #         batch, gen_duration=target_duration, prompt_duration=prompt_duration,
-            #         **self.generation_params)
-            #     gen_audio = wav_origins.cpu()
-            #     prompt_audio = wav_origins.cpu()
-            #     sample_manager.add_samples(
-            #         gen_audio, self.epoch, hydrated_conditions,
-            #         prompt_wavs=prompt_audio, ground_truth_wavs=audio,
-            #         generation_args=sample_generation_params)
-
+                    gen_unprompted_outputs['sample_id'],
+                    gen_unprompted_outputs['ref_audio'], gen_unprompted_outputs['meta'], self.epoch,
+                    gen_unprompted_outputs['ref_beatmap_file'], gen_unprompted_outputs['gen_beatmap_file'], hydrated_conditions, generation_args=sample_generation_params)
             metrics['rtf'] = rtf
             metrics = average(metrics)
 

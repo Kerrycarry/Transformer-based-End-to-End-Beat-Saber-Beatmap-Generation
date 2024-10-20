@@ -32,6 +32,8 @@ import uuid
 import dora
 import torch
 
+import requests
+
 from ...data.audio import audio_read, audio_write
 
 
@@ -191,54 +193,29 @@ class SampleManager:
             return existing_paths[0]
 
         audio_path = audio_write(stem_path, wav, **self.xp.cfg.generate.audio)
-        return audio_path
+        return audio_path     
+    
+    def add_sample(self, save_directory, audio, meta, beatmap):
+        song_name = 'song'
+        audio_write(save_directory / song_name, audio, meta.sample_rate, format="ogg")
+        with open((save_directory / meta.difficulty).with_suffix('.json'), 'w', encoding='utf-8') as f:
+            json.dump(beatmap, f, ensure_ascii=False, indent=2)
+        
+        url = "http://localhost:8000/generate_difficulty"
+        request_data = {
+            "beatmap_file_path": (save_directory / meta.difficulty).with_suffix('.json'),
+            "difficulty": meta.difficulty,
+            "save_directory": save_directory,
+            "version": 3
+        }
+        response = requests.get(url, params=request_data)
+        if response.status_code != 200:
+            print(f"Error: {response.status_code}, {response.text}")
 
-    def add_sample(self, sample_wav: torch.Tensor, epoch: int, index: int = 0,
-                   conditions: tp.Optional[tp.Dict[str, str]] = None, prompt_wav: tp.Optional[torch.Tensor] = None,
-                   ground_truth_wav: tp.Optional[torch.Tensor] = None,
-                   generation_args: tp.Optional[tp.Dict[str, tp.Any]] = None) -> Sample:
-        """Adds a single sample.
-        The sample is stored in the XP's sample output directory, under a corresponding epoch folder.
-        Each sample is assigned an id which is computed using the input data. In addition to the
-        sample itself, a json file containing associated metadata is stored next to it.
-
-        Args:
-            sample_wav (torch.Tensor): sample audio to store. Tensor of shape [channels, shape].
-            epoch (int): current training epoch.
-            index (int): helpful to differentiate samples from the same batch.
-            conditions (dict[str, str], optional): conditioning used during generation.
-            prompt_wav (torch.Tensor, optional): prompt used during generation. Tensor of shape [channels, shape].
-            ground_truth_wav (torch.Tensor, optional): reference audio where prompt was extracted from.
-                Tensor of shape [channels, shape].
-            generation_args (dict[str, any], optional): dictionary of other arguments used during generation.
-        Returns:
-            Sample: The saved sample.
-        """
-        sample_id = self._get_sample_id(index, prompt_wav, conditions)
-        reuse_id = self.map_reference_to_sample_id
-        prompt, ground_truth = None, None
-        if prompt_wav is not None:
-            prompt_id = sample_id if reuse_id else self._get_tensor_id(prompt_wav.sum(0, keepdim=True))
-            prompt_duration = prompt_wav.shape[-1] / self.xp.cfg.sample_rate
-            prompt_path = self._store_audio(prompt_wav, self.base_folder / str(epoch) / 'prompt' / prompt_id)
-            prompt = ReferenceSample(prompt_id, str(prompt_path), prompt_duration)
-        if ground_truth_wav is not None:
-            ground_truth_id = sample_id if reuse_id else self._get_tensor_id(ground_truth_wav.sum(0, keepdim=True))
-            ground_truth_duration = ground_truth_wav.shape[-1] / self.xp.cfg.sample_rate
-            ground_truth_path = self._store_audio(ground_truth_wav, self.base_folder / 'reference' / ground_truth_id)
-            ground_truth = ReferenceSample(ground_truth_id, str(ground_truth_path), ground_truth_duration)
-        sample_path = self._store_audio(sample_wav, self.base_folder / str(epoch) / sample_id, overwrite=True)
-        duration = sample_wav.shape[-1] / self.xp.cfg.sample_rate
-        sample = Sample(sample_id, str(sample_path), epoch, duration, conditions, prompt, ground_truth, generation_args)
-        self.samples.append(sample)
-        with open(sample_path.with_suffix('.json'), 'w') as f:
-            json.dump(asdict(sample), f, indent=2)
-        return sample
-
-    def add_samples(self, samples_wavs: torch.Tensor, epoch: int,
+    def add_samples(self, sample_ids: list, audios: list, metas: list, epoch: int,
+                    ground_truth_beatmaps: list,
+                    gen_beatmaps: list,
                     conditioning: tp.Optional[tp.List[tp.Dict[str, tp.Any]]] = None,
-                    prompt_wavs: tp.Optional[torch.Tensor] = None,
-                    ground_truth_wavs: tp.Optional[torch.Tensor] = None,
                     generation_args: tp.Optional[tp.Dict[str, tp.Any]] = None) -> tp.List[Sample]:
         """Adds a batch of samples.
         The samples are stored in the XP's sample output directory, under a corresponding
@@ -246,25 +223,23 @@ class SampleManager:
         In addition to the sample itself, a json file containing associated metadata is stored next to it.
 
         Args:
-            sample_wavs (torch.Tensor): Batch of audio wavs to store. Tensor of shape [batch_size, channels, shape].
+            audio (list): Reference audio where prompts were extracted from.
+                Tensor of shape [batch_size, channels, shape].
             epoch (int): Current training epoch.
+            ground_truth_beatmap (list): list of beatmap file. list
+            gen_beatmap (list): list of generated beatmap file. list
             conditioning (list of dict[str, str], optional): List of conditions used during generation,
                 one per sample in the batch.
-            prompt_wavs (torch.Tensor, optional): Prompts used during generation. Tensor of shape
-                [batch_size, channels, shape].
-            ground_truth_wav (torch.Tensor, optional): Reference audio where prompts were extracted from.
-                Tensor of shape [batch_size, channels, shape].
             generation_args (dict[str, Any], optional): Dictionary of other arguments used during generation.
-        Returns:
-            samples (list of Sample): The saved audio samples with prompts, ground truth and metadata.
         """
-        samples = []
-        for idx, wav in enumerate(samples_wavs):
-            prompt_wav = prompt_wavs[idx] if prompt_wavs is not None else None
-            gt_wav = ground_truth_wavs[idx] if ground_truth_wavs is not None else None
-            conditions = conditioning[idx] if conditioning is not None else None
-            samples.append(self.add_sample(wav, epoch, idx, conditions, prompt_wav, gt_wav, generation_args))
-        return samples
+        
+        for index, (sample_id, audio, meta, ground_truth_beatmap, gen_beatmap) in enumerate(zip(sample_ids, audios, metas, ground_truth_beatmaps, gen_beatmaps)):
+            sample_id = f"{epoch}-{index}_{sample_id}"
+            reference_path = self.base_folder / 'reference' / sample_id
+            generated_path = self.base_folder / 'generated' / sample_id
+            self.add_sample(reference_path, audio, meta, ground_truth_beatmap)
+            self.add_sample(generated_path, audio, meta, gen_beatmap)
+            
 
     def get_samples(self, epoch: int = -1, max_epoch: int = -1, exclude_prompted: bool = False,
                     exclude_unprompted: bool = False, exclude_conditioned: bool = False,
