@@ -206,7 +206,9 @@ class SampleManager:
             "beatmap_file_path": (save_directory / meta.difficulty).with_suffix('.json'),
             "difficulty": meta.difficulty,
             "save_directory": save_directory,
-            "version": 3
+            "beatmap_info_path": meta.beatmap_info_path,
+            "difficulty_version": 3, # 1,2,3,4
+            'info_version': 2 # 2,4
         }
         response = requests.get(url, params=request_data)
         if response.status_code != 200:

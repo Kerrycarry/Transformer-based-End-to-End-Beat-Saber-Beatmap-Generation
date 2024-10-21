@@ -42,7 +42,7 @@ export const read = async (
   const queryParams = request.url.searchParams;
   const directory = queryParams.get("directory");  // Fetch the 'name' parameter from the URL
   const write_parse_switch: boolean = queryParams.get("write_parse_switch")==="True";
-  const complex_beat_number = queryParams.get("complex_beat_number");
+  const complex_beat_number = parseFloat(queryParams.get("complex_beat_number")||"0.125");
   if (!directory) {
     response.status = 400;
     response.body = "Directory path are required.";
@@ -112,7 +112,7 @@ export const read = async (
         else{
           id = dir.name
         }
-        output_meta.push({id: id, path: songPath, beatmap_file_path : difficultyPath, difficulty : difficultyTuple[1], bpm : info.audio.bpm, njs : difficultyTuple[2], njsoffset : difficultyTuple[3]})
+        output_meta.push({id: id, beatmap_info_path: join(dir.fullPath, info_path), song_path: songPath, beatmap_file_path : difficultyPath, difficulty : difficultyTuple[1], bpm : info.audio.bpm, njs : difficultyTuple[2], njsoffset : difficultyTuple[3]})
         load++;
       }
       
@@ -146,8 +146,9 @@ export const generate_difficulty = async (
   const filePath = queryParams.get("beatmap_file_path")||'';
   const difficulty = queryParams.get("difficulty")|| '';
   const save_directory = queryParams.get("save_directory")|| '';
-  const version = parseInt(queryParams.get("version")||'3');
-
+  const difficulty_version = parseInt(queryParams.get("difficulty_version")||'3');
+  const beatmapInfoPath = queryParams.get("beatmap_info_path")||'';
+  const info_version = parseInt(queryParams.get("info_version")||'2');
   // bsmap.globals.directory = save_directory|| '';
   let parsedDifficulty, difficultyFile
   try {
@@ -169,17 +170,23 @@ export const generate_difficulty = async (
       const colorNotes = bsmap.ColorNote.create(colorNote);
       difficultyData.colorNotes.push(...colorNotes);
     });
-  const name_mapping: { [key: string]: string } = {
-    "Easy": "EasyStandard.dat",
-    "Normal": "NormalStandard.dat",
-    "Hard": "HardStandard.dat",
-    "Expert": "ExpertStandard.dat",
-    "ExpertPlus": "ExpertPlusStandard.dat"
-  };
-  await bsmap.writeDifficultyFile(difficultyData, version, {
+  await bsmap.writeDifficultyFile(difficultyData, difficulty_version, {
     directory: save_directory,
-    filename: name_mapping[difficulty]
+    filename: difficulty+"Standard.dat"
   });
+
+  //move info
+  bsmap.globals.directory = dirname(beatmapInfoPath)
+  const info = bsmap.readInfoFileSync(basename(beatmapInfoPath)); 
+  // writeInfoFileSync(info)
+  info.audio.filename = "song.ogg"
+  info.difficulties = info.difficulties.filter(difficulty => difficulty.characteristic === 'Standard' && difficulty.difficulty === 'Expert')
+  info.difficulties[0].filename = difficulty+"Standard.dat"
+
+  await bsmap.writeInfoFile(info, info_version, {
+    directory: save_directory,
+    filename: 'Info.dat'
+  })
 
   response.status = 200;
   response.body = {

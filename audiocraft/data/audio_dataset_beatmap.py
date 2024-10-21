@@ -62,7 +62,8 @@ class BaseInfo:
 @dataclass(order=True)
 class AudioMeta(BaseInfo):
     id: str
-    path: str # path to song
+    beatmap_info_path: str
+    song_path: str # path to song
     sample_rate: int
     beatmap_file_path: str # path to beatmap_file
     difficulty: str
@@ -385,12 +386,12 @@ def _get_audio_meta(audio_meta: dict) -> AudioMeta:
     Returns:
         AudioMeta: Audio file path and its metadata.
     """
-    info = audio_info(audio_meta['path'])
+    info = audio_info(audio_meta['song_path'])
     audio_meta['sample_rate'] = info.sample_rate
     audio_meta['duration'] = info.duration
     amplitude: tp.Optional[float] = None
     if not audio_meta['minimal']:
-        wav, sr = audio_read(audio_meta['path'])
+        wav, sr = audio_read(audio_meta['song_path'])
         amplitude = wav.abs().max().item()
         audio_meta['amplitude'] = info.amplitude
     return AudioMeta.from_dict(audio_meta)
@@ -416,12 +417,14 @@ def _resolve_audio_meta(m: AudioMeta, fast: bool = True) -> AudioMeta:
     if not dora:
         return m
 
-    if not is_abs(m.path):
-        m.path = dora.git_save.to_absolute_path(m.path)
+    if not is_abs(m.song_path):
+        m.song_path = dora.git_save.to_absolute_path(m.song_path)
     if not is_abs(m.beatmap_file_path):
         m.beatmap_file_path = dora.git_save.to_absolute_path(m.beatmap_file_path)
+    if not is_abs(m.beatmap_info_path):
+        m.beatmap_info_path = dora.git_save.to_absolute_path(m.beatmap_info_path)
     if m.info_path is not None and not is_abs(m.info_path.zip_path):
-        m.info_path.zip_path = dora.git_save.to_absolute_path(m.path)
+        m.info_path.zip_path = dora.git_save.to_absolute_path(m.song_path)
     return m
 
 
@@ -454,7 +457,7 @@ def find_audio_files(input_meta: tp.List[dict],
         if progress:
             print("Finding audio files...")
         for item in input_meta:
-            file_path = item['path']
+            file_path = item['song_path']
             full_path = Path(file_path)
             if full_path.suffix.lower() in exts:
                 item['minimal'] = minimal
@@ -724,7 +727,7 @@ class AudioDataset:
         duration_in_quaver = 0
         while(duration_in_quaver < self.segment_duration):
             file_meta = self.sample_file(index, rng)
-            out_origin, sr = audio_read(file_meta.path) 
+            out_origin, sr = audio_read(file_meta.song_path) 
             #sample in accordance with BPM so that every 640 samples correspond to a quaver
             resample_rate = self.calculate_resample_rate(sr, file_meta.bpm)
             out_origin_in_beat = convert_audio(out_origin, sr, resample_rate, self.channels)
@@ -742,7 +745,7 @@ class AudioDataset:
             seek_time_in_second = seek_time_in_quaver /8 / file_meta.bpm * 60 
             segment_duration_in_second = self.segment_duration /8 / file_meta.bpm * 60
             try:
-                out_origin, sr = audio_read(file_meta.path, seek_time_in_second, segment_duration_in_second, pad=False)
+                out_origin, sr = audio_read(file_meta.song_path, seek_time_in_second, segment_duration_in_second, pad=False)
                 # 测试对齐
                 # from .audio import audio_write
                 # for idx, one_wav in enumerate(out_origin):
@@ -763,7 +766,7 @@ class AudioDataset:
                 segment_info = SegmentInfo(file_meta, seek_time_in_quaver, seek_time_in_quaver + self.segment_duration, n_frames=duration_in_quaver, total_frames=duration_in_quaver,
                                                sample_rate=sr, channels=out_origin.shape[0], wav_origin=out_origin, beatmap_file=beatmap_file, beatmap_class=beatmap)
             except Exception as exc:
-                logger.warning("Error opening file %s or %s, %r", file_meta.path, file_meta.beatmap_file_path, exc)
+                logger.warning("Error opening file %s or %s, %r", file_meta.song_path, file_meta.beatmap_file_path, exc)
                 if retry == self.max_read_retry - 1:
                     raise
             else:

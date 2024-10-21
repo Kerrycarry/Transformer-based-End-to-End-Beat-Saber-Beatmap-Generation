@@ -62,7 +62,7 @@ def _soundfile_info(filepath: tp.Union[str, Path]) -> AudioFileInfo:
 def audio_info(filepath: tp.Union[str, Path]) -> AudioFileInfo:
     # torchaudio no longer returns useful duration informations for some formats like mp3s.
     filepath = Path(filepath)
-    if filepath.suffix in ['.flac', '.ogg']:  # TODO: Validate .ogg can be safely read with av_info
+    if filepath.suffix in ['.flac', '.ogg', '.egg']:  # TODO: Validate .ogg can be safely read with av_info
         # ffmpeg has some weird issue with flac.
         return _soundfile_info(filepath)
     else:
