@@ -132,7 +132,7 @@ class Beatmap:
             "basicEventTypesWithKeywords": {"list": []},
             "useNormalEventsAsCompatibleEvents": True
         }
-    unsupported_note = []
+
     def sample_beatmap_file(self, beatmap: json, seek_time_in_quaver: int, end_time_in_quaver: int):
         colorNotes = []
         chains = []
@@ -140,8 +140,8 @@ class Beatmap:
         arcs = []
         obstacles = []
         for color_note in beatmap['difficulty']['colorNotes']:
-            time_after = self.time_map(color_note['time'])
-            if time_after and time_after >= seek_time_in_quaver and time_after < end_time_in_quaver:
+            is_integer, time_after = self.time_map(color_note['time'])
+            if is_integer and time_after >= seek_time_in_quaver and time_after < end_time_in_quaver:
                 color_note['time'] = color_note['time'] - seek_time_in_quaver * self.minimum_note
                 colorNotes.append(color_note)
         beatmap['difficulty']['colorNotes'] = colorNotes
@@ -156,24 +156,25 @@ class Beatmap:
     def time_map(self, time: float):
         time_after = time / self.minimum_note
         if time_after.is_integer():
-            return int(time_after)
+            return True, int(time_after)
         else:
-            return False
+            return False, time_after
         
     def tokenize(self, beatmap_origin: json) -> torch.Tensor:
         """
         :param beatmap data: JSON
         """
+        unsupported_note = []
         token = torch.full((self.duration, self.position_size), self.token_id_size, dtype=torch.int64).cuda()
         # tokenize color note 
         for color_note in beatmap_origin['difficulty']['colorNotes']:
-            time_after = self.time_map(color_note['time'])
-            if time_after:
+            is_integer, time_after = self.time_map(color_note['time'])
+            if is_integer:
                 token_pos = self.position_map[(color_note['posX'], color_note['posY'])]
                 token_id = self.color_note_map[(color_note['color'], color_note['direction'])]
                 token[time_after, token_pos] = token_id
             else:
-                self.unsupported_note.append((color_note, "时间不是minimum note的倍数"))
+                unsupported_note.append((color_note, "时间不是minimum note的倍数"))
         # tokenize chain note 
         # for chain in beatmap_origin['difficulty']['chains']:
         #     head_time_after = self.time_map(chain['time'])
@@ -186,9 +187,9 @@ class Beatmap:
         #             token_pos = self.position_map[(chain['tailPosX'], chain['tailPosY'])]
         #             token[tail_time_after, token_pos] = self.chain_color_map[chain['color']]
         #         else:
-        #             self.unsupported_note.append(chain)
+        #             unsupported_note.append(chain)
         #     else:
-        #         self.unsupported_note.append(chain)
+        #         unsupported_note.append(chain)
         # # tokenize bomb note
         # for bomb in beatmap_origin['difficulty']['bombNotes']:
         #     time_after = self.time_map(bomb['time'])
@@ -197,7 +198,7 @@ class Beatmap:
         #         token_id = self.bomb_note_id
         #         token[time_after, token_pos] = token_id
         #     else:
-        #         self.unsupported_note.append(bomb)
+        #         unsupported_note.append(bomb)
         # # tokenize obstacle note
         # # for obstacle in beatmap_origin['difficulty']['obstacles']:
             
@@ -217,13 +218,13 @@ class Beatmap:
         #                 token[head_time_after+1, head_token_pos] = self.arc_head_id
         #                 token[tail_time_after-1, tail_token_pos] = self.arc_tail_id
         #             else:
-        #                 self.unsupported_note.append((arc, "arc添加的位置已经有note了"))
+        #                 unsupported_note.append((arc, "arc添加的位置已经有note了"))
         #         else:
-        #             self.unsupported_note.append((arc, "arc的head time和tail time对应的note不存在"))
+        #             unsupported_note.append((arc, "arc的head time和tail time对应的note不存在"))
         #     else:
-        #         self.unsupported_note.append((arc, "时间不是minimum note的倍数"))
-        print("number of beatmap.unsupported_note:", len(self.unsupported_note))
-        unsupported_note = [(tuple((key, value) for key, value in sorted(note.items()) if not isinstance(value, dict)),msg) for note, msg in self.unsupported_note]
+        #         unsupported_note.append((arc, "时间不是minimum note的倍数"))
+        # print("number of beatmap.unsupported_note:", len(unsupported_note))
+        unsupported_note = [(tuple((key, value) for key, value in sorted(note.items()) if not isinstance(value, dict)),msg) for note, msg in unsupported_note]
         # for item, msg in unsupported_note:
         #     print(item, msg)
         return token
@@ -725,6 +726,7 @@ class AudioDataset:
             rng.manual_seed(index)
         # 随机抽取一个beatmap_file
         duration_in_quaver = 0
+        count = 0
         while(duration_in_quaver < self.segment_duration):
             file_meta = self.sample_file(index, rng)
             out_origin, sr = audio_read(file_meta.song_path) 
@@ -732,7 +734,8 @@ class AudioDataset:
             resample_rate = self.calculate_resample_rate(sr, file_meta.bpm)
             out_origin_in_beat = convert_audio(out_origin, sr, resample_rate, self.channels)
             duration_in_quaver = math.ceil(out_origin_in_beat.shape[-1]/640) # 音频长度用八分音符的数量来衡量
-
+            count = count + 1
+            # print("sampling, attempted ", count)
         #选择抽取的时间点
         for retry in range(self.max_read_retry):
             window = 32

@@ -33,6 +33,9 @@ import dora
 import torch
 
 import requests
+import zipfile
+import os
+
 
 from ...data.audio import audio_read, audio_write
 
@@ -195,7 +198,23 @@ class SampleManager:
         audio_path = audio_write(stem_path, wav, **self.xp.cfg.generate.audio)
         return audio_path     
     
-    def add_sample(self, save_directory, audio, meta, beatmap):
+    def zip_folder(self, source_folder, zip_file):
+        # 确保zip文件的父目录存在
+        output_folder = os.path.dirname(zip_file)
+        if not os.path.exists(output_folder):
+            os.makedirs(output_folder)
+        
+        # 创建zip文件
+        with zipfile.ZipFile(zip_file, 'w', zipfile.ZIP_DEFLATED) as zipf:
+            # 遍历源文件夹及其子文件夹
+            for root, dirs, files in os.walk(source_folder):
+                for file in files:
+                    # 计算相对路径并写入zip文件
+                    file_path = os.path.join(root, file)
+                    relative_path = os.path.relpath(file_path, source_folder)
+                    zipf.write(file_path, relative_path)
+
+    def add_sample(self, save_directory, audio, meta, beatmap, save_directory_zip, sample_id):
         song_name = 'song'
         audio_write(save_directory / song_name, audio, meta.sample_rate, format="ogg")
         with open((save_directory / meta.difficulty).with_suffix('.json'), 'w', encoding='utf-8') as f:
@@ -207,12 +226,14 @@ class SampleManager:
             "difficulty": meta.difficulty,
             "save_directory": save_directory,
             "beatmap_info_path": meta.beatmap_info_path,
+            "beatmap_name": sample_id,
             "difficulty_version": 3, # 1,2,3,4
             'info_version': 2 # 2,4
         }
         response = requests.get(url, params=request_data)
         if response.status_code != 200:
             print(f"Error: {response.status_code}, {response.text}")
+        self.zip_folder(save_directory, save_directory_zip.with_suffix('.zip'))
 
     def add_samples(self, sample_ids: list, audios: list, metas: list, epoch: int,
                     ground_truth_beatmaps: list,
@@ -239,9 +260,10 @@ class SampleManager:
             sample_id = f"{epoch}-{index}_{sample_id}"
             reference_path = self.base_folder / 'reference' / sample_id
             generated_path = self.base_folder / 'generated' / sample_id
-            self.add_sample(reference_path, audio, meta, ground_truth_beatmap)
-            self.add_sample(generated_path, audio, meta, gen_beatmap)
-            
+            reference_path_zip = self.base_folder / 'reference_zip' / sample_id
+            generated_path_zip = self.base_folder / 'generated_zip' / sample_id
+            self.add_sample(reference_path, audio, meta, ground_truth_beatmap, reference_path_zip, sample_id)
+            self.add_sample(generated_path, audio, meta, gen_beatmap, generated_path_zip, sample_id)
 
     def get_samples(self, epoch: int = -1, max_epoch: int = -1, exclude_prompted: bool = False,
                     exclude_unprompted: bool = False, exclude_conditioned: bool = False,

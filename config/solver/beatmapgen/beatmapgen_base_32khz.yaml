@@ -4,9 +4,11 @@
 # for the base MusicGen model (text-to-music)
 # on monophonic audio sampled at 32 kHz
 defaults:
-  - musicgen/default
-  - /model: lm/musicgen_lm
-  - override /dset: audio/default
+  - beatmapgen/default
+  - /model: lm/beatmapgen_lm
+  # - override /dset: audio/default
+  # - override /model/lm/model_scale: xsmall
+  - override /dset: audio/bs_rank
   - _self_
 
 autocast: true
@@ -25,24 +27,46 @@ deadlock:
   use: true  # deadlock detection
 
 dataset:
-  batch_size: 192  # 32 GPUs
+  batch_size: 2  # 32 GPUs
+  segment_duration: 1536 # 1536个八分音符
   sample_on_weight: false  # Uniform sampling all the way
   sample_on_duration: false  # Uniform sampling all the way
+  min_segment_ratio: 1
+  valid:
+    num_samples: 10
+  generate:
+    num_samples: 2
+  evaluate:
+    num_samples: 0
+  num_workers: 2
+
+
+evaluate:
+  metrics:
+    kld: false
+
+metrics:
+  kld:
+    use_gt: false
+    model: passt
+    passt:
+      pretrained_length: 20
 
 generate:
   lm:
     use_sampling: true
-    top_k: 250
+    top_k: 4
     top_p: 0.0
+  
 
 optim:
-  epochs: 500
+  epochs: 50
   optimizer: dadam
-  lr: 1
+  lr: 1e-6
   ema:
     use: true
     updates: 10
-    device: cuda
+    device: cpu
 
 logging:
   log_tensorboard: true
@@ -50,6 +74,9 @@ logging:
 schedule:
   lr_scheduler: cosine
   cosine:
-    warmup: 4000
+    warmup: 100
     lr_min_ratio: 0.0
     cycle_length: 1.0
+
+tensorboard:
+  name: debug_test

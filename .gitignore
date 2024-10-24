@@ -59,3 +59,7 @@ dataset/*
 /notebooks
 /local_scripts
 /notes
+
+# beatmapgen log
+/beatmapgen_log_dora_output.txt
+/beatmapgen_log_parser_api_output.txt

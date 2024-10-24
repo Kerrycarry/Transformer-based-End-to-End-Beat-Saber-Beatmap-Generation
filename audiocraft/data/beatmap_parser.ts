@@ -149,6 +149,7 @@ export const generate_difficulty = async (
   const difficulty_version = parseInt(queryParams.get("difficulty_version")||'3');
   const beatmapInfoPath = queryParams.get("beatmap_info_path")||'';
   const info_version = parseInt(queryParams.get("info_version")||'2');
+  const beatmapName = queryParams.get("beatmap_name")||'';
   // bsmap.globals.directory = save_directory|| '';
   let parsedDifficulty, difficultyFile
   try {
@@ -179,6 +180,7 @@ export const generate_difficulty = async (
   bsmap.globals.directory = dirname(beatmapInfoPath)
   const info = bsmap.readInfoFileSync(basename(beatmapInfoPath)); 
   // writeInfoFileSync(info)
+  info.song.title = beatmapName
   info.audio.filename = "song.ogg"
   info.difficulties = info.difficulties.filter(difficulty => difficulty.characteristic === 'Standard' && difficulty.difficulty === 'Expert')
   info.difficulties[0].filename = difficulty+"Standard.dat"
