@@ -61,5 +61,6 @@ dataset/*
 /notes
 
 # beatmapgen log
-/beatmapgen_log_dora_output.txt
-/beatmapgen_log_parser_api_output.txt
+/beatmapgen_log_dora.txt
+/beatmapgen_log_parser_api.txt
+/beatmapgen_log.txt

@@ -33,9 +33,9 @@ dataset:
   sample_on_duration: false  # Uniform sampling all the way
   min_segment_ratio: 1
   valid:
-    num_samples: 10
-  generate:
     num_samples: 2
+  generate:
+    num_samples: 4
   evaluate:
     num_samples: 0
   num_workers: 2
@@ -53,6 +53,7 @@ metrics:
       pretrained_length: 20
 
 generate:
+  every: 1
   lm:
     use_sampling: true
     top_k: 4
@@ -60,7 +61,8 @@ generate:
   
 
 optim:
-  epochs: 50
+  epochs: 6
+  updates_per_epoch: 200
   optimizer: dadam
   lr: 1e-6
   ema:

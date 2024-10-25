@@ -97,7 +97,7 @@ class SampleManager:
         self.reference_folder = self.base_folder / 'reference'
         self.map_reference_to_sample_id = map_reference_to_sample_id
         self.samples: tp.List[Sample] = []
-        self._load_samples()
+        # self._load_samples()
 
     @property
     def latest_epoch(self):
