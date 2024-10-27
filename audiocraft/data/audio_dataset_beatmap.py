@@ -328,31 +328,30 @@ class Beatmap:
         beatmap_reconstructe["lightshow"] = self.empty_light
         return beatmap_reconstructe
 
-    def check_difference(self, data: json, note_types = ['colorNotes', 'chains', 'bombNotes', 'arcs']):
+    def check_difference(self, data: json, data2: json, note_types = ['colorNotes', 'chains', 'bombNotes', 'arcs']):
         # data is origin beatmap 
         for note_type in note_types:
-            data2 = self.detokenize()
-        with open('beatmap_origin.json', 'w') as json_file:
-            json.dump(data['difficulty'][note_type], json_file)
-        with open('beatmap_reconstructed.json', 'w') as json_file:
-            json.dump(data2['difficulty'][note_type], json_file)
+            with open('beatmap_origin.json', 'w') as json_file:
+                json.dump(data['difficulty'][note_type], json_file)
+            with open('beatmap_reconstructed.json', 'w') as json_file:
+                json.dump(data2['difficulty'][note_type], json_file)
 
-        print(data['difficulty'][note_type] == data2['difficulty'][note_type])
+            print(data['difficulty'][note_type] == data2['difficulty'][note_type])
 
-        data1 = [tuple((key, float(value) if key == 'time' or key == 'tailTime' else value ) for key, value in sorted(note.items()) if not isinstance(value, dict)) for note in data['difficulty'][note_type]]
-        data2 = [tuple((key, float(value) if key == 'time' or key == 'tailTime' else value ) for key, value in sorted(note.items()) if not isinstance(value, dict)) for note in data2['difficulty'][note_type]]
-        counter1 = set(data1)
-        counter2 = set(data2)
-        if counter1 == counter2:
-            print("两个字典相同")
-        else:
-            print("两个字典不同")
-            print("原始数据 中有而 还原数据 中没有的元素:")
-            for item in counter1 - counter2:
-                print(item)
-            print("还原数据 中有而 原始数据 中没有的元素:")
-            for item in counter2 - counter1:
-                print(item)
+            data1 = [tuple((key, float(value) if key == 'time' or key == 'tailTime' else value ) for key, value in sorted(note.items()) if not isinstance(value, dict)) for note in data['difficulty'][note_type]]
+            data2 = [tuple((key, float(value) if key == 'time' or key == 'tailTime' else value ) for key, value in sorted(note.items()) if not isinstance(value, dict)) for note in data2['difficulty'][note_type]]
+            counter1 = set(data1)
+            counter2 = set(data2)
+            if counter1 == counter2:
+                print("两个字典相同")
+            else:
+                print("两个字典不同")
+                print("原始数据 中有而 还原数据 中没有的元素:")
+                for item in counter1 - counter2:
+                    print(item)
+                print("还原数据 中有而 原始数据 中没有的元素:")
+                for item in counter2 - counter1:
+                    print(item)
                 
 @dataclass(order=True)
 class SegmentInfo(BaseInfo):

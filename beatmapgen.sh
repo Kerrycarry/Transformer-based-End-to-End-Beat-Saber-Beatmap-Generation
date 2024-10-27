@@ -83,7 +83,7 @@ elif [[ "$1" == "-3" ]]; then
     run_python_process
     stop_parser_api
 elif [[ "$1" == "-4" ]]; then
-    for PROCESS in deno dora python
+    for PROCESS in deno dora
     do
         kill_process "$PROCESS"
     done

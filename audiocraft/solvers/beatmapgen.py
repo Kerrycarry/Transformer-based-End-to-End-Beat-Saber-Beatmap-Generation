@@ -252,8 +252,6 @@ class BeatmapGenSolver(base.StandardSolver):
         logits_k = logits.contiguous().view(-1,logits.size(-1))
         targets_k = targets.view(-1)
         ce = F.cross_entropy(logits_k, targets_k)
-        # average cross entropy across position
-        ce = ce / P
         return ce
     
     def tokenize_audio_in_beat(self, segment_infos, wav_origin_in_beats):

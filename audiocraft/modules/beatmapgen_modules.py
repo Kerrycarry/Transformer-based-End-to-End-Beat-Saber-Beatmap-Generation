@@ -246,12 +246,12 @@ class OutputLMModel(StreamingModule):
         """
         B, S, P  = beatmap.shape
         beatmap = beatmap.view(B*S,P)
+        beatmap = beatmap[:,:-1]
         condition = condition.reshape(B*S,1,-1)
         prepend_special_token = torch.tensor([[self.special_token_id]] * (B*S)).cuda()
         beatmap = torch.cat((prepend_special_token, beatmap), dim=1)
         model = self if self._fsdp is None else self._fsdp
         logits = model(beatmap,condition)
-        logits = logits[:,:-1]
         logits = logits.view(B, S, P, -1)
         return logits
 

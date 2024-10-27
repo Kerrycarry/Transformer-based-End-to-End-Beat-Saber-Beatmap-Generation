@@ -64,11 +64,11 @@ optim:
   epochs: 6
   updates_per_epoch: 200
   optimizer: dadam
-  lr: 1e-6
+  lr: 1
   ema:
     use: true
     updates: 10
-    device: cpu
+    device: cuda
 
 logging:
   log_tensorboard: true
@@ -77,8 +77,8 @@ schedule:
   lr_scheduler: cosine
   cosine:
     warmup: 100
-    lr_min_ratio: 0.0
-    cycle_length: 1.0
+    lr_min_ratio: 1e-5
+    cycle_length: 0.5
 
 tensorboard:
   name: debug_test
