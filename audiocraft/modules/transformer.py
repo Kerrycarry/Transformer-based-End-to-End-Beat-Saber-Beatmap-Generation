@@ -25,6 +25,7 @@ from xformers import ops
 from .rope import RotaryEmbedding
 from .streaming import StreamingModule
 
+import math
 _efficient_attention_backend: str = 'torch'
 
 
@@ -166,6 +167,7 @@ class StreamingMultiheadAttention(StreamingModule):
                  memory_efficient: bool = False, attention_as_float32: bool = False,
                  rope: tp.Optional[RotaryEmbedding] = None, cross_attention: bool = False,
                  safe_streaming: bool = True, qk_layer_norm: bool = False, kv_repeat: int = 1,
+                 use_lora: bool = True, lora_r: int = 8, lora_alpha: int = 16,
                  device=None, dtype=None):
         super().__init__()
         factory_kwargs = {'device': device, 'dtype': dtype}
@@ -183,6 +185,9 @@ class StreamingMultiheadAttention(StreamingModule):
         self.num_heads = num_heads
         self.dropout = dropout
         self.kv_repeat = kv_repeat
+        self.use_lora = use_lora
+        self.lora_r = lora_r
+        self.lora_alpha = lora_alpha
         if cross_attention:
             assert not causal, "Causal cannot work with cross attention."
             assert rope is None, "Rope cannot work with cross attention."
@@ -207,6 +212,11 @@ class StreamingMultiheadAttention(StreamingModule):
             self.out_proj = nn.Linear(embed_dim, embed_dim, bias=bias, **factory_kwargs)
             if bias:
                 self.out_proj.bias.data.zero_()
+            if self.use_lora:
+                self.lora_in_proj_a = nn.Parameter(torch.empty((embed_dim, self.lora_r)))
+                self.lora_in_proj_b = nn.Parameter(torch.zeros((self.lora_r, out_dim)))
+                nn.init.kaiming_uniform_(self.lora_in_proj_a, a=math.sqrt(5))
+
         else:
             assert not qk_layer_norm
             assert kv_repeat == 1
@@ -355,6 +365,14 @@ class StreamingMultiheadAttention(StreamingModule):
                 # todo: when streaming, we could actually save k, v and check the shape actually match.
                 k = nn.functional.linear(key, self.in_proj_weight[dim: 2 * dim], bias_k)
                 v = nn.functional.linear(value, self.in_proj_weight[2 * dim:], bias_v)
+                if self.use_lora:
+                    lora_query_output = query @ ((self.lora_in_proj_a @ self.lora_in_proj_b[:, :dim]) * self.lora_alpha / self.lora_r)
+                    lora_key_output = key @ ((self.lora_in_proj_a @ self.lora_in_proj_b[:, dim: 2 * dim]) * self.lora_alpha / self.lora_r)
+                    lora_value_output = value @ ((self.lora_in_proj_a @ self.lora_in_proj_b[:, 2 * dim:]) * self.lora_alpha / self.lora_r)
+                    q += lora_query_output
+                    k += lora_key_output
+                    v += lora_value_output
+
                 if self.qk_layer_norm is True:
                     q = self.q_layer_norm(q)
                     k = self.k_layer_norm(k)
@@ -365,6 +383,9 @@ class StreamingMultiheadAttention(StreamingModule):
                     assert query is key, "specialized implementation"
                     assert value is key, "specialized implementation"
                 projected = nn.functional.linear(query, self.in_proj_weight, self.in_proj_bias)
+                if self.use_lora:
+                    lora_output=query@((self.lora_in_proj_a@self.lora_in_proj_b)*self.lora_alpha/self.lora_r)
+                    projected += lora_output
                 if self.kv_repeat == 1:
                     if time_dim == 2:
                         bound_layout = "b h p t d"
@@ -485,7 +506,7 @@ class StreamingTransformerLayer(nn.TransformerEncoderLayer):
         dtype (torch.dtype, optional): dtype to use.
         **kwargs: See `nn.TransformerEncoderLayer`.
     """
-    def __init__(self, d_model: int, num_heads: int, dim_feedforward: int = 2048, dropout: float = 0.1,
+    def __init__(self, d_model: int, num_heads: int, lora: dict, dim_feedforward: int = 2048, dropout: float = 0.1,
                  bias_ff: bool = True, bias_attn: bool = True, causal: bool = False,
                  past_context: tp.Optional[int] = None, custom: bool = False,
                  memory_efficient: bool = False, attention_as_float32: bool = False,
@@ -508,7 +529,7 @@ class StreamingTransformerLayer(nn.TransformerEncoderLayer):
         }
         self.self_attn: StreamingMultiheadAttention = StreamingMultiheadAttention(
             causal=causal, past_context=past_context, rope=rope, qk_layer_norm=qk_layer_norm,
-            kv_repeat=kv_repeat, **attn_kwargs, **factory_kwargs)  # type: ignore
+            kv_repeat=kv_repeat, **lora, **attn_kwargs, **factory_kwargs)  # type: ignore
         # Redefine feedforward layers to expose bias parameter
         self.linear1 = nn.Linear(d_model, dim_feedforward, bias=bias_ff, **factory_kwargs)
         self.linear2 = nn.Linear(dim_feedforward, d_model, bias=bias_ff, **factory_kwargs)

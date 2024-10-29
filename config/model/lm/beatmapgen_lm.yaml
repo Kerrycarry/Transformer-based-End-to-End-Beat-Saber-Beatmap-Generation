@@ -43,4 +43,8 @@ transformer_lm:
     hidden_scale: 4
     token_id_size: 18
     position_size: 12
-    
+  
+  lora: 
+    use_lora: True
+    lora_r: 8
+    lora_alpha: 1

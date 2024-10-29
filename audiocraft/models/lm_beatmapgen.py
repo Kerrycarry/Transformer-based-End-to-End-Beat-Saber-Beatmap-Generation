@@ -236,7 +236,7 @@ class BeatmapLMModel(StreamingModule):
         """Apply language model on sequence and conditions.
         Given a tensor of sequence of shape [B, K, S] with K the number of codebooks and
         S the sequence steps, a tensor of beatmap of shape [B, S, P] with S the sequence steps and
-        P the number of beatmap positions, difficulty with shape [B, 1]
+        P the number of beatmap positions, difficulty with shape [B]
         return the logits with shape [B, S, P, card].
         
         Args:
@@ -256,7 +256,8 @@ class BeatmapLMModel(StreamingModule):
         assert K == self.num_codebooks, "Sequence shape must match the specified number of codebooks"
         input_ = sum([self.emb[k](sequence[:, k]) for k in range(K)]) # batch, sequence, dim
         
-        cross_attention_input = self.difficulty_emb(difficulty) # [B, 1, dim]
+        input_[:, 0, :] += self.difficulty_emb(difficulty)
+        cross_attention_input = torch.zeros(B, 1, self.dim).cuda()
         out = self.transformer(input_, cross_attention_src=cross_attention_input,
                                src_mask=(self.attn_mask_per_stage[stage] if stage >= 0 else None))
         if self.out_norm:
@@ -405,7 +406,8 @@ class BeatmapLMModel(StreamingModule):
         assert K == self.num_codebooks, "Sequence shape must match the specified number of codebooks"
         input_ = sum([self.emb[k](sequence_codes[:, k]) for k in range(K)]) # batch, sequence, dim
 
-        cross_attention_input = self.difficulty_emb(difficulty) # [B, 1, dim]
+        input_[:, 0, :] += self.difficulty_emb(difficulty)
+        cross_attention_input = torch.zeros(B, 1, self.dim).cuda()
         out = self.transformer(input_, cross_attention_src=cross_attention_input,
                                src_mask=(self.attn_mask_per_stage[stage] if stage >= 0 else None))
         if self.out_norm:

@@ -163,11 +163,17 @@ class BeatmapGenSolver(base.StandardSolver):
             self.register_stateful('scaler')
         
         #transfer learning
-        # with open('model_architecture.txt', 'w') as f:
-        #     f.write(str(self.model))
+        with open('model_architecture.txt', 'w') as f:
+            f.write(str(self.model))
+        with open('model_architecture2.txt', 'w') as f:
+            for n, m in self.model.named_modules():
+                f.write(f'{n}: {type(m).__name__}\n')
         # 冻结模型中的所有参数
-        for param in self.model.parameters():
-            param.requires_grad = False
+        for name,param in self.model.named_parameters():
+            if name.split('.')[-1] not in ['lora_in_proj_a','lora_in_proj_b']:  # 非LOra部分不计算梯度
+                param.requires_grad=False
+            else:
+                param.requires_grad=True
 
         # 仅解冻 outputLM, difficulty_emb,  的参数
         for param in self.model.outputLM.parameters():
@@ -175,11 +181,6 @@ class BeatmapGenSolver(base.StandardSolver):
 
         for param in self.model.difficulty_emb.parameters():
             param.requires_grad = True
-
-        # crossattention 在text condition 打开的情况下才解冻
-        # for layer in self.model.transformer.layers:
-        #     for param in layer.cross_attention.parameters():
-        #         param.requires_grad = True
 
     def build_dataloaders(self) -> None:
         """Instantiate audio dataloaders for each stage."""
@@ -269,7 +270,7 @@ class BeatmapGenSolver(base.StandardSolver):
     def tokenize_difficulty(self, segment_infos):
         difficulty_map = {'Easy': 0, 'Normal': 1, 'Hard': 2, 'Expert': 3, 'ExpertPlus': 4}
         difficulty = [difficulty_map[segment_info.meta.difficulty] for segment_info in segment_infos]
-        difficulty = torch.tensor(difficulty, dtype=torch.int64).unsqueeze(1).to(self.device)
+        difficulty = torch.tensor(difficulty, dtype=torch.int64).to(self.device)
         return difficulty
     
     def _prepare_tokens_and_attributes(
