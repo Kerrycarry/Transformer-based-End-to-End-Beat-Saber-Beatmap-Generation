@@ -96,9 +96,10 @@ class AudioMeta(BaseInfo):
 @dataclass
 class Beatmap:
     minimum_note: float # 最小的beat eg 0.125 =>八分音符
-    duration: int # 时间长度 用note的数量计量 eg 100 => 100个八分音符
+    duration: int # 时间长度 second为单位
     token_id_size: int # 以后记得更改！
     position_size: int
+    code_rate: int = 50
     # (posX, posY) => token pos
     position_map = {(0, 0): 0, (1, 0): 1, (2, 0): 2, (3, 0): 3, (0, 1): 4, (1, 1): 5, (2, 1): 6, (3, 1): 7, (0, 2): 8, (1, 2): 9, (2, 2): 10, (3, 2): 11}
     position_map_reversed = {value:key for key, value in position_map.items()}
@@ -154,25 +155,32 @@ class Beatmap:
         return beatmap
     
     def time_map(self, time: float):
+        # 返回note的时值，例如一个全音符=>8，两个=>16
         time_after = time / self.minimum_note
         if time_after.is_integer():
             return True, int(time_after)
         else:
             return False, time_after
         
-    def tokenize(self, beatmap_origin: json) -> torch.Tensor:
+    def tokenize(self, beatmap_origin: json, bpm: float) -> torch.Tensor:
         """
         :param beatmap data: JSON
         """
+        code_duration = self.duration * self.code_rate
+        during_in_note = self.duration / 60 * bpm
+        #从0到during_in_note的所有八分音符，ex 0, 1/8, 2/8,......
+        note = [x * self.minimum_note for x in range(int(during_in_note / self.minimum_note))]
+        note_code_map = [round(x * 60 / bpm * self.code_rate) for x in note]
         unsupported_note = []
-        token = torch.full((self.duration, self.position_size), self.token_id_size, dtype=torch.int64).cuda()
+        token = torch.full((code_duration, self.position_size), self.token_id_size, dtype=torch.int64).cuda()
         # tokenize color note 
         for color_note in beatmap_origin['difficulty']['colorNotes']:
             is_integer, time_after = self.time_map(color_note['time'])
+            code = note_code_map[time_after]
             if is_integer:
                 token_pos = self.position_map[(color_note['posX'], color_note['posY'])]
                 token_id = self.color_note_map[(color_note['color'], color_note['direction'])]
-                token[time_after, token_pos] = token_id
+                token[code, token_pos] = token_id
             else:
                 unsupported_note.append((color_note, "时间不是minimum note的倍数"))
         # tokenize chain note 
@@ -227,7 +235,7 @@ class Beatmap:
         unsupported_note = [(tuple((key, value) for key, value in sorted(note.items()) if not isinstance(value, dict)),msg) for note, msg in unsupported_note]
         # for item, msg in unsupported_note:
         #     print(item, msg)
-        return token
+        return token, note_code_map
     def detokenize(self, tokens: torch.Tensor):
         beatmap_reconstructe = {'difficulty':{}}
         colorNotes = []
@@ -237,7 +245,8 @@ class Beatmap:
         obstacles = []
         hold_stack = {}
         
-        for time in range(self.duration):
+        length = tokens.shape[0]
+        for time in range(length):
             for pos in range(self.position_size):
                 token_id = int(tokens[time][pos])
                 time_after = time * self.minimum_note
@@ -319,7 +328,6 @@ class Beatmap:
                 #         elif time_after - color_note['time'] > self.minimum_note:
                 #             break
                 
-        
         beatmap_reconstructe['difficulty']['colorNotes'] = colorNotes
         beatmap_reconstructe['difficulty']['chains'] = chains
         beatmap_reconstructe['difficulty']['bombNotes'] = bombNotes
@@ -330,48 +338,49 @@ class Beatmap:
 
     def check_difference(self, data: json, data2: json, note_types = ['colorNotes', 'chains', 'bombNotes', 'arcs']):
         # data is origin beatmap 
+        output = ""
         for note_type in note_types:
-            with open('beatmap_origin.json', 'w') as json_file:
-                json.dump(data['difficulty'][note_type], json_file)
-            with open('beatmap_reconstructed.json', 'w') as json_file:
-                json.dump(data2['difficulty'][note_type], json_file)
-
-            print(data['difficulty'][note_type] == data2['difficulty'][note_type])
+            # with open('beatmap_origin.json', 'w') as json_file:
+            #     json.dump(data['difficulty'][note_type], json_file)
+            # with open('beatmap_reconstructed.json', 'w') as json_file:
+            #     json.dump(data2['difficulty'][note_type], json_file)
+            output += f"比较{note_type}\n"
+            output += f"直接比较: {data['difficulty'][note_type] == data2['difficulty'][note_type]}\n"
 
             data1 = [tuple((key, float(value) if key == 'time' or key == 'tailTime' else value ) for key, value in sorted(note.items()) if not isinstance(value, dict)) for note in data['difficulty'][note_type]]
             data2 = [tuple((key, float(value) if key == 'time' or key == 'tailTime' else value ) for key, value in sorted(note.items()) if not isinstance(value, dict)) for note in data2['difficulty'][note_type]]
             counter1 = set(data1)
             counter2 = set(data2)
+
             if counter1 == counter2:
-                print("两个字典相同")
+                output += "两个字典相同\n"
             else:
-                print("两个字典不同")
-                print("原始数据 中有而 还原数据 中没有的元素:")
+                output += "两个字典不同\n"
+                output += "原始数据中有而还原数据中没有的元素:\n"
                 for item in counter1 - counter2:
-                    print(item)
-                print("还原数据 中有而 原始数据 中没有的元素:")
+                    output += f"{item}\n"
+                output += "还原数据中有而原始数据中没有的元素:\n"
                 for item in counter2 - counter1:
-                    print(item)
-                
+                    output += f"{item}\n"
+        return output
+
 @dataclass(order=True)
 class SegmentInfo(BaseInfo):
     meta: AudioMeta
-    # 这里的time是八分音符的数量来计算
+    # seek time in resample frame 
     seek_time: int 
-    end_seek_time: int
-    # 这里的frame是八分音符的数量
     n_frames: int      # actual number of frames without_origin padding
     total_frames: int  # total number of frames, padding included
-    # 原始音频对应被抽取的片段的信息
     sample_rate: int   # actual sample rate
     channels: int      # number of audio channels.
 
-    wav_origin: torch.Tensor
-    beatmap_file: list
+    wav_slice: torch.Tensor
+    beatmap_file: json
     beatmap_class: Beatmap
+    note_code_map: list
     audio_token: tp.Optional[torch.Tensor] = None
     beatmap_token: tp.Optional[torch.Tensor] = None
-
+    
 DEFAULT_EXTS = ['.wav', '.mp3', '.flac', '.ogg', '.m4a', '.egg']
 
 logger = logging.getLogger(__name__)
@@ -702,16 +711,9 @@ class AudioDataset:
             assert self.segment_duration is not None
             n_frames = int(self.sample_rate * self.segment_duration)
             return torch.zeros(self.channels, n_frames), self.sample_rate
-    
-    def calculate_resample_rate(self, from_rate: float, bpm: float ) -> float:
-        quaver_pre_second = bpm / 60 * 8# 每秒八分音符的数量
-        sample_pre_quaver = from_rate / quaver_pre_second
-        ratio = sample_pre_quaver / 640
-        to_rate = from_rate / ratio
-        return to_rate
 
     def __getitem__(self, index: int) -> tp.Tuple[SegmentInfo, torch.Tensor, torch.Tensor]:
-        # 返回抽取的时间点，resample后的整个音频，原始音频对应被抽取的片段，beatmap的片段，还有beatmap的片段tokenize后的tensor
+        # 抽取时间点，resample整个音频，原始音频对应被抽取的片段，对应beatmap的片段，还有对应beatmap片段tokenize后的tensor
         rng = torch.Generator()
         if self.shuffle:
             # We use index, plus extra randomness, either totally random if we don't know the epoch.
@@ -723,50 +725,38 @@ class AudioDataset:
         else:
             # We only use index
             rng.manual_seed(index)
-        # 随机抽取一个beatmap_file
-        duration_in_quaver = 0
-        count = 0
-        while(duration_in_quaver < self.segment_duration):
-            file_meta = self.sample_file(index, rng)
-            out_origin, sr = audio_read(file_meta.song_path) 
-            #sample in accordance with BPM so that every 640 samples correspond to a quaver
-            resample_rate = self.calculate_resample_rate(sr, file_meta.bpm)
-            out_origin_in_beat = convert_audio(out_origin, sr, resample_rate, self.channels)
-            duration_in_quaver = math.ceil(out_origin_in_beat.shape[-1]/640) # 音频长度用八分音符的数量来衡量
-            count = count + 1
-            # print("sampling, attempted ", count)
-        #选择抽取的时间点
+        
         for retry in range(self.max_read_retry):
+            # 随机抽取一个beatmap_file      
+            file_meta = self.sample_file(index, rng)
+            duration_in_quaver = math.ceil(file_meta.duration / 60 * file_meta.bpm * 8) # 音频长度用八分音符的数量来衡量
+            segment_duration_in_quaver = math.ceil(self.segment_duration / 60 * file_meta.bpm *8)
+            out, sr = audio_read(file_meta.song_path)
+            # 使用encodec需要的sr resample整个音频
+            out_resampled = convert_audio(out, sr, self.sample_rate, self.channels)
+            
+            #选择抽取的时间点
             window = 32
-            duration_in_quaver_window = int(duration_in_quaver /window)
-            segment_duration_window = int(self.segment_duration / window)
+            duration_in_quaver_window = int(duration_in_quaver / window)
+            segment_duration_window = int(segment_duration_in_quaver / window)
             max_seek = max(0, int(duration_in_quaver_window - segment_duration_window * self.min_segment_ratio))
             seek_time_in_quaver_window = torch.randint(0, max_seek + 1, (1,), generator=rng).item()  # +1 because randint upper bound is exclusive
             seek_time_in_quaver = seek_time_in_quaver_window * window
-            #拿原始音频对应被抽取的片段
-            seek_time_in_second = seek_time_in_quaver /8 / file_meta.bpm * 60 
-            segment_duration_in_second = self.segment_duration /8 / file_meta.bpm * 60
+            seek_time_in_second = seek_time_in_quaver / 8 / file_meta.bpm * 60
+            #pad resample 后的音频
+            seek_time_in_resampled_frame = int(seek_time_in_second * self.sample_rate)
+            n_frames = out_resampled.shape[-1] - seek_time_in_resampled_frame
+            target_frames = int(self.segment_duration * self.sample_rate)
+            if self.pad:
+                out_resampled = F.pad(out_resampled, (0, target_frames - n_frames))
             try:
-                out_origin, sr = audio_read(file_meta.song_path, seek_time_in_second, segment_duration_in_second, pad=False)
-                # 测试对齐
-                # from .audio import audio_write
-                # for idx, one_wav in enumerate(out_origin):
-                #     # Will save under {idx}.wav, with loudness normalization at -14 db LUFS.
-                #     audio_write(f'{idx}', one_wav.cpu(), sr, strategy="loudness", loudness_compressor=True)
-                
-                #抽取beatmap的片段
-                # try:
-                #     with open(file_meta.beatmap_file_path, 'r', encoding='utf-8') as f:
-                #         beatmap_file = json.load(f)        
-                # except (FileNotFoundError, json.JSONDecodeError) as e:
-                #     print(f"文件错误或JSON解析错误: {e}")
-                with open(file_meta.beatmap_file_path, 'r', encoding='utf-8') as f:
+                with open(file_meta.beatmap_file_path, 'r', encoding = 'utf-8') as f:
                     beatmap_file = json.load(f)   
                 beatmap = Beatmap(minimum_note = 0.125, duration = self.segment_duration, token_id_size = self.token_id_size, position_size = self.position_size)
-                beatmap_file = beatmap.sample_beatmap_file(beatmap_file, seek_time_in_quaver,  seek_time_in_quaver + self.segment_duration )
-                beatmap_token = beatmap.tokenize(beatmap_file)
-                segment_info = SegmentInfo(file_meta, seek_time_in_quaver, seek_time_in_quaver + self.segment_duration, n_frames=duration_in_quaver, total_frames=duration_in_quaver,
-                                               sample_rate=sr, channels=out_origin.shape[0], wav_origin=out_origin, beatmap_file=beatmap_file, beatmap_class=beatmap)
+                beatmap_file = beatmap.sample_beatmap_file(beatmap_file, seek_time_in_quaver,  seek_time_in_quaver + segment_duration_in_quaver)
+                beatmap_token, note_code_map = beatmap.tokenize(beatmap_file, file_meta.bpm)
+                segment_info = SegmentInfo(file_meta, seek_time_in_resampled_frame, n_frames=n_frames, total_frames=target_frames,
+                                               sample_rate=self.sample_rate, channels=out_resampled.shape[0], wav_slice=out_resampled[:,seek_time_in_resampled_frame:], beatmap_file=beatmap_file, beatmap_class=beatmap, note_code_map = note_code_map)
             except Exception as exc:
                 logger.warning("Error opening file %s or %s, %r", file_meta.song_path, file_meta.beatmap_file_path, exc)
                 if retry == self.max_read_retry - 1:
@@ -774,22 +764,21 @@ class AudioDataset:
             else:
                 break
             
-        return segment_info, out_origin_in_beat, beatmap_token
+        return segment_info, out_resampled, beatmap_token
 
     def collater(self, samples):
         """The collater function has to be provided to the dataloader
         if AudioDataset has return_info=True in order to properly collate
         the samples of a batch.
         """
-
-        segment_infos, out_origin_in_beats, beatmap_tokens = zip(*samples)
+        segment_infos, wav_resampled, beatmap_tokens = zip(*samples)
         segment_infos = list(segment_infos)
-        out_origin_in_beats = list(out_origin_in_beats)
+        wav_resampleds = list(wav_resampled)
         beatmap_tokens = list(beatmap_tokens)
 
         beatmap_tokens = torch.stack(beatmap_tokens)
         
-        return segment_infos, out_origin_in_beats,  beatmap_tokens
+        return segment_infos, wav_resampleds,  beatmap_tokens
 
     def _filter_duration(self, meta: tp.List[AudioMeta]) -> tp.List[AudioMeta]:
         """Filters out_origin audio files with audio durations that will not allow to sample examples from them."""

@@ -391,6 +391,7 @@ class BeatmapLMModel(StreamingModule):
     def generate(
             self, codes: torch.Tensor,
             difficulty: torch.Tensor,
+            note_code_maps: list,
             stage: int = -1,
             keep_only_valid_steps: bool = True,
             **kwargs):
@@ -413,7 +414,9 @@ class BeatmapLMModel(StreamingModule):
         if self.out_norm:
             out = self.out_norm(out) # [B, S, dim]
         out = out[:,4:,:]
-        out_codes = self.outputLM.generate(out,**kwargs) # [B, S, P]
+        out_codes = []
+        for out_hidden, note_code_map in zip(out, note_code_maps):
+            out_codes.append(self.outputLM.generate(out_hidden[note_code_map].unsqueeze(0),**kwargs)) # [B, S, P]
 
         return out_codes
         

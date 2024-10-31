@@ -167,7 +167,7 @@ class StreamingMultiheadAttention(StreamingModule):
                  memory_efficient: bool = False, attention_as_float32: bool = False,
                  rope: tp.Optional[RotaryEmbedding] = None, cross_attention: bool = False,
                  safe_streaming: bool = True, qk_layer_norm: bool = False, kv_repeat: int = 1,
-                 use_lora: bool = True, lora_r: int = 8, lora_alpha: int = 16,
+                 use_lora: bool = False, lora_r: int = 8, lora_alpha: int = 16,
                  device=None, dtype=None):
         super().__init__()
         factory_kwargs = {'device': device, 'dtype': dtype}

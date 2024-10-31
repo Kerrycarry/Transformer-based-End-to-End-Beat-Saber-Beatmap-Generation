@@ -83,6 +83,8 @@ elif [[ "$1" == "-3" ]]; then
     run_python_process
     stop_parser_api
 elif [[ "$1" == "-4" ]]; then
+    start_parser_api
+elif [[ "$1" == "-5" ]]; then
     for PROCESS in deno dora
     do
         kill_process "$PROCESS"
@@ -92,8 +94,14 @@ else
 fi
 
 # usage 
+# 启动主流程
 # nohup ./beatmapgen.sh -1 > beatmapgen_log.txt 2>&1 &
 # nohup ./beatmapgen.sh -2 > beatmapgen_log.txt 2>&1 &
+# 启动manifest制作流程
 # nohup ./beatmapgen.sh -3 > beatmapgen_log.txt 2>&1 &
+# 启动 api
 # ./beatmapgen.sh -4
+# kill 掉api和dora
+# ./beatmapgen.sh -5
+
 
