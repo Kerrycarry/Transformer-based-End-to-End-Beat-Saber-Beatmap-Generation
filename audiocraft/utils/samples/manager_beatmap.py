@@ -216,7 +216,7 @@ class SampleManager:
 
     def add_sample(self, save_directory, audio, meta, beatmap, save_directory_zip, sample_id):
         song_name = 'song'
-        audio_write(save_directory / song_name, audio, meta.sample_rate, format="ogg")
+        audio_write(save_directory / song_name, audio, self.xp.cfg.sample_rate, format="ogg")
         with open((save_directory / meta.difficulty).with_suffix('.json'), 'w', encoding='utf-8') as f:
             json.dump(beatmap, f, ensure_ascii=False, indent=2)
         

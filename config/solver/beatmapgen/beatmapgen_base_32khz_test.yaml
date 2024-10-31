@@ -34,7 +34,7 @@ dataset:
   valid:
     num_samples: 2
   generate:
-    num_samples: 10
+    num_samples: 4
   evaluate:
     num_samples: 0
   num_workers: 2

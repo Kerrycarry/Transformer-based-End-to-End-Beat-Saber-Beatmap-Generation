@@ -170,7 +170,7 @@ class BeatmapGenSolver(base.StandardSolver):
                 f.write(f'{n}: {type(m).__name__}\n')
         # 冻结模型中的所有参数
         for name,param in self.model.named_parameters():
-            if name.split('.')[-1] not in ['lora_in_proj_a','lora_in_proj_b']:  # 非LOra部分不计算梯度
+            if name.split('.')[-1] not in ['lora_in_proj_a','lora_in_proj_b', 'mask_token_embedding']:  # 非LOra部分不计算梯度
                 param.requires_grad=False
             else:
                 param.requires_grad=True
@@ -231,7 +231,7 @@ class BeatmapGenSolver(base.StandardSolver):
         return state
 
     def _compute_cross_entropy(
-        self, logits: torch.Tensor, targets: torch.Tensor
+        self, logits: torch.Tensor, targets: torch.Tensor, note_code_maps: list,
     ) -> tp.Tuple[torch.Tensor, tp.List[torch.Tensor]]:
         """Compute cross entropy between multi-codebook targets and model's logits.
         The cross entropy is computed per codebook to provide codebook-level cross entropy.
@@ -247,12 +247,15 @@ class BeatmapGenSolver(base.StandardSolver):
             ce_per_codebook (list of torch.Tensor): Cross entropy per codebook (detached).
         """
         B, S, P = targets.shape
-        assert logits.shape[:-1] == targets.shape
         ce = torch.zeros([], device=targets.device)
+        for logit, target, note_code_map in zip(logits, targets, note_code_maps):
+            target = target[note_code_map]
+            assert logit.squeeze(0).shape[:-1] == target.shape
+            
+            logits_k = logit.contiguous().view(-1,logit.size(-1))
+            targets_k = target.view(-1)
+            ce += F.cross_entropy(logits_k, targets_k)
 
-        logits_k = logits.contiguous().view(-1,logits.size(-1))
-        targets_k = targets.view(-1)
-        ce = F.cross_entropy(logits_k, targets_k)
 
         return ce
         # note_mask = (targets == self.model.outputLM.token_id_size).float()  # 0 for notes, 1 for rests
@@ -340,14 +343,14 @@ class BeatmapGenSolver(base.StandardSolver):
         
         # get difficulty token
         difficulty = self.tokenize_difficulty(segment_infos)
-        
-        return audio_tokens, beatmap_tokens, difficulty
+        note_code_maps = [segment_info.note_code_map for segment_info in segment_infos]
+        return audio_tokens, beatmap_tokens, difficulty, note_code_maps
 
     def run_step(self, idx: int, batch: tp.Tuple[tp.List[SegmentInfo], tp.List[torch.Tensor], torch.Tensor], metrics: dict) -> dict:
         """Perform one training or valid step on a given batch."""
         check_synchronization_points = idx == 1 and self.device == 'cuda'
 
-        audio_tokens, beatmap_tokens, difficulty = self._prepare_tokens_and_attributes(
+        audio_tokens, beatmap_tokens, difficulty, note_code_maps = self._prepare_tokens_and_attributes(
             batch, check_synchronization_points)
 
         self.deadlock_detect.update('tokens_and_conditions')
@@ -358,10 +361,10 @@ class BeatmapGenSolver(base.StandardSolver):
         assert (beatmap_tokens >= 0).all(), "beatmap_tokens contains negative values!"
         assert (beatmap_tokens <= self.model.outputLM.token_id_size).all(), f"beatmap_tokens contains invalid class indices! Max target: {beatmap_tokens.max()}"
         with self.autocast:
-            logits = self.model.compute_predictions(audio_tokens, beatmap_tokens, difficulty)  # type: ignore # [B, S, P, card]
+            logits = self.model.compute_predictions(audio_tokens, beatmap_tokens, difficulty, note_code_maps)  # type: ignore # [B, S, P, card]
             # ce, rhythm_loss = self._compute_cross_entropy(logits, beatmap_tokens)
             # loss = ce + rhythm_loss
-            ce = self._compute_cross_entropy(logits, beatmap_tokens)
+            ce = self._compute_cross_entropy(logits, beatmap_tokens, note_code_maps)
             loss = ce
         self.deadlock_detect.update('loss')
 
@@ -457,7 +460,7 @@ class BeatmapGenSolver(base.StandardSolver):
         ref_audio = [segment_info.wav_slice for segment_info in segment_infos]
         ref_beatmap_file = [segment_info.beatmap_file for segment_info in segment_infos]
         gen_beatmap_file = [segment_info.beatmap_class.detokenize(gen_beatmap_token.squeeze(0)) for gen_beatmap_token, segment_info in zip(gen_beatmap_tokens, segment_infos) ]
-        sample_id = [f"{segment_info.meta.id}_{segment_info.meta.difficulty}_{segment_info.seek_time / segment_info.sample_rate}" for segment_info in segment_infos]
+        sample_id = [f"{segment_info.meta.id}_{segment_info.meta.difficulty}_{round(segment_info.seek_time / segment_info.sample_rate / 60 * segment_info.meta.bpm)}" for segment_info in segment_infos]
         meta = [segment_info.meta for segment_info in segment_infos]
         bench_end = time.time()
         # 测试对齐

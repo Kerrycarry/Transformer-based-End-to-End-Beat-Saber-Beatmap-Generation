@@ -181,6 +181,10 @@ class BeatmapLMModel(StreamingModule):
             **outputLM_kwargs,
         ).to(kwargs['device'])
         self._init_weights(weight_init, depthwise_init, zero_bias_init)
+        
+        self.mask_token_embedding = nn.Parameter(torch.empty((self.dim,)))
+        nn.init.uniform_(self.mask_token_embedding, -0.1, 0.1)
+
         self._fsdp: tp.Optional[nn.Module]
         self.__dict__['_fsdp'] = None
 
@@ -230,6 +234,7 @@ class BeatmapLMModel(StreamingModule):
     def forward(self, sequence: torch.Tensor,
                 beatmap: torch.Tensor,
                 difficulty: torch.Tensor,
+                note_code_maps: list,
                 # conditions: tp.List[ConditioningAttributes],
                 # condition_tensors: tp.Optional[ConditionTensors] = None,
                 stage: int = -1) -> torch.Tensor:
@@ -257,6 +262,9 @@ class BeatmapLMModel(StreamingModule):
         input_ = sum([self.emb[k](sequence[:, k]) for k in range(K)]) # batch, sequence, dim
         
         input_[:, 0, :] += self.difficulty_emb(difficulty)
+        mask_positions = [[pos + 4 for pos in positions] for positions in note_code_maps]
+        for i, positions in enumerate(mask_positions):
+            input_[i, positions, :] += self.mask_token_embedding
         cross_attention_input = torch.zeros(B, 1, self.dim).cuda()
         out = self.transformer(input_, cross_attention_src=cross_attention_input,
                                src_mask=(self.attn_mask_per_stage[stage] if stage >= 0 else None))
@@ -264,15 +272,17 @@ class BeatmapLMModel(StreamingModule):
             out = self.out_norm(out)
         
         out = out[:,4:,:]
-        logits = self.outputLM.compute_predictions(beatmap,out)
+        logits = []
+        for one_out, note_code_map, one_beatmap in zip(out, note_code_maps, beatmap):
+            logits.append(self.outputLM.compute_predictions(one_beatmap[note_code_map].unsqueeze(0), one_out[note_code_map].unsqueeze(0)))
         
-
         return logits  #[B, S, P, card]
 
     def compute_predictions(
             self, codes: torch.Tensor,
             beatmap: torch.Tensor,
             difficulty: torch.Tensor,
+            note_code_maps: list,
             stage: int = -1,
             keep_only_valid_steps: bool = True):
         """Given an input tensor of codes [B, K, T] and list of conditions, runs the model
@@ -309,7 +319,7 @@ class BeatmapLMModel(StreamingModule):
         )
         # apply model on pattern sequence
         model = self if self._fsdp is None else self._fsdp
-        logits = model(sequence_codes, beatmap, difficulty, stage=stage)  # [B, K, S, card]
+        logits = model(sequence_codes, beatmap, difficulty, note_code_maps, stage=stage)  # [B, K, S, card]
         
         return logits
 
@@ -408,6 +418,9 @@ class BeatmapLMModel(StreamingModule):
         input_ = sum([self.emb[k](sequence_codes[:, k]) for k in range(K)]) # batch, sequence, dim
 
         input_[:, 0, :] += self.difficulty_emb(difficulty)
+        mask_positions = [[pos + 4 for pos in positions] for positions in note_code_maps]
+        for i, positions in enumerate(mask_positions):
+            input_[i, positions, :] += self.mask_token_embedding
         cross_attention_input = torch.zeros(B, 1, self.dim).cuda()
         out = self.transformer(input_, cross_attention_src=cross_attention_input,
                                src_mask=(self.attn_mask_per_stage[stage] if stage >= 0 else None))

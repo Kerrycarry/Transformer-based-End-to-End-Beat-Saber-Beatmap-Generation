@@ -182,7 +182,7 @@ export const generate_difficulty = async (
   // writeInfoFileSync(info)
   info.song.title = beatmapName
   info.audio.filename = "song.ogg"
-  info.difficulties = info.difficulties.filter(difficulty => difficulty.characteristic === 'Standard' && difficulty.difficulty === 'Expert')
+  info.difficulties = info.difficulties.filter(difficulties => difficulties.characteristic === 'Standard' && difficulties.difficulty === difficulty)
   info.difficulties[0].filename = difficulty+"Standard.dat"
 
   await bsmap.writeInfoFile(info, info_version, {
