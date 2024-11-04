@@ -111,5 +111,22 @@
                 "--clear",
             ],
         },
+        {
+            "name": "beatmapgen.sh",
+            "type": "python",
+            "request": "launch",
+            //"program": "dora",
+            "module": "dora",
+            "justMyCode": false,
+            "args": [
+                "run",
+                "solver=beatmapgen/beatmapgen_base_32khz",
+                "model/lm/model_scale=small",
+                "continue_from=/root/workspace/audiocraft_download/beatmapgen_finetune_musicgen-small.th",
+                "conditioner=text2music",
+                "--clear",
+            ],
+        },
+        
     ]
 }

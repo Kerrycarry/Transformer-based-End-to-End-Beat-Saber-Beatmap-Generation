@@ -109,6 +109,18 @@ def expand_repeated_kv(x: torch.Tensor, n_rep: int, memory_efficient: bool) -> t
             .reshape(bs, slen, n_kv_heads * n_rep, head_dim)
         )
 
+class LoraLayer(nn.Module):
+    def __init__(self, in_features, out_features, r, alpha):
+        super().__init__()
+        self.r = r
+        self.alpha = alpha
+        self.lora_a = nn.Parameter(torch.empty((in_features, r)))
+        self.lora_b = nn.Parameter(torch.zeros((r, out_features)))
+        
+        nn.init.kaiming_uniform_(self.lora_a, a=math.sqrt(5))
+
+    def forward(self, x):
+        return x @ ((self.lora_a @ self.lora_b) * self.alpha / self.r)
 
 class LayerScale(nn.Module):
     """Layer scale from [Touvron et al 2021] (https://arxiv.org/pdf/2103.17239.pdf).
@@ -216,6 +228,7 @@ class StreamingMultiheadAttention(StreamingModule):
                 self.lora_in_proj_a = nn.Parameter(torch.empty((embed_dim, self.lora_r)))
                 self.lora_in_proj_b = nn.Parameter(torch.zeros((self.lora_r, out_dim)))
                 nn.init.kaiming_uniform_(self.lora_in_proj_a, a=math.sqrt(5))
+                self.lora_out_proj = LoraLayer(self.out_proj.in_features, self.out_proj.out_features, lora_r, lora_alpha)
 
         else:
             assert not qk_layer_norm
@@ -459,7 +472,11 @@ class StreamingMultiheadAttention(StreamingModule):
                 x = torch.einsum(f"b h t k, {key_layout} -> {layout}", w, v)
             x = x.to(dtype)
             x = rearrange(x, f"{layout} -> b t (h d)", h=self.num_heads)
+            temp = x
             x = self.out_proj(x)
+            if self.use_lora:
+                x += self.lora_out_proj(temp)
+
         else:
             key, value = self._complete_kv(key, value)
             if self.attention_as_float32:
@@ -506,7 +523,7 @@ class StreamingTransformerLayer(nn.TransformerEncoderLayer):
         dtype (torch.dtype, optional): dtype to use.
         **kwargs: See `nn.TransformerEncoderLayer`.
     """
-    def __init__(self, d_model: int, num_heads: int, lora: dict, dim_feedforward: int = 2048, dropout: float = 0.1,
+    def __init__(self, d_model: int, num_heads: int, lora: dict = {}, dim_feedforward: int = 2048, dropout: float = 0.1,
                  bias_ff: bool = True, bias_attn: bool = True, causal: bool = False,
                  past_context: tp.Optional[int] = None, custom: bool = False,
                  memory_efficient: bool = False, attention_as_float32: bool = False,

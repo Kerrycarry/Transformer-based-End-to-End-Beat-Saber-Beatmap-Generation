@@ -37,6 +37,20 @@ run_dora_process_2() {
     wait $DORA_PID
 }
 
+#
+run_dora_process_3() {
+    echo "Running beatmapgen without caching"
+    nohup dora run \
+        solver=beatmapgen/beatmapgen_base_32khz \
+        model/lm/model_scale=small \
+        conditioner=text2music \
+        continue_from=/root/workspace/audiocraft_download/beatmapgen_finetune_musicgen-small.th \
+        --clear > beatmapgen_log_dora.txt 2>&1 &
+    DORA_PID=$!
+    wait $DORA_PID
+}
+
+
 # manifest pipeline
 run_python_process() {
     echo "Running manifest pipeline..."
@@ -80,11 +94,15 @@ elif [[ "$1" == "-2" ]]; then
     stop_parser_api
 elif [[ "$1" == "-3" ]]; then
     start_parser_api
-    run_python_process
+    run_dora_process_3
     stop_parser_api
 elif [[ "$1" == "-4" ]]; then
     start_parser_api
+    run_python_process
+    stop_parser_api
 elif [[ "$1" == "-5" ]]; then
+    start_parser_api
+elif [[ "$1" == "-6" ]]; then
     for PROCESS in deno dora
     do
         kill_process "$PROCESS"
@@ -97,11 +115,12 @@ fi
 # 启动主流程
 # nohup ./beatmapgen.sh -1 > beatmapgen_log.txt 2>&1 &
 # nohup ./beatmapgen.sh -2 > beatmapgen_log.txt 2>&1 &
-# 启动manifest制作流程
 # nohup ./beatmapgen.sh -3 > beatmapgen_log.txt 2>&1 &
+# 启动manifest制作流程
+# nohup ./beatmapgen.sh -4 > beatmapgen_log.txt 2>&1 &
 # 启动 api
-# ./beatmapgen.sh -4
-# kill 掉api和dora
 # ./beatmapgen.sh -5
+# kill 掉api和dora
+# ./beatmapgen.sh -6
 
 

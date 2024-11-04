@@ -168,19 +168,21 @@ class BeatmapGenSolver(base.StandardSolver):
         with open('model_architecture2.txt', 'w') as f:
             for n, m in self.model.named_modules():
                 f.write(f'{n}: {type(m).__name__}\n')
-        # 冻结模型中的所有参数
-        for name,param in self.model.named_parameters():
-            if name.split('.')[-1] not in ['lora_in_proj_a','lora_in_proj_b', 'mask_token_embedding']:  # 非LOra部分不计算梯度
-                param.requires_grad=False
-            else:
-                param.requires_grad=True
+        if self.cfg.transformer_lm.lora.use_lora:
+            trainable = ['lora_in_proj_a','lora_in_proj_b', 'mask_token_embedding', 'lora_a', 'lora_b']
+            # 冻结模型中的所有参数
+            for name,param in self.model.named_parameters():
+                if name.split('.')[-1] not in trainable:  # 非LOra部分不计算梯度
+                    param.requires_grad=False
+                else:
+                    param.requires_grad=True
 
-        # 仅解冻 outputLM, difficulty_emb,  的参数
-        for param in self.model.outputLM.parameters():
-            param.requires_grad = True
+            # 仅解冻 outputLM, difficulty_emb,  的参数
+            for param in self.model.outputLM.parameters():
+                param.requires_grad = True
 
-        for param in self.model.difficulty_emb.parameters():
-            param.requires_grad = True
+            for param in self.model.difficulty_emb.parameters():
+                param.requires_grad = True
 
     def build_dataloaders(self) -> None:
         """Instantiate audio dataloaders for each stage."""
@@ -264,19 +266,6 @@ class BeatmapGenSolver(base.StandardSolver):
 
         # return ce, rhythm_loss
     
-    def tokenize_wav_resampled(self, segment_infos, wav_resampleds):
-        audio_tokens = []
-        for segment_info, wav_resampled in zip(segment_infos, wav_resampleds):
-            wav_resampled = wav_resampled.unsqueeze(0).to(self.device)
-            with torch.no_grad():
-                audio_token, scale = self.compression_model.encode(wav_resampled)
-                assert scale is None, "Scaled compression model not supported with LM."
-                start = int(segment_info.seek_time / 640)
-                audio_tokens.append(audio_token[:, :, start : start + 1500])
-    
-        audio_tokens = torch.cat(audio_tokens, dim=0)
-        return audio_tokens
-    
     def tokenize_difficulty(self, segment_infos):
         difficulty_map = {'Easy': 0, 'Normal': 1, 'Hard': 2, 'Expert': 3, 'ExpertPlus': 4}
         difficulty = [difficulty_map[segment_info.meta.difficulty] for segment_info in segment_infos]
@@ -302,8 +291,9 @@ class BeatmapGenSolver(base.StandardSolver):
         
         if self._cached_batch_loader is None or self.current_stage != "train":
             segment_infos, wav_resampleds, beatmap_tokens = batch
+            wav_resampleds = wav_resampleds.to(self.device)
             audio_tokens = None
-            assert len(wav_resampleds) == len(segment_infos) == beatmap_tokens.size(0), (
+            assert wav_resampleds.size(0) == len(segment_infos) == beatmap_tokens.size(0), (
                 f"Mismatch between number of items in audio batch ({wav_resampleds.size(0)})",
                 f" and in metadata ({len(segment_infos)})"
             )
@@ -318,14 +308,20 @@ class BeatmapGenSolver(base.StandardSolver):
             audio_tokens = audio_tokens.long()
             beatmap_tokens = beatmap_tokens.long()
         
+        sample_id_seek_time = [f"{segment_info.meta.id}_{segment_info.seek_time}" for segment_info in segment_infos]
+        sample_id = [f"{segment_info.meta.id}" for segment_info in segment_infos]
+        self.log_sample_usage("sample_id_seek_time.json", sample_id_seek_time)
+        self.log_sample_usage("sample_id.json", sample_id)
 
         # Now we should be synchronization free.
         if self.device == "cuda" and check_synchronization_points:
             torch.cuda.set_sync_debug_mode("warn")
 
         if audio_tokens is None:
-            audio_tokens = self.tokenize_wav_resampled(segment_infos, wav_resampleds)
-
+            with torch.no_grad():
+                audio_tokens, scale = self.compression_model.encode(wav_resampleds)
+                assert scale is None, "Scaled compression model not supported with LM."
+        
         if self.device == "cuda" and check_synchronization_points:
             torch.cuda.set_sync_debug_mode("default")
 
@@ -345,6 +341,24 @@ class BeatmapGenSolver(base.StandardSolver):
         difficulty = self.tokenize_difficulty(segment_infos)
         note_code_maps = [segment_info.note_code_map for segment_info in segment_infos]
         return audio_tokens, beatmap_tokens, difficulty, note_code_maps
+
+    def log_sample_usage(self, filepath, sample_id):
+        import json
+        import os
+
+        if not os.path.exists(filepath):
+            data = {}
+        else:
+            with open(filepath, 'r', encoding='utf-8') as file:
+                data = json.load(file)
+        for id in sample_id:
+            if id in data:
+                data[id] = data[id]+1  # 修改已存在的键值
+            else:
+                data[id] = 1  # 添加新的键值
+
+        with open(filepath, 'w', encoding='utf-8') as file:
+            json.dump(data, file, ensure_ascii=False, indent=4)
 
     def run_step(self, idx: int, batch: tp.Tuple[tp.List[SegmentInfo], tp.List[torch.Tensor], torch.Tensor], metrics: dict) -> dict:
         """Perform one training or valid step on a given batch."""
@@ -440,12 +454,14 @@ class BeatmapGenSolver(base.StandardSolver):
         bench_start = time.time()
         segment_infos, wav_resampleds, beatmap_tokens = batch
         audio_tokens = None
-        assert len(wav_resampleds) == len(segment_infos) == beatmap_tokens.size(0), (
+        assert wav_resampleds.size(0) == len(segment_infos) == beatmap_tokens.size(0), (
             f"Mismatch between number of items in audio batch ({wav_resampleds.size(0)})",
             f" and in metadata ({len(segment_infos)})"
         )
         
-        audio_tokens = self.tokenize_wav_resampled(segment_infos, wav_resampleds)
+        with torch.no_grad():
+            audio_tokens, scale = self.compression_model.encode(wav_resampleds.to(self.device))
+            assert scale is None, "Scaled compression model not supported with LM."
         difficulty = self.tokenize_difficulty(segment_infos)
         note_code_maps = [segment_info.note_code_map for segment_info in segment_infos]
         with self.autocast:
@@ -460,7 +476,7 @@ class BeatmapGenSolver(base.StandardSolver):
         ref_audio = [segment_info.wav_slice for segment_info in segment_infos]
         ref_beatmap_file = [segment_info.beatmap_file for segment_info in segment_infos]
         gen_beatmap_file = [segment_info.beatmap_class.detokenize(gen_beatmap_token.squeeze(0)) for gen_beatmap_token, segment_info in zip(gen_beatmap_tokens, segment_infos) ]
-        sample_id = [f"{segment_info.meta.id}_{segment_info.meta.difficulty}_{round(segment_info.seek_time / segment_info.sample_rate / 60 * segment_info.meta.bpm)}" for segment_info in segment_infos]
+        sample_id = [f"{segment_info.meta.id}_{segment_info.seek_time}" for segment_info in segment_infos]
         meta = [segment_info.meta for segment_info in segment_infos]
         bench_end = time.time()
         # 测试对齐

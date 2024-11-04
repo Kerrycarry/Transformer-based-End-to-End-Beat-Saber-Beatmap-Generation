@@ -52,7 +52,7 @@ metrics:
       pretrained_length: 20
 
 generate:
-  every: 1
+  every: 6
   lm:
     use_sampling: true
     top_k: 4
@@ -60,10 +60,10 @@ generate:
   
 
 optim:
-  epochs: 6
+  epochs: 60
   updates_per_epoch: 200
   optimizer: dadam
-  lr: 1
+  lr: 0.1
   ema:
     use: true
     updates: 10

@@ -46,5 +46,5 @@ transformer_lm:
   
   lora: 
     use_lora: True
-    lora_r: 8
-    lora_alpha: 1
+    lora_r: 16
+    lora_alpha: 16
