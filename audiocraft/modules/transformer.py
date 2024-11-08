@@ -180,7 +180,7 @@ class StreamingMultiheadAttention(StreamingModule):
                  rope: tp.Optional[RotaryEmbedding] = None, cross_attention: bool = False,
                  safe_streaming: bool = True, qk_layer_norm: bool = False, kv_repeat: int = 1,
                  use_lora: bool = False, lora_r: int = 8, lora_alpha: int = 16, 
-                 use_sparse: bool = False, window_size: int = 4,
+                 use_sparse: bool = False, window_size: int = 4, position_size: int = 12,
                  device=None, dtype=None):
         super().__init__()
         factory_kwargs = {'device': device, 'dtype': dtype}
@@ -203,6 +203,7 @@ class StreamingMultiheadAttention(StreamingModule):
         self.lora_alpha = lora_alpha
         self.use_sparse = use_sparse
         self.window_size = window_size
+        self.position_size = position_size
         if cross_attention:
             assert not causal, "Causal cannot work with cross attention."
             assert rope is None, "Rope cannot work with cross attention."
@@ -272,7 +273,7 @@ class StreamingMultiheadAttention(StreamingModule):
                 seqinfo = ops.fmha.attn_bias._SeqLenInfo.from_seqlens([current_steps])
                 batch_sizes = [1]
                 return ops.fmha.attn_bias.BlockDiagonalCausalLocalAttentionMask(
-                    q_seqinfo=seqinfo, k_seqinfo=seqinfo, _batch_sizes=batch_sizes, _window_size=self.window_size * 12 + 1
+                    q_seqinfo=seqinfo, k_seqinfo=seqinfo, _batch_sizes=batch_sizes, _window_size=self.window_size * self.position_size + 1
                 )
             else:
                 # Then we can safely use a lower triangular mask
@@ -539,7 +540,7 @@ class StreamingTransformerLayer(nn.TransformerEncoderLayer):
                  qk_layer_norm: bool = False, qk_layer_norm_cross: bool = False,
                  cross_attention: bool = False, layer_scale: tp.Optional[float] = None,
                  rope: tp.Optional[RotaryEmbedding] = None, attention_dropout: tp.Optional[float] = None,
-                 kv_repeat: int = 1, norm: str = 'layer_norm', device=None, dtype=None, **kwargs):
+                 kv_repeat: int = 1, norm: str = 'layer_norm', position_size: int = 12, device=None, dtype=None, **kwargs):
         super().__init__(d_model, num_heads, dim_feedforward, dropout,
                          device=device, dtype=dtype, batch_first=True, **kwargs)
         factory_kwargs = {'device': device, 'dtype': dtype}
@@ -555,7 +556,7 @@ class StreamingTransformerLayer(nn.TransformerEncoderLayer):
         }
         self.self_attn: StreamingMultiheadAttention = StreamingMultiheadAttention(
             causal=causal, past_context=past_context, rope=rope, qk_layer_norm=qk_layer_norm,
-            kv_repeat=kv_repeat, **lora_kwargs, **sparse_kwargs, **attn_kwargs, **factory_kwargs)  # type: ignore
+            kv_repeat=kv_repeat, position_size = position_size, **lora_kwargs, **sparse_kwargs, **attn_kwargs, **factory_kwargs)  # type: ignore
         # Redefine feedforward layers to expose bias parameter
         self.linear1 = nn.Linear(d_model, dim_feedforward, bias=bias_ff, **factory_kwargs)
         self.linear2 = nn.Linear(dim_feedforward, d_model, bias=bias_ff, **factory_kwargs)
@@ -666,7 +667,7 @@ class StreamingTransformer(StreamingModule):
                  positional_embedding: str = 'sin', max_period: float = 10_000, positional_scale: float = 1.,
                  xpos: bool = False, lr: tp.Optional[float] = None, weight_decay: tp.Optional[float] = None,
                  layer_class: tp.Type[StreamingTransformerLayer] = StreamingTransformerLayer,
-                 checkpointing: str = 'none', device=None, dtype=None, **kwargs):
+                 checkpointing: str = 'none', position_size: int = 12, block_pos_embedding: bool = False, device=None, dtype=None, **kwargs):
         super().__init__()
         assert d_model % num_heads == 0
 
@@ -698,14 +699,18 @@ class StreamingTransformer(StreamingModule):
                     causal=causal, past_context=past_context, custom=custom,
                     memory_efficient=memory_efficient, attention_as_float32=attention_as_float32,
                     cross_attention=cross_attention, layer_scale=layer_scale, rope=self.rope,
-                    device=device, dtype=dtype, **kwargs))
+                    device=device, dtype=dtype, position_size = position_size, **kwargs))
 
         if self.checkpointing != 'none':
             for layer in self.layers:
                 # see audiocraft/optim/fsdp.py, magic signal to indicate this requires fixing the
                 # backward hook inside of FSDP...
                 layer._magma_checkpointed = True  # type: ignore
-
+        
+        self.position_size = position_size
+        self.block_pos_embedding = block_pos_embedding
+        if block_pos_embedding:
+            self.local_pos_embedding = nn.Embedding(position_size, d_model)
     def _apply_layer(self, layer, *args, **kwargs):
         method = self.checkpointing
         if method == 'none':
@@ -746,9 +751,18 @@ class StreamingTransformer(StreamingModule):
             offsets = torch.zeros(B, dtype=torch.long, device=x.device)
 
         if self.positional_embedding in ['sin', 'sin_rope']:
+            if self.block_pos_embedding:
+                assert T % self.position_size == 0
+                T = T // self.position_size
             positions = torch.arange(T, device=x.device).view(1, -1, 1)
             positions = positions + offsets.view(-1, 1, 1)
             pos_emb = create_sin_embedding(positions, C, max_period=self.max_period, dtype=x.dtype)
+            if self.block_pos_embedding:
+                pos_emb = pos_emb.repeat_interleave(self.position_size, dim=1)
+                indices = torch.arange(self.position_size).unsqueeze(0).repeat(B, 1).to(x.device)
+                local_pos_emb = self.local_pos_embedding(indices)
+                local_pos_emb = local_pos_emb.repeat(1, T, 1)
+                pos_emb += local_pos_emb
             x = x + self.positional_scale * pos_emb
 
         for layer in self.layers:

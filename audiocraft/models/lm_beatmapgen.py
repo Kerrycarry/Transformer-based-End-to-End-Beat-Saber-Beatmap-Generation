@@ -150,7 +150,7 @@ class BeatmapLMModel(StreamingModule):
                  zero_bias_init: bool = False, cfg_dropout: float = 0, cfg_coef: float = 1.0,
                  attribute_dropout: tp.Dict[str, tp.Dict[str, float]] = {}, two_step_cfg: bool = False, difficulty_num: int = 5, 
                  transfer_dim: int = 64, transfer_num_heads: int = 4, transfer_num_layers: int = 1,
-                 sparse_kwargs: dict = {}, lora_kwargs: dict = {},
+                 sparse_kwargs: dict = {}, lora_kwargs: dict = {}, block_pos_embedding: bool = False,
                  **kwargs):
         super().__init__()
         self.cfg_coef = cfg_coef
@@ -168,22 +168,24 @@ class BeatmapLMModel(StreamingModule):
         self.difficulty_num = difficulty_num
         self.difficulty_emb = ScaledEmbedding(self.difficulty_num, self.dim, lr=emb_lr)
         self.position_size = position_size
-        self.token_id_size = token_id_size
+        self.token_id_size = token_id_size + 1
         self.transfer_dim = transfer_dim
-        
+        self.block_pos_embedding = block_pos_embedding
         if 'activation' in kwargs:
             kwargs['activation'] = get_activation_fn(kwargs['activation'])
         self.transformer = StreamingTransformer(
             lora_kwargs = lora_kwargs, d_model=dim, num_heads=num_heads, dim_feedforward=int(hidden_scale * dim), num_layers = num_layers,
             norm=norm, norm_first=norm_first, **kwargs)
         self.out_norm: tp.Optional[nn.Module] = None
-        if norm_first:
+        self.out_norm2: tp.Optional[nn.Module] = None
+        if norm_first: 
             self.out_norm = create_norm_fn(norm, dim)
+            self.out_norm2 = create_norm_fn(norm, transfer_dim)
         self.transfer_lm = StreamingTransformer(
             sparse_kwargs = sparse_kwargs, d_model=transfer_dim, num_heads=transfer_num_heads, dim_feedforward=int(hidden_scale * transfer_dim), num_layers = transfer_num_layers,
-            norm=norm, norm_first=norm_first, **kwargs)
+            norm=norm, norm_first=norm_first, position_size = position_size, block_pos_embedding = block_pos_embedding, **kwargs)
         self.linear_transfer = nn.Linear(dim, self.transfer_dim * position_size, bias=bias_proj)
-        self.linear_out = nn.Linear(self.transfer_dim, self.position_size, bias=bias_proj)
+        self.linear_out = nn.Linear(self.transfer_dim, self.token_id_size, bias=bias_proj)
         # self.linears = nn.ModuleList([nn.Linear(dim, self.card, bias=bias_proj) for _ in range(n_q)])
         
         self._init_weights(weight_init, depthwise_init, zero_bias_init)
@@ -216,6 +218,8 @@ class BeatmapLMModel(StreamingModule):
         for emb_layer in self.emb:
             init_layer(emb_layer, method=weight_init, init_depth=None, zero_bias_init=zero_bias_init)
         init_layer(self.difficulty_emb, method=weight_init, init_depth=None, zero_bias_init=zero_bias_init)
+        if self.block_pos_embedding:
+            init_layer(self.transfer_lm.local_pos_embedding, method=weight_init, init_depth=None, zero_bias_init=zero_bias_init)
 
         transformer_to_initialize = [self.transformer.layers, self.transfer_lm.layers]
         for module in transformer_to_initialize:
@@ -278,8 +282,8 @@ class BeatmapLMModel(StreamingModule):
         cross_attention_input = torch.zeros(B, 1, self.dim).cuda()
         out = self.transformer(input_, cross_attention_src=cross_attention_input,
                                src_mask=(self.attn_mask_per_stage[stage] if stage >= 0 else None))
-        # if self.out_norm:
-        #     out = self.out_norm(out)
+        if self.out_norm:
+            out = self.out_norm(out)
         
         out = out[:,4:,:]
         from audiocraft.modules.transformer import set_efficient_attention_backend
@@ -294,8 +298,8 @@ class BeatmapLMModel(StreamingModule):
             cross_attention_input = torch.zeros(B, 1, self.transfer_dim).cuda()
             out = self.transfer_lm(input_, cross_attention_src=cross_attention_input,
                                src_mask=(self.attn_mask_per_stage[stage] if stage >= 0 else None)) # [1, S*12, K]
-            if self.out_norm:
-                out = self.out_norm(out) 
+            if self.out_norm2:
+                out = self.out_norm2(out) 
             logit = self.linear_out(out) # [1, S*12, card]
             logits.append(logit)
         return logits  #[B, S*12, card]

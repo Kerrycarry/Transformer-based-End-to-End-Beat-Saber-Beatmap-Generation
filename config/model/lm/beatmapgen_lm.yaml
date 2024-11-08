@@ -36,8 +36,9 @@ transformer_lm:
   attention_as_float32: false
 
   difficulty_num: 5
-  token_id_size: 18
+  token_id_size: 18  # need + 1 because 18 itself is padding token
   position_size: 12
+  block_pos_embedding: True
   
   sparse_kwargs:
     use_sparse: True
