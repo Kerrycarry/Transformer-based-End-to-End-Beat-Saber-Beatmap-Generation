@@ -143,12 +143,14 @@ class BeatmapLMModel(StreamingModule):
         **kwargs: Additional parameters for the transformer encoder.
     """
     def __init__(self, pattern_provider: CodebooksPatternProvider, condition_provider: ConditioningProvider,
-                 fuser: ConditionFuser, outputLM_kwargs: dict, n_q: int = 8, card: int = 1024, dim: int = 128, num_heads: int = 8,
+                 fuser: ConditionFuser, token_id_size: int, position_size: int, n_q: int = 8, card: int = 1024, dim: int = 128, num_heads: int = 8, num_layers: int = 8,
                  hidden_scale: int = 4, norm: str = 'layer_norm', norm_first: bool = False,
                  emb_lr: tp.Optional[float] = None, bias_proj: bool = True,
                  weight_init: tp.Optional[str] = None, depthwise_init: tp.Optional[str] = None,
                  zero_bias_init: bool = False, cfg_dropout: float = 0, cfg_coef: float = 1.0,
-                 attribute_dropout: tp.Dict[str, tp.Dict[str, float]] = {}, two_step_cfg: bool = False, difficulty_num: int = 5,
+                 attribute_dropout: tp.Dict[str, tp.Dict[str, float]] = {}, two_step_cfg: bool = False, difficulty_num: int = 5, 
+                 transfer_dim: int = 64, transfer_num_heads: int = 4, transfer_num_layers: int = 1,
+                 sparse_kwargs: dict = {}, lora_kwargs: dict = {},
                  **kwargs):
         super().__init__()
         self.cfg_coef = cfg_coef
@@ -165,21 +167,25 @@ class BeatmapLMModel(StreamingModule):
         self.emb = nn.ModuleList([ScaledEmbedding(embed_dim, dim, lr=emb_lr) for _ in range(n_q)])
         self.difficulty_num = difficulty_num
         self.difficulty_emb = ScaledEmbedding(self.difficulty_num, self.dim, lr=emb_lr)
+        self.position_size = position_size
+        self.token_id_size = token_id_size
+        self.transfer_dim = transfer_dim
+        
         if 'activation' in kwargs:
             kwargs['activation'] = get_activation_fn(kwargs['activation'])
         self.transformer = StreamingTransformer(
-            d_model=dim, num_heads=num_heads, dim_feedforward=int(hidden_scale * dim),
+            lora_kwargs = lora_kwargs, d_model=dim, num_heads=num_heads, dim_feedforward=int(hidden_scale * dim), num_layers = num_layers,
             norm=norm, norm_first=norm_first, **kwargs)
         self.out_norm: tp.Optional[nn.Module] = None
         if norm_first:
             self.out_norm = create_norm_fn(norm, dim)
+        self.transfer_lm = StreamingTransformer(
+            sparse_kwargs = sparse_kwargs, d_model=transfer_dim, num_heads=transfer_num_heads, dim_feedforward=int(hidden_scale * transfer_dim), num_layers = transfer_num_layers,
+            norm=norm, norm_first=norm_first, **kwargs)
+        self.linear_transfer = nn.Linear(dim, self.transfer_dim * position_size, bias=bias_proj)
+        self.linear_out = nn.Linear(self.transfer_dim, self.position_size, bias=bias_proj)
         # self.linears = nn.ModuleList([nn.Linear(dim, self.card, bias=bias_proj) for _ in range(n_q)])
-        self.outputLM = OutputLMModel(
-            input_dim=self.dim,
-            dtype=kwargs['dtype'],
-            device=kwargs['device'],
-            **outputLM_kwargs,
-        ).to(kwargs['device'])
+        
         self._init_weights(weight_init, depthwise_init, zero_bias_init)
         
         self.mask_token_embedding = nn.Parameter(torch.empty((self.dim,)))
@@ -211,18 +217,22 @@ class BeatmapLMModel(StreamingModule):
             init_layer(emb_layer, method=weight_init, init_depth=None, zero_bias_init=zero_bias_init)
         init_layer(self.difficulty_emb, method=weight_init, init_depth=None, zero_bias_init=zero_bias_init)
 
-        for layer_idx, tr_layer in enumerate(self.transformer.layers):
-            depth = None
-            if depthwise_init == 'current':
-                depth = layer_idx + 1
-            elif depthwise_init == 'global':
-                depth = len(self.transformer.layers)
-            init_fn = partial(init_layer, method=weight_init, init_depth=depth, zero_bias_init=zero_bias_init)
-            tr_layer.apply(init_fn)
+        transformer_to_initialize = [self.transformer.layers, self.transfer_lm.layers]
+        for module in transformer_to_initialize:
+            for layer_idx, tr_layer in enumerate(module):
+                depth = None
+                if depthwise_init == 'current':
+                    depth = layer_idx + 1
+                elif depthwise_init == 'global':
+                    depth = len(self.transformer.layers)
+                init_fn = partial(init_layer, method=weight_init, init_depth=depth, zero_bias_init=zero_bias_init)
+                tr_layer.apply(init_fn)
 
         # for linear in self.linears:
         #     init_layer(linear, method=weight_init, init_depth=None, zero_bias_init=zero_bias_init)
-
+        linear_to_initialize = [self.linear_transfer, self.linear_out]
+        for module in linear_to_initialize:
+            init_layer(module, method=weight_init, init_depth=None, zero_bias_init=zero_bias_init)
     @property
     def special_token_id(self) -> int:
         return self.card
@@ -268,15 +278,27 @@ class BeatmapLMModel(StreamingModule):
         cross_attention_input = torch.zeros(B, 1, self.dim).cuda()
         out = self.transformer(input_, cross_attention_src=cross_attention_input,
                                src_mask=(self.attn_mask_per_stage[stage] if stage >= 0 else None))
-        if self.out_norm:
-            out = self.out_norm(out)
+        # if self.out_norm:
+        #     out = self.out_norm(out)
         
         out = out[:,4:,:]
+        from audiocraft.modules.transformer import set_efficient_attention_backend
+        set_efficient_attention_backend("xformers")
         logits = []
-        for one_out, note_code_map, one_beatmap in zip(out, note_code_maps, beatmap):
-            logits.append(self.outputLM.compute_predictions(one_beatmap[note_code_map].unsqueeze(0), one_out[note_code_map].unsqueeze(0)))
-        
-        return logits  #[B, S, P, card]
+        # for one_out, note_code_map, one_beatmap in zip(out, note_code_maps, beatmap):
+            # logits.append(self.outputLM.compute_predictions(one_beatmap[note_code_map].unsqueeze(0), one_out[note_code_map].unsqueeze(0)))
+        for one_out, note_code_map in zip(out, note_code_maps):
+            input_ = self.linear_transfer(one_out[note_code_map].unsqueeze(0))
+            B, S, K = input_.shape
+            input_ = input_.reshape(B, S* self.position_size, self.transfer_dim)
+            cross_attention_input = torch.zeros(B, 1, self.transfer_dim).cuda()
+            out = self.transfer_lm(input_, cross_attention_src=cross_attention_input,
+                               src_mask=(self.attn_mask_per_stage[stage] if stage >= 0 else None)) # [1, S*12, K]
+            if self.out_norm:
+                out = self.out_norm(out) 
+            logit = self.linear_out(out) # [1, S*12, card]
+            logits.append(logit)
+        return logits  #[B, S*12, card]
 
     def compute_predictions(
             self, codes: torch.Tensor,
@@ -413,23 +435,12 @@ class BeatmapLMModel(StreamingModule):
             codes, self.special_token_id, 
         )
 
-        B, K, S = sequence_codes.shape
-        assert K == self.num_codebooks, "Sequence shape must match the specified number of codebooks"
-        input_ = sum([self.emb[k](sequence_codes[:, k]) for k in range(K)]) # batch, sequence, dim
-
-        input_[:, 0, :] += self.difficulty_emb(difficulty)
-        mask_positions = [[pos + 4 for pos in positions] for positions in note_code_maps]
-        for i, positions in enumerate(mask_positions):
-            input_[i, positions, :] += self.mask_token_embedding
-        cross_attention_input = torch.zeros(B, 1, self.dim).cuda()
-        out = self.transformer(input_, cross_attention_src=cross_attention_input,
-                               src_mask=(self.attn_mask_per_stage[stage] if stage >= 0 else None))
-        if self.out_norm:
-            out = self.out_norm(out) # [B, S, dim]
-        out = out[:,4:,:]
+        model = self if self._fsdp is None else self._fsdp
+        logits = model(sequence_codes, None, difficulty, note_code_maps, stage=stage)  # [[B, S*12, card],...]
         out_codes = []
-        for out_hidden, note_code_map in zip(out, note_code_maps):
-            out_codes.append(self.outputLM.generate(out_hidden[note_code_map].unsqueeze(0),**kwargs)) # [B, S, P]
-
+        for logit in logits:
+            probs = torch.softmax(logit / kwargs['temp'], dim=-1)
+            out_code = utils.sample_top_k(probs, k= kwargs['top_k']).reshape(1, -1, self.position_size)
+            out_codes.append(out_code)
         return out_codes
         

@@ -179,7 +179,8 @@ class StreamingMultiheadAttention(StreamingModule):
                  memory_efficient: bool = False, attention_as_float32: bool = False,
                  rope: tp.Optional[RotaryEmbedding] = None, cross_attention: bool = False,
                  safe_streaming: bool = True, qk_layer_norm: bool = False, kv_repeat: int = 1,
-                 use_lora: bool = False, lora_r: int = 8, lora_alpha: int = 16,
+                 use_lora: bool = False, lora_r: int = 8, lora_alpha: int = 16, 
+                 use_sparse: bool = False, window_size: int = 4,
                  device=None, dtype=None):
         super().__init__()
         factory_kwargs = {'device': device, 'dtype': dtype}
@@ -200,6 +201,8 @@ class StreamingMultiheadAttention(StreamingModule):
         self.use_lora = use_lora
         self.lora_r = lora_r
         self.lora_alpha = lora_alpha
+        self.use_sparse = use_sparse
+        self.window_size = window_size
         if cross_attention:
             assert not causal, "Causal cannot work with cross attention."
             assert rope is None, "Rope cannot work with cross attention."
@@ -265,6 +268,12 @@ class StreamingMultiheadAttention(StreamingModule):
                 return None
             elif 'past_keys' in self._streaming_state:
                 raise RuntimeError("Not supported at the moment")
+            elif self.use_sparse:
+                seqinfo = ops.fmha.attn_bias._SeqLenInfo.from_seqlens([current_steps])
+                batch_sizes = [1]
+                return ops.fmha.attn_bias.BlockDiagonalCausalLocalAttentionMask(
+                    q_seqinfo=seqinfo, k_seqinfo=seqinfo, _batch_sizes=batch_sizes, _window_size=self.window_size * 12 + 1
+                )
             else:
                 # Then we can safely use a lower triangular mask
                 return LowerTriangularMask()
@@ -523,7 +532,7 @@ class StreamingTransformerLayer(nn.TransformerEncoderLayer):
         dtype (torch.dtype, optional): dtype to use.
         **kwargs: See `nn.TransformerEncoderLayer`.
     """
-    def __init__(self, d_model: int, num_heads: int, lora: dict = {}, dim_feedforward: int = 2048, dropout: float = 0.1,
+    def __init__(self, d_model: int, num_heads: int, lora_kwargs: dict = {}, sparse_kwargs: dict = {}, dim_feedforward: int = 2048, dropout: float = 0.1,
                  bias_ff: bool = True, bias_attn: bool = True, causal: bool = False,
                  past_context: tp.Optional[int] = None, custom: bool = False,
                  memory_efficient: bool = False, attention_as_float32: bool = False,
@@ -546,7 +555,7 @@ class StreamingTransformerLayer(nn.TransformerEncoderLayer):
         }
         self.self_attn: StreamingMultiheadAttention = StreamingMultiheadAttention(
             causal=causal, past_context=past_context, rope=rope, qk_layer_norm=qk_layer_norm,
-            kv_repeat=kv_repeat, **lora, **attn_kwargs, **factory_kwargs)  # type: ignore
+            kv_repeat=kv_repeat, **lora_kwargs, **sparse_kwargs, **attn_kwargs, **factory_kwargs)  # type: ignore
         # Redefine feedforward layers to expose bias parameter
         self.linear1 = nn.Linear(d_model, dim_feedforward, bias=bias_ff, **factory_kwargs)
         self.linear2 = nn.Linear(dim_feedforward, d_model, bias=bias_ff, **factory_kwargs)

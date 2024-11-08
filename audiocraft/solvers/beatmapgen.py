@@ -162,13 +162,13 @@ class BeatmapGenSolver(base.StandardSolver):
                 self.scaler = torch.cuda.amp.GradScaler()
             self.register_stateful('scaler')
         
-        #transfer learning
         with open('model_architecture.txt', 'w') as f:
             f.write(str(self.model))
         with open('model_architecture2.txt', 'w') as f:
             for n, m in self.model.named_modules():
                 f.write(f'{n}: {type(m).__name__}\n')
-        if self.cfg.transformer_lm.lora.use_lora:
+        #transfer learning
+        if self.cfg.transformer_lm.lora_kwargs.use_lora:
             trainable = ['lora_in_proj_a','lora_in_proj_b', 'mask_token_embedding', 'lora_a', 'lora_b']
             # 冻结模型中的所有参数
             for name,param in self.model.named_parameters():
@@ -176,13 +176,12 @@ class BeatmapGenSolver(base.StandardSolver):
                     param.requires_grad=False
                 else:
                     param.requires_grad=True
-
-            # 仅解冻 outputLM, difficulty_emb,  的参数
-            for param in self.model.outputLM.parameters():
+        # Iterate over each module and unfreeze its parameters
+        modules_to_unfreeze = [self.model.difficulty_emb, self.model.linear_transfer, self.model.transfer_lm, self.model.linear_out]
+        for module in modules_to_unfreeze:
+            for param in module.parameters():
                 param.requires_grad = True
 
-            for param in self.model.difficulty_emb.parameters():
-                param.requires_grad = True
 
     def build_dataloaders(self) -> None:
         """Instantiate audio dataloaders for each stage."""
@@ -252,7 +251,7 @@ class BeatmapGenSolver(base.StandardSolver):
         ce = torch.zeros([], device=targets.device)
         for logit, target, note_code_map in zip(logits, targets, note_code_maps):
             target = target[note_code_map]
-            assert logit.squeeze(0).shape[:-1] == target.shape
+            assert logit.squeeze(0).shape[:-1] == target.view(-1).shape
             
             logits_k = logit.contiguous().view(-1,logit.size(-1))
             targets_k = target.view(-1)
@@ -373,7 +372,7 @@ class BeatmapGenSolver(base.StandardSolver):
             torch.cuda.set_sync_debug_mode('warn')
         # Debug: Add assertions or print to check the target values
         assert (beatmap_tokens >= 0).all(), "beatmap_tokens contains negative values!"
-        assert (beatmap_tokens <= self.model.outputLM.token_id_size).all(), f"beatmap_tokens contains invalid class indices! Max target: {beatmap_tokens.max()}"
+        assert (beatmap_tokens <= self.model.token_id_size).all(), f"beatmap_tokens contains invalid class indices! Max target: {beatmap_tokens.max()}"
         with self.autocast:
             logits = self.model.compute_predictions(audio_tokens, beatmap_tokens, difficulty, note_code_maps)  # type: ignore # [B, S, P, card]
             # ce, rhythm_loss = self._compute_cross_entropy(logits, beatmap_tokens)

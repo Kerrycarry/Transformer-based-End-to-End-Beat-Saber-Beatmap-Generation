@@ -36,15 +36,14 @@ transformer_lm:
   attention_as_float32: false
 
   difficulty_num: 5
-  output_lm:
-    dim: 64
-    num_heads: 1
-    num_layers: 4
-    hidden_scale: 4
-    token_id_size: 18
-    position_size: 12
+  token_id_size: 18
+  position_size: 12
   
-  lora: 
+  sparse_kwargs:
+    use_sparse: True
+    window_size: 4 # attend to previous 4 notes, final window_size = 4 * 12 + 1 (+1 because attend itself)
+
+  lora_kwargs: 
     use_lora: True
     lora_r: 16
     lora_alpha: 16

@@ -158,16 +158,7 @@ def get_beatmapgen_lm_model(cfg: omegaconf.DictConfig) -> LMModel:
 
         pattern_provider = get_codebooks_pattern_provider(n_q, codebooks_pattern_cfg)
         
-        difficulty_num = kwargs.pop("difficulty_num", None)
-        temp = kwargs.pop("output_lm", None)
-        outputLM_kwargs = copy.deepcopy(kwargs)
-        outputLM_kwargs['dim'] = temp['dim']
-        outputLM_kwargs['num_heads'] = temp['num_heads']
-        outputLM_kwargs['num_layers'] = temp['num_layers']
-        outputLM_kwargs['token_id_size'] = temp['token_id_size']
-        outputLM_kwargs['position_size'] = temp['position_size']
-        outputLM_kwargs.pop("n_q")
-        outputLM_kwargs.pop("card")
+        transfer_lm_kwargs = dict_from_config(getattr(cfg, "transfer_lm"))
         return BeatmapLMModel(
             pattern_provider=pattern_provider,
             condition_provider=condition_provider,
@@ -177,8 +168,7 @@ def get_beatmapgen_lm_model(cfg: omegaconf.DictConfig) -> LMModel:
             attribute_dropout=attribute_dropout,
             dtype=getattr(torch, cfg.dtype),
             device=cfg.device,
-            difficulty_num = difficulty_num,
-            outputLM_kwargs = outputLM_kwargs,
+            **transfer_lm_kwargs,
             **kwargs,
         ).to(cfg.device)
     else:
