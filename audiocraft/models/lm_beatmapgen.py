@@ -150,7 +150,7 @@ class BeatmapLMModel(StreamingModule):
                  zero_bias_init: bool = False, cfg_dropout: float = 0, cfg_coef: float = 1.0,
                  attribute_dropout: tp.Dict[str, tp.Dict[str, float]] = {}, two_step_cfg: bool = False, difficulty_num: int = 5, 
                  transfer_dim: int = 64, transfer_num_heads: int = 4, transfer_num_layers: int = 1,
-                 sparse_kwargs: dict = {}, lora_kwargs: dict = {}, block_pos_embedding: bool = False,
+                 sparse_kwargs: dict = {}, lora_kwargs: dict = {}, blockwise_attention: bool = False,
                  **kwargs):
         super().__init__()
         self.cfg_coef = cfg_coef
@@ -166,11 +166,11 @@ class BeatmapLMModel(StreamingModule):
         # self.two_step_cfg = two_step_cfg
         self.emb = nn.ModuleList([ScaledEmbedding(embed_dim, dim, lr=emb_lr) for _ in range(n_q)])
         self.difficulty_num = difficulty_num
-        self.difficulty_emb = ScaledEmbedding(self.difficulty_num, transfer_dim, lr=emb_lr)
+        self.difficulty_emb = ScaledEmbedding(self.difficulty_num, transfer_dim * position_size, lr=emb_lr)
         self.position_size = position_size
         self.token_id_size = token_id_size + 1 # beatmap token id
         self.transfer_dim = transfer_dim
-        self.block_pos_embedding = block_pos_embedding
+        self.blockwise_attention = blockwise_attention
         self.beatmap_emb = ScaledEmbedding(self.token_id_size, transfer_dim, lr=emb_lr)
         self.use_sparse = sparse_kwargs['use_sparse']
         if 'activation' in kwargs:
@@ -185,8 +185,8 @@ class BeatmapLMModel(StreamingModule):
             self.out_norm2 = create_norm_fn(norm, transfer_dim)
         self.transfer_lm = StreamingTransformer(
             sparse_kwargs = sparse_kwargs, d_model=transfer_dim, num_heads=transfer_num_heads, dim_feedforward=int(hidden_scale * transfer_dim), num_layers = transfer_num_layers,
-            norm=norm, norm_first=norm_first, position_size = position_size, block_pos_embedding = block_pos_embedding, **kwargs)
-        self.linear_transfer = nn.Linear(dim, self.transfer_dim, bias=bias_proj)
+            norm=norm, norm_first=norm_first, position_size = position_size, blockwise_attention = blockwise_attention, **kwargs)
+        self.linear_transfer = nn.Linear(dim, self.transfer_dim * self.position_size, bias=bias_proj)
         self.linear_out = nn.Linear(self.transfer_dim, self.token_id_size, bias=bias_proj)
         # self.linears = nn.ModuleList([nn.Linear(dim, self.card, bias=bias_proj) for _ in range(n_q)])
         
@@ -221,7 +221,7 @@ class BeatmapLMModel(StreamingModule):
             init_layer(emb_layer, method=weight_init, init_depth=None, zero_bias_init=zero_bias_init)
         init_layer(self.difficulty_emb, method=weight_init, init_depth=None, zero_bias_init=zero_bias_init)
         init_layer(self.beatmap_emb, method=weight_init, init_depth=None, zero_bias_init=zero_bias_init)
-        if self.block_pos_embedding:
+        if self.blockwise_attention:
             init_layer(self.transfer_lm.local_pos_embedding, method=weight_init, init_depth=None, zero_bias_init=zero_bias_init)
 
         transformer_to_initialize = [self.transformer.layers, self.transfer_lm.layers]
@@ -333,9 +333,9 @@ class BeatmapLMModel(StreamingModule):
         for one_out, note_code_map, one_beatmap, one_difficulty in zip(out, note_code_maps, beatmap, difficulty):
             # use note represenetation
             cross_attention_input = self.linear_transfer(one_out[note_code_map])
-            one_beatmap = one_beatmap[note_code_map].view(-1)[:-1] # [S*P-1]
-            input_ = self.beatmap_emb(one_beatmap) # [S*P-1, dim]
-            input_ = torch.cat((self.difficulty_emb(one_difficulty).unsqueeze(0), input_), dim=0) #[S*P, dim]
+            one_beatmap = one_beatmap[note_code_map][:-1].view(-1) # [(S-1)*P]
+            input_ = self.beatmap_emb(one_beatmap) # [(S-1)*P, dim]
+            input_ = torch.cat((self.difficulty_emb(one_difficulty).reshape(self.position_size, -1), input_), dim=0) #[S*P, dim]
             logit = self.transfer_lm_forward(input_ = input_.unsqueeze(0), cross_attention_input = cross_attention_input.unsqueeze(0)) # [1, S*P, card]
             logits.append(logit)
         return logits
@@ -343,9 +343,9 @@ class BeatmapLMModel(StreamingModule):
     def transfer_lm_forward(self, input_: torch.Tensor, # [B, S*P, card]
                 cross_attention_input: torch.Tensor,
                 stage: int = -1) -> torch.Tensor:
-        if self.use_sparse:
-            from audiocraft.modules.transformer import set_efficient_attention_backend
-            set_efficient_attention_backend("xformers")
+        
+        from audiocraft.modules.transformer import set_efficient_attention_backend
+        set_efficient_attention_backend("xformers")
         out = self.transfer_lm(input_, cross_attention_src=cross_attention_input,
                             src_mask=(self.attn_mask_per_stage[stage] if stage >= 0 else None)) # [B, S*P, dim]
         if self.out_norm2:
@@ -428,34 +428,34 @@ class BeatmapLMModel(StreamingModule):
              # use note represenetation
             cross_attention_input = self.linear_transfer(one_out[note_code_map])
             unknown_token = -1
-            max_gen_len = len(note_code_map) * self.position_size
-            gen_sequence = torch.full((max_gen_len+1,), unknown_token, dtype=torch.long, device=device)
-            gen_sequence[0] = one_difficulty
+            max_gen_len = (len(note_code_map) + 1) * self.position_size
+            gen_sequence = torch.full((max_gen_len,), unknown_token, dtype=torch.long, device=device)
+            gen_sequence[0:self.position_size] = one_difficulty
             
 
-            start_offset_sequence = 1
+            start_offset_sequence = self.position_size
             with self.streaming():
                 unconditional_state = self.get_streaming_state()
                 prev_offset = 0
-                gen_sequence_len = gen_sequence.shape[-1]  # gen_sequence shape is [S * P + 1]
-                for offset in range(start_offset_sequence, gen_sequence_len):
+                gen_sequence_len = gen_sequence.shape[-1]  # gen_sequence shape is [(S+1) * P]
+                for offset in range(start_offset_sequence, gen_sequence_len, self.position_size):
                     # get current sequence (note that the streaming API is providing the caching over previous offsets)
                     curr_sequence = gen_sequence[prev_offset:offset]
                     # sample next token from the model, next token and curr_sequence shape is [1]
                     if start_offset_sequence == 1:
-                        input = self.difficulty_emb(one_difficulty)
+                        input = self.difficulty_emb(one_difficulty).reshape(self.position_size, -1)
                     else:
                         input = self.beatmap_emb(curr_sequence)
                     next_token = self._sample_next_token(
-                        input.unsqueeze(0).unsqueeze(0), cross_attention_input.unsqueeze(0), unconditional_state, use_sampling, temp, top_k, top_p,
+                        input.unsqueeze(0), cross_attention_input.unsqueeze(0), unconditional_state, use_sampling, temp, top_k, top_p,
                         cfg_coef=cfg_coef, two_step_cfg=two_step_cfg)
                     next_token = next_token.view(-1)
                     # ensure we don't overwrite prompt tokens, we only write over unknown tokens
                     # (then mask tokens should be left as is as well, which is correct)
-                    assert gen_sequence[offset:offset+1] == unknown_token 
-                    gen_sequence[offset:offset+1] = torch.where(
-                        gen_sequence[offset:offset+1] == unknown_token,
-                        next_token, gen_sequence[offset:offset+1]
+                    assert gen_sequence[offset:offset+self.position_size] == unknown_token 
+                    gen_sequence[offset:offset+self.position_size] = torch.where(
+                        gen_sequence[offset:offset+self.position_size] == unknown_token,
+                        next_token, gen_sequence[offset:offset+self.position_size]
                     )
                     prev_offset = offset
                     if callback is not None:
@@ -464,7 +464,7 @@ class BeatmapLMModel(StreamingModule):
             # ensure sequence has been entirely filled
             assert not (gen_sequence == unknown_token).any()
             # get back the codes, trimming the prompt if needed and cutting potentially incomplete timesteps
-            out_code = gen_sequence[1:]
+            out_code = gen_sequence[self.position_size:]
             # sanity checks over the returned codes and corresponding masks
             assert (out_code[:max_gen_len] != unknown_token).all()
             # ensure the returned codes are all valid
