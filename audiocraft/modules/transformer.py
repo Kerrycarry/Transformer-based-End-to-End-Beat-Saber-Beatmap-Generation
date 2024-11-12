@@ -752,23 +752,40 @@ class StreamingTransformer(StreamingModule):
 
         if self.positional_embedding in ['sin', 'sin_rope']:
             if self.block_pos_embedding:
-                assert T % self.position_size == 0
-                T = T // self.position_size
+                if not self._is_streaming: 
+                    assert T % self.position_size == 0
+                    T = T // self.position_size + 1
+                else:
+                    save_offsets = offsets
+                    offsets = (offsets - 1) // self.position_size + 1
             positions = torch.arange(T, device=x.device).view(1, -1, 1)
             positions = positions + offsets.view(-1, 1, 1)
             pos_emb = create_sin_embedding(positions, C, max_period=self.max_period, dtype=x.dtype)
             if self.block_pos_embedding:
-                pos_emb = pos_emb.repeat_interleave(self.position_size, dim=1)
-                indices = torch.arange(self.position_size).unsqueeze(0).repeat(B, 1).to(x.device)
-                local_pos_emb = self.local_pos_embedding(indices)
-                local_pos_emb = local_pos_emb.repeat(1, T, 1)
-                pos_emb += local_pos_emb
+                if not self._is_streaming:
+                    pos_emb = torch.cat((pos_emb[:,:1], pos_emb[:,1:].repeat_interleave(self.position_size, dim=1)), dim=1)
+                    pos_emb = pos_emb[:,:-1]
+                    T = T - 1
+                    assert pos_emb.shape[1] == T * self.position_size
+                    indices = torch.arange(self.position_size).unsqueeze(0).repeat(B, 1).to(x.device)
+                    local_pos_emb = self.local_pos_embedding(indices)
+                    local_pos_emb = local_pos_emb.repeat(1, T, 1)
+                    local_pos_emb = local_pos_emb[:,:-1]
+                    pos_emb[:,1:] += local_pos_emb
+                else:
+                    # check offset = 0 case
+                    if not torch.equal(save_offsets, torch.zeros(B, dtype=torch.long, device=x.device)):
+                        indice = ((save_offsets-1) % self.position_size).unsqueeze(0).repeat(B, 1)
+                        local_pos_emb = self.local_pos_embedding(indice)
+                        pos_emb += local_pos_emb
             x = x + self.positional_scale * pos_emb
 
         for layer in self.layers:
             x = self._apply_layer(layer, x, *args, **kwargs)
 
         if self._is_streaming:
+            if self.block_pos_embedding:
+                offsets = save_offsets
             self._streaming_state['offsets'] = offsets + T
 
         return x

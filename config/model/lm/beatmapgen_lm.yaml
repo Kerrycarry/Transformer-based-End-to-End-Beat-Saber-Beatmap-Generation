@@ -41,8 +41,8 @@ transformer_lm:
   block_pos_embedding: True
   
   sparse_kwargs:
-    use_sparse: True
-    window_size: 4 # attend to previous 4 notes, final window_size = 4 * 12 + 1 (+1 because attend itself)
+    use_sparse: False
+    window_size: 4 # attend to previous 4 notes, final window_size = 32 * 12 + 1 (+1 because attend itself)
 
   lora_kwargs: 
     use_lora: True

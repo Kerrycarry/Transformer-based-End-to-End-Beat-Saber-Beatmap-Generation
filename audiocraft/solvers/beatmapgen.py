@@ -177,7 +177,7 @@ class BeatmapGenSolver(base.StandardSolver):
                 else:
                     param.requires_grad=True
         # Iterate over each module and unfreeze its parameters
-        modules_to_unfreeze = [self.model.difficulty_emb, self.model.linear_transfer, self.model.transfer_lm, self.model.linear_out, self.model.out_norm2, self.model.transfer_lm.local_pos_embedding]
+        modules_to_unfreeze = [self.model.difficulty_emb, self.model.linear_transfer, self.model.transfer_lm, self.model.linear_out, self.model.out_norm2, self.model.beatmap_emb]
         for module in modules_to_unfreeze:
             for param in module.parameters():
                 param.requires_grad = True
@@ -465,7 +465,7 @@ class BeatmapGenSolver(base.StandardSolver):
         note_code_maps = [segment_info.note_code_map for segment_info in segment_infos]
         with self.autocast:
             gen_beatmap_tokens = self.model.generate(
-                audio_tokens, difficulty, note_code_maps, max_gen_len=self.model.position_size,
+                audio_tokens, difficulty, note_code_maps,
                 **self.generation_params)
 
         # generate audio from tokens

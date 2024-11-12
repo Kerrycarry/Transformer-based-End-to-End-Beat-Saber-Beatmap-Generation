@@ -166,11 +166,13 @@ class BeatmapLMModel(StreamingModule):
         # self.two_step_cfg = two_step_cfg
         self.emb = nn.ModuleList([ScaledEmbedding(embed_dim, dim, lr=emb_lr) for _ in range(n_q)])
         self.difficulty_num = difficulty_num
-        self.difficulty_emb = ScaledEmbedding(self.difficulty_num, self.dim, lr=emb_lr)
+        self.difficulty_emb = ScaledEmbedding(self.difficulty_num, transfer_dim, lr=emb_lr)
         self.position_size = position_size
-        self.token_id_size = token_id_size + 1
+        self.token_id_size = token_id_size + 1 # beatmap token id
         self.transfer_dim = transfer_dim
         self.block_pos_embedding = block_pos_embedding
+        self.beatmap_emb = ScaledEmbedding(self.token_id_size, transfer_dim, lr=emb_lr)
+        self.use_sparse = sparse_kwargs['use_sparse']
         if 'activation' in kwargs:
             kwargs['activation'] = get_activation_fn(kwargs['activation'])
         self.transformer = StreamingTransformer(
@@ -184,7 +186,7 @@ class BeatmapLMModel(StreamingModule):
         self.transfer_lm = StreamingTransformer(
             sparse_kwargs = sparse_kwargs, d_model=transfer_dim, num_heads=transfer_num_heads, dim_feedforward=int(hidden_scale * transfer_dim), num_layers = transfer_num_layers,
             norm=norm, norm_first=norm_first, position_size = position_size, block_pos_embedding = block_pos_embedding, **kwargs)
-        self.linear_transfer = nn.Linear(dim, self.transfer_dim * position_size, bias=bias_proj)
+        self.linear_transfer = nn.Linear(dim, self.transfer_dim, bias=bias_proj)
         self.linear_out = nn.Linear(self.transfer_dim, self.token_id_size, bias=bias_proj)
         # self.linears = nn.ModuleList([nn.Linear(dim, self.card, bias=bias_proj) for _ in range(n_q)])
         
@@ -218,6 +220,7 @@ class BeatmapLMModel(StreamingModule):
         for emb_layer in self.emb:
             init_layer(emb_layer, method=weight_init, init_depth=None, zero_bias_init=zero_bias_init)
         init_layer(self.difficulty_emb, method=weight_init, init_depth=None, zero_bias_init=zero_bias_init)
+        init_layer(self.beatmap_emb, method=weight_init, init_depth=None, zero_bias_init=zero_bias_init)
         if self.block_pos_embedding:
             init_layer(self.transfer_lm.local_pos_embedding, method=weight_init, init_depth=None, zero_bias_init=zero_bias_init)
 
@@ -245,9 +248,7 @@ class BeatmapLMModel(StreamingModule):
     def num_codebooks(self) -> int:
         return self.n_q
 
-    def forward(self, sequence: torch.Tensor,
-                beatmap: torch.Tensor,
-                difficulty: torch.Tensor,
+    def forward(self, codes: torch.Tensor,
                 note_code_maps: list,
                 # conditions: tp.List[ConditioningAttributes],
                 # condition_tensors: tp.Optional[ConditionTensors] = None,
@@ -271,11 +272,15 @@ class BeatmapLMModel(StreamingModule):
         Returns:
             torch.Tensor: Logits.
         """
-        B, K, S = sequence.shape
+        B, K, T = codes.shape
+        codes = codes.contiguous()
+        # map codes [B, K, T] into pattern sequence [B, K, S] using special_token_id for masked tokens
+        pattern = self.pattern_provider.get_pattern(T)
+        sequence, sequence_indexes, sequence_mask = pattern.build_pattern_sequence(
+            codes, self.special_token_id
+        )
         assert K == self.num_codebooks, "Sequence shape must match the specified number of codebooks"
         input_ = sum([self.emb[k](sequence[:, k]) for k in range(K)]) # batch, sequence, dim
-        
-        input_[:, 0, :] += self.difficulty_emb(difficulty)
         mask_positions = [[pos + 4 for pos in positions] for positions in note_code_maps]
         for i, positions in enumerate(mask_positions):
             input_[i, positions, :] += self.mask_token_embedding
@@ -284,25 +289,9 @@ class BeatmapLMModel(StreamingModule):
                                src_mask=(self.attn_mask_per_stage[stage] if stage >= 0 else None))
         if self.out_norm:
             out = self.out_norm(out)
-        
         out = out[:,4:,:]
-        from audiocraft.modules.transformer import set_efficient_attention_backend
-        set_efficient_attention_backend("xformers")
-        logits = []
-        # for one_out, note_code_map, one_beatmap in zip(out, note_code_maps, beatmap):
-            # logits.append(self.outputLM.compute_predictions(one_beatmap[note_code_map].unsqueeze(0), one_out[note_code_map].unsqueeze(0)))
-        for one_out, note_code_map in zip(out, note_code_maps):
-            input_ = self.linear_transfer(one_out[note_code_map].unsqueeze(0))
-            B, S, K = input_.shape
-            input_ = input_.reshape(B, S* self.position_size, self.transfer_dim)
-            cross_attention_input = torch.zeros(B, 1, self.transfer_dim).cuda()
-            out = self.transfer_lm(input_, cross_attention_src=cross_attention_input,
-                               src_mask=(self.attn_mask_per_stage[stage] if stage >= 0 else None)) # [1, S*12, K]
-            if self.out_norm2:
-                out = self.out_norm2(out) 
-            logit = self.linear_out(out) # [1, S*12, card]
-            logits.append(logit)
-        return logits  #[B, S*12, card]
+
+        return out  #[B, S, dim]
 
     def compute_predictions(
             self, codes: torch.Tensor,
@@ -336,22 +325,37 @@ class BeatmapLMModel(StreamingModule):
                     Given the specified interleaving strategies, parts of the logits and codes should
                     not be considered as valid predictions because of invalid context.
         """
-        B, K, T = codes.shape
-        codes = codes.contiguous()
-        # map codes [B, K, T] into pattern sequence [B, K, S] using special_token_id for masked tokens
-        pattern = self.pattern_provider.get_pattern(T)
-        sequence_codes, sequence_indexes, sequence_mask = pattern.build_pattern_sequence(
-            codes, self.special_token_id
-        )
-        # apply model on pattern sequence
+        # use musicgen output as cross attention source for transfer LM
         model = self if self._fsdp is None else self._fsdp
-        logits = model(sequence_codes, beatmap, difficulty, note_code_maps, stage=stage)  # [B, K, S, card]
+        out = model(codes, note_code_maps, stage=stage)
         
+        logits = []
+        for one_out, note_code_map, one_beatmap, one_difficulty in zip(out, note_code_maps, beatmap, difficulty):
+            # use note represenetation
+            cross_attention_input = self.linear_transfer(one_out[note_code_map])
+            one_beatmap = one_beatmap[note_code_map].view(-1)[:-1] # [S*P-1]
+            input_ = self.beatmap_emb(one_beatmap) # [S*P-1, dim]
+            input_ = torch.cat((self.difficulty_emb(one_difficulty).unsqueeze(0), input_), dim=0) #[S*P, dim]
+            logit = self.transfer_lm_forward(input_ = input_.unsqueeze(0), cross_attention_input = cross_attention_input.unsqueeze(0)) # [1, S*P, card]
+            logits.append(logit)
         return logits
+    
+    def transfer_lm_forward(self, input_: torch.Tensor, # [B, S*P, card]
+                cross_attention_input: torch.Tensor,
+                stage: int = -1) -> torch.Tensor:
+        if self.use_sparse:
+            from audiocraft.modules.transformer import set_efficient_attention_backend
+            set_efficient_attention_backend("xformers")
+        out = self.transfer_lm(input_, cross_attention_src=cross_attention_input,
+                            src_mask=(self.attn_mask_per_stage[stage] if stage >= 0 else None)) # [B, S*P, dim]
+        if self.out_norm2:
+            out = self.out_norm2(out) 
+        logit = self.linear_out(out) # [B, S*P, card]
+        return logit
 
     def _sample_next_token(self,
-                           sequence: torch.Tensor,
-                           cfg_conditions: CFGConditions,
+                           input: torch.Tensor,
+                           cross_attention_input: torch.Tensor,
                            unconditional_state: State,
                            use_sampling: bool = False,
                            temp: float = 1.0,
@@ -376,41 +380,11 @@ class BeatmapLMModel(StreamingModule):
         Returns:
             next_token (torch.Tensor): Next token tensor of shape [B, K, 1].
         """
-        B = sequence.shape[0]
-        cfg_coef = self.cfg_coef if cfg_coef is None else cfg_coef
-        model = self if self._fsdp is None else self._fsdp
-        two_step_cfg = self.two_step_cfg if two_step_cfg is None else two_step_cfg
-        if two_step_cfg and cfg_conditions != {}:
-            assert isinstance(cfg_conditions, tuple), type(cfg_conditions)
-            condition_tensors, null_condition_tensors = cfg_conditions
-            cond_logits = model(sequence, conditions=[], condition_tensors=condition_tensors)
-            state = self.get_streaming_state()
-            self.set_streaming_state(unconditional_state)
-            uncond_logits = model(sequence, conditions=[], condition_tensors=null_condition_tensors)
-            unconditional_state.update(self.get_streaming_state())
-            self.set_streaming_state(state)
-            logits = uncond_logits + (cond_logits - uncond_logits) * self.cfg_coef
-        else:
-            assert isinstance(cfg_conditions, dict)
-            condition_tensors = cfg_conditions
-            if condition_tensors:
-                # Preparing for CFG, predicting both conditional and unconditional logits.
-                sequence = torch.cat([sequence, sequence], dim=0)
-            all_logits = model(
-                sequence,
-                conditions=[], condition_tensors=condition_tensors)
-            if condition_tensors:
-                cond_logits, uncond_logits = all_logits.split(B, dim=0)  # [B, K, T, card]
-                logits = uncond_logits + (cond_logits - uncond_logits) * cfg_coef
-            else:
-                logits = all_logits
-
-        logits = logits.permute(0, 1, 3, 2)  # [B, K, card, T]
-        logits = logits[..., -1]  # [B x K x card]
+        logit = self.transfer_lm_forward(input_ = input, cross_attention_input = cross_attention_input) # [1, 1, card]
 
         # Apply softmax for sampling if temp > 0. Else, do greedy sampling to avoid zero division error.
         if use_sampling and temp > 0.0:
-            probs = torch.softmax(logits / temp, dim=-1)
+            probs = torch.softmax(logit / temp, dim=-1)
             if top_p > 0.0:
                 next_token = utils.sample_top_p(probs, p=top_p)
             elif top_k > 0:
@@ -418,7 +392,7 @@ class BeatmapLMModel(StreamingModule):
             else:
                 next_token = utils.multinomial(probs, num_samples=1)
         else:
-            next_token = torch.argmax(logits, dim=-1, keepdim=True)
+            next_token = torch.argmax(logit, dim=-1, keepdim=True)
 
         return next_token
 
@@ -429,22 +403,72 @@ class BeatmapLMModel(StreamingModule):
             difficulty: torch.Tensor,
             note_code_maps: list,
             stage: int = -1,
-            keep_only_valid_steps: bool = True,
-            **kwargs):
-        B, K, T = codes.shape
-        codes = codes.contiguous()
-        # map codes [B, K, T] into pattern sequence [B, K, S] using special_token_id for masked tokens
-        pattern = self.pattern_provider.get_pattern(T)
-        sequence_codes, sequence_indexes, sequence_mask = pattern.build_pattern_sequence(
-            codes, self.special_token_id, 
-        )
+            prompt: tp.Optional[torch.Tensor] = None,
+            num_samples: tp.Optional[int] = None,
+            use_sampling: bool = True,
+            temp: float = 1.0,
+            top_k: int = 250,
+            top_p: float = 0.0,
+            cfg_coef: tp.Optional[float] = None,
+            two_step_cfg: tp.Optional[bool] = None,
+            remove_prompts: bool = False,
+            check: bool = False,
+            callback: tp.Optional[tp.Callable[[int, int], None]] = None,
+            **kwargs) -> torch.Tensor:
+        assert not self.training, "generation shouldn't be used in training mode."
+        first_param = next(iter(self.parameters()))
+        device = first_param.device
 
+        # use musicgen output as cross attention source for transfer LM
         model = self if self._fsdp is None else self._fsdp
-        logits = model(sequence_codes, None, difficulty, note_code_maps, stage=stage)  # [[B, S*12, card],...]
+        out = model(codes, note_code_maps, stage=stage)
+        
         out_codes = []
-        for logit in logits:
-            probs = torch.softmax(logit / kwargs['temp'], dim=-1)
-            out_code = utils.sample_top_k(probs, k= kwargs['top_k']).reshape(1, -1, self.position_size)
-            out_codes.append(out_code)
+        for one_out, one_difficulty, note_code_map in zip(out, difficulty, note_code_maps):
+             # use note represenetation
+            cross_attention_input = self.linear_transfer(one_out[note_code_map])
+            unknown_token = -1
+            max_gen_len = len(note_code_map) * self.position_size
+            gen_sequence = torch.full((max_gen_len+1,), unknown_token, dtype=torch.long, device=device)
+            gen_sequence[0] = one_difficulty
+            
+
+            start_offset_sequence = 1
+            with self.streaming():
+                unconditional_state = self.get_streaming_state()
+                prev_offset = 0
+                gen_sequence_len = gen_sequence.shape[-1]  # gen_sequence shape is [S * P + 1]
+                for offset in range(start_offset_sequence, gen_sequence_len):
+                    # get current sequence (note that the streaming API is providing the caching over previous offsets)
+                    curr_sequence = gen_sequence[prev_offset:offset]
+                    # sample next token from the model, next token and curr_sequence shape is [1]
+                    if start_offset_sequence == 1:
+                        input = self.difficulty_emb(one_difficulty)
+                    else:
+                        input = self.beatmap_emb(curr_sequence)
+                    next_token = self._sample_next_token(
+                        input.unsqueeze(0).unsqueeze(0), cross_attention_input.unsqueeze(0), unconditional_state, use_sampling, temp, top_k, top_p,
+                        cfg_coef=cfg_coef, two_step_cfg=two_step_cfg)
+                    next_token = next_token.view(-1)
+                    # ensure we don't overwrite prompt tokens, we only write over unknown tokens
+                    # (then mask tokens should be left as is as well, which is correct)
+                    assert gen_sequence[offset:offset+1] == unknown_token 
+                    gen_sequence[offset:offset+1] = torch.where(
+                        gen_sequence[offset:offset+1] == unknown_token,
+                        next_token, gen_sequence[offset:offset+1]
+                    )
+                    prev_offset = offset
+                    if callback is not None:
+                        callback(1 + offset - start_offset_sequence, gen_sequence_len - start_offset_sequence)
+            unconditional_state.clear()
+            # ensure sequence has been entirely filled
+            assert not (gen_sequence == unknown_token).any()
+            # get back the codes, trimming the prompt if needed and cutting potentially incomplete timesteps
+            out_code = gen_sequence[1:]
+            # sanity checks over the returned codes and corresponding masks
+            assert (out_code[:max_gen_len] != unknown_token).all()
+            # ensure the returned codes are all valid
+            assert (out_code >= 0).all() and (out_code <= self.token_id_size).all()
+            out_codes.append(out_code.reshape(1, -1, self.position_size))
         return out_codes
         
