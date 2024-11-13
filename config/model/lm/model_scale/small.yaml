@@ -8,6 +8,6 @@ transformer_lm:
   num_layers: 24
 
 transfer_lm:
-  transfer_dim: 128
-  transfer_num_heads: 16
+  transfer_dim: 64
+  transfer_num_heads: 8
   transfer_num_layers: 2

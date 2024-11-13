@@ -180,7 +180,7 @@ class StreamingMultiheadAttention(StreamingModule):
                  rope: tp.Optional[RotaryEmbedding] = None, cross_attention: bool = False,
                  safe_streaming: bool = True, qk_layer_norm: bool = False, kv_repeat: int = 1,
                  use_lora: bool = False, lora_r: int = 8, lora_alpha: int = 16, 
-                 use_sparse: bool = False, window_size: int = 4, position_size: int = 12, blockwise_attention: bool = False,
+                 use_sparse: bool = False, window_size: int = 4, position_size: int = 12, blockwise_attention: bool = False, blockwise_sa_float32: bool = False,
                  device=None, dtype=None):
         super().__init__()
         factory_kwargs = {'device': device, 'dtype': dtype}
@@ -206,6 +206,9 @@ class StreamingMultiheadAttention(StreamingModule):
         self.window_size = window_size
         self.position_size = position_size
         self.blockwise_attention = blockwise_attention
+        if blockwise_attention and blockwise_sa_float32:
+            self.attention_as_float32 = True
+
         if cross_attention:
             assert not causal, "Causal cannot work with cross attention."
             assert rope is None, "Rope cannot work with cross attention."
@@ -269,9 +272,11 @@ class StreamingMultiheadAttention(StreamingModule):
             if current_steps == 1:
                 # If we only have one step, then we do not need a mask.
                 return None
-            elif 'past_keys' in self._streaming_state:
+            # blockwise_attention inference case
+            elif 'past_keys' in self._streaming_state or self._is_streaming:
                 return None
                 # raise RuntimeError("Not supported at the moment")
+            # blockwise_attention training case
             elif self.blockwise_attention:
                 assert current_steps % self.position_size == 0
                 N = self.position_size
@@ -381,7 +386,7 @@ class StreamingMultiheadAttention(StreamingModule):
             assert query.shape[1] == key.shape[1], "Causal only for same length query / key / value"
             assert value.shape[1] == key.shape[1], "Causal only for same length query / key / value"
             attn_mask = self._get_mask(query.shape[1], query.device, query.dtype)
-            if self.blockwise_attention:
+            if self.blockwise_attention and not self._is_streaming:
                 custom_attn_mask = True
 
         if self.custom:
@@ -468,7 +473,7 @@ class StreamingMultiheadAttention(StreamingModule):
                     seq_len = query.shape[1]
                     attn_mask = attn_mask.to(q.dtype)
                     attn_mask = attn_mask.to(q.device)
-                    attn_mask = attn_mask.repeat((q.shape[0], q.shape[2], 1, 1))
+                    attn_mask = attn_mask.expand((q.shape[0], q.shape[2], seq_len, seq_len))
                     assert attn_mask.shape[2] == seq_len
                     assert attn_mask.shape[3] == seq_len
                     attn_mask = attn_mask[..., :seq_len, :seq_len]
@@ -564,7 +569,7 @@ class StreamingTransformerLayer(nn.TransformerEncoderLayer):
                  qk_layer_norm: bool = False, qk_layer_norm_cross: bool = False,
                  cross_attention: bool = False, layer_scale: tp.Optional[float] = None,
                  rope: tp.Optional[RotaryEmbedding] = None, attention_dropout: tp.Optional[float] = None,
-                 kv_repeat: int = 1, norm: str = 'layer_norm', position_size: int = 12, blockwise_attention: bool = False, device=None, dtype=None, **kwargs):
+                 kv_repeat: int = 1, norm: str = 'layer_norm', position_size: int = 12, blockwise_attention: bool = False, blockwise_sa_float32: bool = False, device=None, dtype=None, **kwargs):
         super().__init__(d_model, num_heads, dim_feedforward, dropout,
                          device=device, dtype=dtype, batch_first=True, **kwargs)
         factory_kwargs = {'device': device, 'dtype': dtype}
@@ -580,7 +585,7 @@ class StreamingTransformerLayer(nn.TransformerEncoderLayer):
         }
         self.self_attn: StreamingMultiheadAttention = StreamingMultiheadAttention(
             causal=causal, past_context=past_context, rope=rope, qk_layer_norm=qk_layer_norm,
-            kv_repeat=kv_repeat, position_size = position_size, blockwise_attention = blockwise_attention, **lora_kwargs, **sparse_kwargs, **attn_kwargs, **factory_kwargs)  # type: ignore
+            kv_repeat=kv_repeat, position_size = position_size, blockwise_attention = blockwise_attention, blockwise_sa_float32 = blockwise_sa_float32, **lora_kwargs, **sparse_kwargs, **attn_kwargs, **factory_kwargs)  # type: ignore
         # Redefine feedforward layers to expose bias parameter
         self.linear1 = nn.Linear(d_model, dim_feedforward, bias=bias_ff, **factory_kwargs)
         self.linear2 = nn.Linear(dim_feedforward, d_model, bias=bias_ff, **factory_kwargs)

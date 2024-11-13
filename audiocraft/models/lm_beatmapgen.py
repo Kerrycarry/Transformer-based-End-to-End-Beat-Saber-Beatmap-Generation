@@ -27,7 +27,7 @@ from ..modules.conditioners import (
 )
 from ..modules.codebooks_patterns import CodebooksPatternProvider
 from ..modules.activations import get_activation_fn
-
+from audiocraft.modules.transformer import set_efficient_attention_backend
 
 logger = logging.getLogger(__name__)
 ConditionTensors = tp.Dict[str, ConditionType]
@@ -150,7 +150,7 @@ class BeatmapLMModel(StreamingModule):
                  zero_bias_init: bool = False, cfg_dropout: float = 0, cfg_coef: float = 1.0,
                  attribute_dropout: tp.Dict[str, tp.Dict[str, float]] = {}, two_step_cfg: bool = False, difficulty_num: int = 5, 
                  transfer_dim: int = 64, transfer_num_heads: int = 4, transfer_num_layers: int = 1,
-                 sparse_kwargs: dict = {}, lora_kwargs: dict = {}, blockwise_attention: bool = False,
+                 sparse_kwargs: dict = {}, lora_kwargs: dict = {}, blockwise_attention: bool = False, blockwise_sa_float32: bool = False,
                  **kwargs):
         super().__init__()
         self.cfg_coef = cfg_coef
@@ -185,7 +185,7 @@ class BeatmapLMModel(StreamingModule):
             self.out_norm2 = create_norm_fn(norm, transfer_dim)
         self.transfer_lm = StreamingTransformer(
             sparse_kwargs = sparse_kwargs, d_model=transfer_dim, num_heads=transfer_num_heads, dim_feedforward=int(hidden_scale * transfer_dim), num_layers = transfer_num_layers,
-            norm=norm, norm_first=norm_first, position_size = position_size, blockwise_attention = blockwise_attention, **kwargs)
+            norm=norm, norm_first=norm_first, position_size = position_size, blockwise_attention = blockwise_attention, blockwise_sa_float32 = blockwise_sa_float32, **kwargs)
         self.linear_transfer = nn.Linear(dim, self.transfer_dim * self.position_size, bias=bias_proj)
         self.linear_out = nn.Linear(self.transfer_dim, self.token_id_size, bias=bias_proj)
         # self.linears = nn.ModuleList([nn.Linear(dim, self.card, bias=bias_proj) for _ in range(n_q)])
@@ -272,6 +272,7 @@ class BeatmapLMModel(StreamingModule):
         Returns:
             torch.Tensor: Logits.
         """
+        set_efficient_attention_backend("torch")
         B, K, T = codes.shape
         codes = codes.contiguous()
         # map codes [B, K, T] into pattern sequence [B, K, S] using special_token_id for masked tokens
@@ -343,8 +344,6 @@ class BeatmapLMModel(StreamingModule):
     def transfer_lm_forward(self, input_: torch.Tensor, # [B, S*P, card]
                 cross_attention_input: torch.Tensor,
                 stage: int = -1) -> torch.Tensor:
-        
-        from audiocraft.modules.transformer import set_efficient_attention_backend
         set_efficient_attention_backend("xformers")
         out = self.transfer_lm(input_, cross_attention_src=cross_attention_input,
                             src_mask=(self.attn_mask_per_stage[stage] if stage >= 0 else None)) # [B, S*P, dim]
@@ -452,7 +451,7 @@ class BeatmapLMModel(StreamingModule):
                     next_token = next_token.view(-1)
                     # ensure we don't overwrite prompt tokens, we only write over unknown tokens
                     # (then mask tokens should be left as is as well, which is correct)
-                    assert gen_sequence[offset:offset+self.position_size] == unknown_token 
+                    assert (gen_sequence[offset:offset+self.position_size] == unknown_token).any()
                     gen_sequence[offset:offset+self.position_size] = torch.where(
                         gen_sequence[offset:offset+self.position_size] == unknown_token,
                         next_token, gen_sequence[offset:offset+self.position_size]
