@@ -18,7 +18,7 @@ run_dora_process_1() {
         conditioner=text2music \
         cache.path=/mnt/workspace/cache/bs_rank \
         cache.write=True \
-        --clear > beatmapgen_log_dora.txt 2>&1 &
+        $CLEAR_OPTION > beatmapgen_log_dora.txt 2>&1 &
     DORA_PID=$!
     wait $DORA_PID
 }
@@ -31,8 +31,8 @@ run_dora_process_2() {
         model/lm/model_scale=small \
         conditioner=text2music \
         cache.path=/mnt/workspace/cache/bs_rank \
-        continue_from=/root/workspace/audiocraft_download/beatmapgen_finetune_musicgen-small.th \
-        --clear > beatmapgen_log_dora.txt 2>&1 &
+        continue_from=/root/autodl-tmp/audiocraft_download/beatmapgen_finetune_musicgen-small.th \
+        $CLEAR_OPTION > beatmapgen_log_dora.txt 2>&1 &
     DORA_PID=$!
     wait $DORA_PID
 }
@@ -44,8 +44,8 @@ run_dora_process_3() {
         solver=beatmapgen/beatmapgen_base_32khz \
         model/lm/model_scale=small \
         conditioner=text2music \
-        continue_from=/root/workspace/audiocraft_download/beatmapgen_finetune_musicgen-small.th \
-        --clear > beatmapgen_log_dora.txt 2>&1 &
+        continue_from=/root/autodl-tmp/audiocraft_download/beatmapgen_finetune_musicgen-small.th \
+        $CLEAR_OPTION > beatmapgen_log_dora.txt 2>&1 &
     DORA_PID=$!
     wait $DORA_PID
 }
@@ -82,6 +82,11 @@ kill_process() {
         fi
     fi
 }
+# 根据参数运行不同的流程
+CLEAR_OPTION="" # 默认不使用 --clear
+if [[ "$2" == "--clear" ]]; then
+    CLEAR_OPTION="--clear"
+fi
 
 # 根据参数运行不同的流程
 if [[ "$1" == "-1" ]]; then
@@ -116,6 +121,9 @@ fi
 # nohup ./beatmapgen.sh -1 > beatmapgen_log.txt 2>&1 &
 # nohup ./beatmapgen.sh -2 > beatmapgen_log.txt 2>&1 &
 # nohup ./beatmapgen.sh -3 > beatmapgen_log.txt 2>&1 &
+# nohup ./beatmapgen.sh -1 --clear > beatmapgen_log.txt 2>&1 &
+# nohup ./beatmapgen.sh -2 --clear > beatmapgen_log.txt 2>&1 &
+# nohup ./beatmapgen.sh -3 --clear > beatmapgen_log.txt 2>&1 &
 # 启动manifest制作流程
 # nohup ./beatmapgen.sh -4 > beatmapgen_log.txt 2>&1 &
 # 启动 api

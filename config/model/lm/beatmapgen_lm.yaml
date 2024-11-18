@@ -39,9 +39,8 @@ transformer_lm:
   token_id_size: 18  # need + 1 in code because 18 itself is padding token
   position_size: 12
   blockwise_attention: True
-  blockwise_sa_float32: True
-  # V100 need float32 instead of 16. turn it true and set higher transfer_num_heads if using newer cards
-
+  pad_kv: False
+  # V100 need float32 instead of float16 for xformers. turn it False and set higher transfer_num_heads if using newer cards
   sparse_kwargs:
     use_sparse: False
     window_size: 4 # attend to previous 4 notes, final window_size = 32 * 12 + 1 (+1 because attend itself)
