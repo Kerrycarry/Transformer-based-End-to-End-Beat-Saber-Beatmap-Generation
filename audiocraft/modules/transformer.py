@@ -180,7 +180,8 @@ class StreamingMultiheadAttention(StreamingModule):
                  rope: tp.Optional[RotaryEmbedding] = None, cross_attention: bool = False,
                  safe_streaming: bool = True, qk_layer_norm: bool = False, kv_repeat: int = 1,
                  use_lora: bool = False, lora_r: int = 8, lora_alpha: int = 16, 
-                 use_sparse: bool = False, window_size: int = 4, position_size: int = 12, blockwise_attention: bool = False, pad_kv: bool = False,
+                 use_sparse: bool = False, window_size: int = 4, position_size: int = 12, pad_kv: bool = False,
+                 block_self_attention: bool = False, block_cross_attention: bool = False, local_cross_attention: bool = False, 
                  device=None, dtype=None):
         super().__init__()
         factory_kwargs = {'device': device, 'dtype': dtype}
@@ -203,7 +204,9 @@ class StreamingMultiheadAttention(StreamingModule):
         self.use_sparse = use_sparse
         self.window_size = window_size
         self.position_size = position_size
-        self.blockwise_attention = blockwise_attention
+        self.block_self_attention = block_self_attention
+        self.block_cross_attention = block_cross_attention
+        self.local_cross_attention = local_cross_attention
         self.pad_kv = pad_kv
         if cross_attention:
             assert not causal, "Causal cannot work with cross attention."
@@ -359,7 +362,7 @@ class StreamingMultiheadAttention(StreamingModule):
 
         custom_attn_mask = attn_mask is not None
 
-        if not self.blockwise_attention:
+        if not self.block_self_attention:
             # musicgen case
             if self.causal:
                 assert attn_mask is None
@@ -385,15 +388,24 @@ class StreamingMultiheadAttention(StreamingModule):
                 # add full block attention along diagonal line
                 for i in range(0, current_steps, N):
                     attn_mask[..., i:i+N, i:i+N] = True
-            # beatmapgen ca traing case
+            # beatmapgen ca training case
             else:
-                custom_attn_mask = True
-                assert (current_steps // self.position_size) == key.shape[1]
-                assert (current_steps // self.position_size) == value.shape[1]
-                cross_src_length = key.shape[1]
-                attn_mask = torch.zeros(1, 1, current_steps, cross_src_length, dtype=torch.bool)
-                for i in range(0, cross_src_length):
-                    attn_mask[..., i*N:(i+1)*N, i] = True
+                if not self.local_cross_attention: # full cross attention case
+                    attn_mask = None
+                else:
+                    if self.block_cross_attention:
+                        custom_attn_mask = True
+                        assert current_steps == key.shape[1]
+                        assert current_steps == value.shape[1]
+                        attn_mask = torch.eye(current_steps, current_steps, dtype=torch.bool).unsqueeze(0).unsqueeze(0)
+                    else:
+                        custom_attn_mask = True
+                        assert (current_steps // self.position_size) == key.shape[1]
+                        assert (current_steps // self.position_size) == value.shape[1]
+                        cross_src_length = key.shape[1]
+                        attn_mask = torch.zeros(1, 1, current_steps, cross_src_length, dtype=torch.bool)
+                        for i in range(0, cross_src_length):
+                            attn_mask[..., i*N:(i+1)*N, i] = True
 
         if self.custom:
             # custom implementation
@@ -409,17 +421,21 @@ class StreamingMultiheadAttention(StreamingModule):
                     bias_q = self.in_proj_bias[:dim]
                     bias_k = self.in_proj_bias[dim: 2 * dim]
                     bias_v = self.in_proj_bias[2 * dim:]
+                if self.block_cross_attention:
+                    B, T, D = query.shape
+                    assert T % 12 == 0
+                    query = query.view(B, -1, self.position_size * D)
                 q = nn.functional.linear(query, self.in_proj_weight[:dim], bias_q)
                 # todo: when streaming, we could actually save k, v and check the shape actually match.
                 k = nn.functional.linear(key, self.in_proj_weight[dim: 2 * dim], bias_k)
                 v = nn.functional.linear(value, self.in_proj_weight[2 * dim:], bias_v)
-                if self.use_lora:
-                    lora_query_output = query @ ((self.lora_in_proj_a @ self.lora_in_proj_b[:, :dim]) * self.lora_alpha / self.lora_r)
-                    lora_key_output = key @ ((self.lora_in_proj_a @ self.lora_in_proj_b[:, dim: 2 * dim]) * self.lora_alpha / self.lora_r)
-                    lora_value_output = value @ ((self.lora_in_proj_a @ self.lora_in_proj_b[:, 2 * dim:]) * self.lora_alpha / self.lora_r)
-                    q += lora_query_output
-                    k += lora_key_output
-                    v += lora_value_output
+                # if self.use_lora:
+                #     lora_query_output = query @ ((self.lora_in_proj_a @ self.lora_in_proj_b[:, :dim]) * self.lora_alpha / self.lora_r)
+                #     lora_key_output = key @ ((self.lora_in_proj_a @ self.lora_in_proj_b[:, dim: 2 * dim]) * self.lora_alpha / self.lora_r)
+                #     lora_value_output = value @ ((self.lora_in_proj_a @ self.lora_in_proj_b[:, 2 * dim:]) * self.lora_alpha / self.lora_r)
+                #     q += lora_query_output
+                #     k += lora_key_output
+                #     v += lora_value_output
 
                 if self.qk_layer_norm is True:
                     q = self.q_layer_norm(q)
@@ -487,7 +503,7 @@ class StreamingMultiheadAttention(StreamingModule):
 
                 p = self.dropout if self.training else 0
                 if _efficient_attention_backend == 'torch':
-                    if not self.blockwise_attention:
+                    if not self.block_self_attention:
                         x = torch.nn.functional.scaled_dot_product_attention(
                             q, k, v, is_causal=attn_mask is not None, dropout_p=p)
                     else:
@@ -519,10 +535,14 @@ class StreamingMultiheadAttention(StreamingModule):
                 x = torch.einsum(f"b h t k, {key_layout} -> {layout}", w, v)
             x = x.to(dtype)
             x = rearrange(x, f"{layout} -> b t (h d)", h=self.num_heads)
-            temp = x
             x = self.out_proj(x)
             if self.use_lora:
-                x += self.lora_out_proj(temp)
+                x = self.out_proj(x) + self.lora_out_proj(x)
+            else:
+                x = self.out_proj(x)
+            if self.cross_attention and self.block_cross_attention:
+                B, T, D = x.shape
+                x = x.view(B, T * self.position_size, -1)
 
         else:
             key, value = self._complete_kv(key, value)
@@ -570,14 +590,14 @@ class StreamingTransformerLayer(nn.TransformerEncoderLayer):
         dtype (torch.dtype, optional): dtype to use.
         **kwargs: See `nn.TransformerEncoderLayer`.
     """
-    def __init__(self, d_model: int, num_heads: int, lora_kwargs: dict = {}, sparse_kwargs: dict = {}, dim_feedforward: int = 2048, dropout: float = 0.1,
+    def __init__(self, d_model: int, num_heads: int, lora_kwargs: dict = {}, sparse_kwargs: dict = {}, blockwise_attention_kwargs: dict = {}, dim_feedforward: int = 2048, dropout: float = 0.1,
                  bias_ff: bool = True, bias_attn: bool = True, causal: bool = False,
                  past_context: tp.Optional[int] = None, custom: bool = False,
                  memory_efficient: bool = False, attention_as_float32: bool = False,
                  qk_layer_norm: bool = False, qk_layer_norm_cross: bool = False,
                  cross_attention: bool = False, layer_scale: tp.Optional[float] = None,
                  rope: tp.Optional[RotaryEmbedding] = None, attention_dropout: tp.Optional[float] = None,
-                 kv_repeat: int = 1, norm: str = 'layer_norm', position_size: int = 12, blockwise_attention: bool = False, device=None, dtype=None, pad_kv: bool = False, **kwargs):
+                 kv_repeat: int = 1, norm: str = 'layer_norm', position_size: int = 12, device=None, dtype=None, pad_kv: bool = False, **kwargs):
         super().__init__(d_model, num_heads, dim_feedforward, dropout,
                          device=device, dtype=dtype, batch_first=True, **kwargs)
         factory_kwargs = {'device': device, 'dtype': dtype}
@@ -592,9 +612,10 @@ class StreamingTransformerLayer(nn.TransformerEncoderLayer):
             'attention_as_float32': attention_as_float32,
             'pad_kv': pad_kv,
         }
+        singlehead_cross_attention = blockwise_attention_kwargs.pop('singlehead_cross_attention', None)
         self.self_attn: StreamingMultiheadAttention = StreamingMultiheadAttention(
             causal=causal, past_context=past_context, rope=rope, qk_layer_norm=qk_layer_norm,
-            kv_repeat=kv_repeat, position_size = position_size, blockwise_attention = blockwise_attention, **lora_kwargs, **sparse_kwargs, **attn_kwargs, **factory_kwargs)  # type: ignore
+            kv_repeat=kv_repeat, position_size = position_size, **blockwise_attention_kwargs, **lora_kwargs, **sparse_kwargs, **attn_kwargs, **factory_kwargs)  # type: ignore
         # Redefine feedforward layers to expose bias parameter
         self.linear1 = nn.Linear(d_model, dim_feedforward, bias=bias_ff, **factory_kwargs)
         self.linear2 = nn.Linear(dim_feedforward, d_model, bias=bias_ff, **factory_kwargs)
@@ -610,8 +631,10 @@ class StreamingTransformerLayer(nn.TransformerEncoderLayer):
 
         self.cross_attention: tp.Optional[nn.Module] = None
         if cross_attention:
+            if singlehead_cross_attention:
+                attn_kwargs['num_heads'] = 1
             self.cross_attention = StreamingMultiheadAttention(
-                cross_attention=True, qk_layer_norm=qk_layer_norm_cross, blockwise_attention = blockwise_attention,
+                cross_attention=True, qk_layer_norm=qk_layer_norm_cross, **blockwise_attention_kwargs,
                 **attn_kwargs, **factory_kwargs)
             # Norm and dropout
             self.dropout_cross = nn.Dropout(dropout)
@@ -705,7 +728,7 @@ class StreamingTransformer(StreamingModule):
                  positional_embedding: str = 'sin', max_period: float = 10_000, positional_scale: float = 1.,
                  xpos: bool = False, lr: tp.Optional[float] = None, weight_decay: tp.Optional[float] = None,
                  layer_class: tp.Type[StreamingTransformerLayer] = StreamingTransformerLayer,
-                 checkpointing: str = 'none', position_size: int = 12, blockwise_attention: bool = False, device=None, dtype=None, **kwargs):
+                 checkpointing: str = 'none', position_size: int = 12, block_pos_embeding: bool = False, device=None, dtype=None, **kwargs):
         super().__init__()
         assert d_model % num_heads == 0
 
@@ -737,7 +760,7 @@ class StreamingTransformer(StreamingModule):
                     causal=causal, past_context=past_context, custom=custom,
                     memory_efficient=memory_efficient, attention_as_float32=attention_as_float32,
                     cross_attention=cross_attention, layer_scale=layer_scale, rope=self.rope,
-                    device=device, dtype=dtype, position_size = position_size, blockwise_attention = blockwise_attention, **kwargs))
+                    device=device, dtype=dtype, position_size = position_size, **kwargs))
 
         if self.checkpointing != 'none':
             for layer in self.layers:
@@ -746,8 +769,8 @@ class StreamingTransformer(StreamingModule):
                 layer._magma_checkpointed = True  # type: ignore
         
         self.position_size = position_size
-        self.blockwise_attention = blockwise_attention
-        if blockwise_attention:
+        self.block_pos_embeding = block_pos_embeding
+        if block_pos_embeding:
             self.local_pos_embedding = nn.Embedding(position_size, d_model)
     def _apply_layer(self, layer, *args, **kwargs):
         method = self.checkpointing
@@ -789,13 +812,13 @@ class StreamingTransformer(StreamingModule):
             offsets = torch.zeros(B, dtype=torch.long, device=x.device)
 
         if self.positional_embedding in ['sin', 'sin_rope']:
-            if self.blockwise_attention:
+            if self.block_pos_embeding:
                 assert T % self.position_size == 0
                 T = T // self.position_size
             positions = torch.arange(T, device=x.device).view(1, -1, 1)
             positions = positions + offsets.view(-1, 1, 1)
             pos_emb = create_sin_embedding(positions, C, max_period=self.max_period, dtype=x.dtype)
-            if self.blockwise_attention:
+            if self.block_pos_embeding:
                 pos_emb = pos_emb.repeat_interleave(self.position_size, dim=1)
                 indices = torch.arange(self.position_size).unsqueeze(0).repeat(B, 1).to(x.device)
                 local_pos_emb = self.local_pos_embedding(indices)

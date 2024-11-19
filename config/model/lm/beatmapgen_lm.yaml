@@ -38,7 +38,13 @@ transformer_lm:
   difficulty_num: 5
   token_id_size: 18  # need + 1 in code because 18 itself is padding token
   position_size: 12
-  blockwise_attention: True
+  block_pos_embeding: True
+  blockwise_attention_kwargs:
+    block_self_attention: True
+    block_cross_attention: False
+    local_cross_attention: False
+    singlehead_cross_attention: True
+
   pad_kv: False
   # V100 need float32 instead of float16 for xformers. turn it False and set higher transfer_num_heads if using newer cards
   sparse_kwargs:

@@ -150,7 +150,7 @@ class BeatmapLMModel(StreamingModule):
                  zero_bias_init: bool = False, cfg_dropout: float = 0, cfg_coef: float = 1.0,
                  attribute_dropout: tp.Dict[str, tp.Dict[str, float]] = {}, two_step_cfg: bool = False, difficulty_num: int = 5, 
                  transfer_dim: int = 64, transfer_num_heads: int = 4, transfer_num_layers: int = 1,
-                 sparse_kwargs: dict = {}, lora_kwargs: dict = {}, blockwise_attention: bool = False,
+                 sparse_kwargs: dict = {}, lora_kwargs: dict = {}, blockwise_attention_kwargs: dict = {}, block_pos_embeding: bool = False,
                  **kwargs):
         super().__init__()
         self.cfg_coef = cfg_coef
@@ -170,9 +170,8 @@ class BeatmapLMModel(StreamingModule):
         self.position_size = position_size
         self.token_id_size = token_id_size + 1 # beatmap token id
         self.transfer_dim = transfer_dim
-        self.blockwise_attention = blockwise_attention
         self.beatmap_emb = ScaledEmbedding(self.token_id_size, transfer_dim, lr=emb_lr)
-        self.use_sparse = sparse_kwargs['use_sparse']
+        self.local_cross_attention = blockwise_attention_kwargs['local_cross_attention']
         if 'activation' in kwargs:
             kwargs['activation'] = get_activation_fn(kwargs['activation'])
         self.transformer = StreamingTransformer(
@@ -185,7 +184,7 @@ class BeatmapLMModel(StreamingModule):
             self.out_norm2 = create_norm_fn(norm, transfer_dim)
         self.transfer_lm = StreamingTransformer(
             sparse_kwargs = sparse_kwargs, d_model=transfer_dim, num_heads=transfer_num_heads, dim_feedforward=int(hidden_scale * transfer_dim), num_layers = transfer_num_layers,
-            norm=norm, norm_first=norm_first, position_size = position_size, blockwise_attention = blockwise_attention, **kwargs)
+            norm=norm, norm_first=norm_first, position_size = position_size, blockwise_attention_kwargs = blockwise_attention_kwargs, block_pos_embeding = block_pos_embeding, **kwargs)
         self.linear_transfer = nn.Linear(dim, self.transfer_dim, bias=bias_proj)
         self.linear_out = nn.Linear(self.transfer_dim, self.token_id_size, bias=bias_proj)
         # self.linears = nn.ModuleList([nn.Linear(dim, self.card, bias=bias_proj) for _ in range(n_q)])
@@ -221,7 +220,7 @@ class BeatmapLMModel(StreamingModule):
             init_layer(emb_layer, method=weight_init, init_depth=None, zero_bias_init=zero_bias_init)
         init_layer(self.difficulty_emb, method=weight_init, init_depth=None, zero_bias_init=zero_bias_init)
         init_layer(self.beatmap_emb, method=weight_init, init_depth=None, zero_bias_init=zero_bias_init)
-        if self.blockwise_attention:
+        if self.transfer_lm.block_pos_embeding:
             init_layer(self.transfer_lm.local_pos_embedding, method=weight_init, init_depth=None, zero_bias_init=zero_bias_init)
 
         transformer_to_initialize = [self.transformer.layers, self.transfer_lm.layers]
@@ -445,9 +444,13 @@ class BeatmapLMModel(StreamingModule):
                         input = self.difficulty_emb(one_difficulty).reshape(self.position_size, -1)
                     else:
                         input = self.beatmap_emb(curr_sequence)
-                    index = offset // self.position_size - 1
+                    if self.local_cross_attention:
+                        index = offset // self.position_size - 1
+                        cross_attention_src = cross_attention_input[index].unsqueeze(0).unsqueeze(0)
+                    else:
+                        cross_attention_src = cross_attention_input.unsqueeze(0)
                     next_token = self._sample_next_token(
-                        input.unsqueeze(0), cross_attention_input[index].unsqueeze(0).unsqueeze(0), unconditional_state, use_sampling, temp, top_k, top_p,
+                        input.unsqueeze(0), cross_attention_src, unconditional_state, use_sampling, temp, top_k, top_p,
                         cfg_coef=cfg_coef, two_step_cfg=two_step_cfg)
                     next_token = next_token.view(-1)
                     # ensure we don't overwrite prompt tokens, we only write over unknown tokens
