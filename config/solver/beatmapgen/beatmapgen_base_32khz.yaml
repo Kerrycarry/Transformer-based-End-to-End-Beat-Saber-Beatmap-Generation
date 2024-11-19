@@ -60,8 +60,8 @@ generate:
   
 
 optim:
-  epochs: 60
-  updates_per_epoch: 200
+  epochs: 48
+  updates_per_epoch: 100
   optimizer: dadam
   lr: 0.1
   ema:

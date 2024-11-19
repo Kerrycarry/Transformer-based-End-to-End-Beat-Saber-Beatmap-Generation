@@ -185,7 +185,11 @@ class BeatmapLMModel(StreamingModule):
         self.transfer_lm = StreamingTransformer(
             sparse_kwargs = sparse_kwargs, d_model=transfer_dim, num_heads=transfer_num_heads, dim_feedforward=int(hidden_scale * transfer_dim), num_layers = transfer_num_layers,
             norm=norm, norm_first=norm_first, position_size = position_size, blockwise_attention_kwargs = blockwise_attention_kwargs, block_pos_embeding = block_pos_embeding, **kwargs)
-        self.linear_transfer = nn.Linear(dim, self.transfer_dim, bias=bias_proj)
+        if blockwise_attention_kwargs['block_cross_attention']:
+            transfer_dim_num = self.transfer_dim * self.position_size
+        else:
+            transfer_dim_num = self.transfer_dim
+        self.linear_transfer = nn.Linear(dim, transfer_dim_num, bias=bias_proj)
         self.linear_out = nn.Linear(self.transfer_dim, self.token_id_size, bias=bias_proj)
         # self.linears = nn.ModuleList([nn.Linear(dim, self.card, bias=bias_proj) for _ in range(n_q)])
         

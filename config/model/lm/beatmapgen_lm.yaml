@@ -42,8 +42,8 @@ transformer_lm:
   blockwise_attention_kwargs:
     block_self_attention: True
     block_cross_attention: False
-    local_cross_attention: False
-    singlehead_cross_attention: True
+    local_cross_attention: True
+    singlehead_cross_attention: False
 
   pad_kv: False
   # V100 need float32 instead of float16 for xformers. turn it False and set higher transfer_num_heads if using newer cards

@@ -187,6 +187,8 @@ class StreamingMultiheadAttention(StreamingModule):
         factory_kwargs = {'device': device, 'dtype': dtype}
         if past_context is not None:
             assert causal
+        if cross_attention and block_cross_attention:
+            embed_dim = embed_dim * position_size
         self.embed_dim = embed_dim
         self.causal = causal
         self.past_context = past_context
@@ -379,7 +381,6 @@ class StreamingMultiheadAttention(StreamingModule):
                 attn_mask = None
             # beatmapgen sa training case
             elif self.causal:
-                # custom_attn_mask = True  只有在sa并且training才用到
                 custom_attn_mask = True
                 assert current_steps == key.shape[1]
                 assert current_steps == value.shape[1]
@@ -393,16 +394,13 @@ class StreamingMultiheadAttention(StreamingModule):
                 if not self.local_cross_attention: # full cross attention case
                     attn_mask = None
                 else:
+                    assert (current_steps // self.position_size) == key.shape[1]
+                    assert (current_steps // self.position_size) == value.shape[1]
+                    cross_src_length = key.shape[1]
+                    custom_attn_mask = True
                     if self.block_cross_attention:
-                        custom_attn_mask = True
-                        assert current_steps == key.shape[1]
-                        assert current_steps == value.shape[1]
-                        attn_mask = torch.eye(current_steps, current_steps, dtype=torch.bool).unsqueeze(0).unsqueeze(0)
+                        attn_mask = torch.eye(cross_src_length, cross_src_length, dtype=torch.bool).unsqueeze(0).unsqueeze(0)
                     else:
-                        custom_attn_mask = True
-                        assert (current_steps // self.position_size) == key.shape[1]
-                        assert (current_steps // self.position_size) == value.shape[1]
-                        cross_src_length = key.shape[1]
                         attn_mask = torch.zeros(1, 1, current_steps, cross_src_length, dtype=torch.bool)
                         for i in range(0, cross_src_length):
                             attn_mask[..., i*N:(i+1)*N, i] = True
@@ -485,20 +483,21 @@ class StreamingMultiheadAttention(StreamingModule):
             if self.attention_as_float32:
                 q, k, v = [x.float() for x in [q, k, v]]
             if self.memory_efficient:
-                if custom_attn_mask and _efficient_attention_backend == 'xformers':
-                    # When using a custom attn mask:
-                    # Move to query's device, repeat for each sample, remove align8 padding
-                    query_len = query.shape[1]
-                    key_len = key.shape[1]
-                    # so far assume using xformer 
-                    padding_needed = (8 - key_len % 8) % 8
-                    if self.pad_kv and padding_needed:
-                        k = F.pad(k, (0, 0, 0, 0, 0, padding_needed))
-                        v = F.pad(v, (0, 0, 0, 0, 0, padding_needed))
-                        attn_mask = F.pad(attn_mask, (0, padding_needed))
-                        key_len += padding_needed
-                    attn_mask = attn_mask.expand((q.shape[0], q.shape[2], query_len, key_len))
-                    attn_mask = attn_mask.to(q.dtype)
+                if custom_attn_mask:
+                    if _efficient_attention_backend == 'xformers':
+                        # When using a custom attn mask:
+                        # Move to query's device, repeat for each sample, remove align8 padding
+                        query_len = query.shape[1]
+                        key_len = key.shape[1]
+                        # so far assume using xformer 
+                        padding_needed = (8 - key_len % 8) % 8
+                        if self.pad_kv and padding_needed:
+                            k = F.pad(k, (0, 0, 0, 0, 0, padding_needed))
+                            v = F.pad(v, (0, 0, 0, 0, 0, padding_needed))
+                            attn_mask = F.pad(attn_mask, (0, padding_needed))
+                            key_len += padding_needed
+                        attn_mask = attn_mask.expand((q.shape[0], q.shape[2], query_len, key_len))
+                        attn_mask = attn_mask.to(q.dtype)
                     attn_mask = attn_mask.to(q.device)
 
                 p = self.dropout if self.training else 0
