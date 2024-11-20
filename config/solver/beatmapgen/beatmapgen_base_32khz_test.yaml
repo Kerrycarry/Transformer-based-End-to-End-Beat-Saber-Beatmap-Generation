@@ -60,7 +60,7 @@ generate:
 
 optim:
   epochs: 1
-  updates_per_epoch: 1
+  updates_per_epoch: 2
   optimizer: dadam
   lr: 1e-6
   ema:

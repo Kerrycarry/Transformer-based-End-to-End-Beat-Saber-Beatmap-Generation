@@ -180,8 +180,8 @@ class StreamingMultiheadAttention(StreamingModule):
                  rope: tp.Optional[RotaryEmbedding] = None, cross_attention: bool = False,
                  safe_streaming: bool = True, qk_layer_norm: bool = False, kv_repeat: int = 1,
                  use_lora: bool = False, lora_r: int = 8, lora_alpha: int = 16, 
-                 use_sparse: bool = False, window_size: int = 4, position_size: int = 12, pad_kv: bool = False,
-                 block_self_attention: bool = False, block_cross_attention: bool = False, local_cross_attention: bool = False, 
+                 position_size: int = 12, pad_kv: bool = False,
+                 block_self_attention: bool = False, local_self_attention: bool = False, sa_window_size: int = 32, block_cross_attention: bool = False, local_cross_attention: bool = False, 
                  device=None, dtype=None):
         super().__init__()
         factory_kwargs = {'device': device, 'dtype': dtype}
@@ -203,8 +203,6 @@ class StreamingMultiheadAttention(StreamingModule):
         self.use_lora = use_lora
         self.lora_r = lora_r
         self.lora_alpha = lora_alpha
-        self.use_sparse = use_sparse
-        self.window_size = window_size
         self.position_size = position_size
         self.block_self_attention = block_self_attention
         self.block_cross_attention = block_cross_attention
@@ -589,7 +587,7 @@ class StreamingTransformerLayer(nn.TransformerEncoderLayer):
         dtype (torch.dtype, optional): dtype to use.
         **kwargs: See `nn.TransformerEncoderLayer`.
     """
-    def __init__(self, d_model: int, num_heads: int, lora_kwargs: dict = {}, sparse_kwargs: dict = {}, blockwise_attention_kwargs: dict = {}, dim_feedforward: int = 2048, dropout: float = 0.1,
+    def __init__(self, d_model: int, num_heads: int, lora_kwargs: dict = {}, blockwise_attention_kwargs: dict = {}, dim_feedforward: int = 2048, dropout: float = 0.1,
                  bias_ff: bool = True, bias_attn: bool = True, causal: bool = False,
                  past_context: tp.Optional[int] = None, custom: bool = False,
                  memory_efficient: bool = False, attention_as_float32: bool = False,
@@ -614,7 +612,7 @@ class StreamingTransformerLayer(nn.TransformerEncoderLayer):
         singlehead_cross_attention = blockwise_attention_kwargs.pop('singlehead_cross_attention', None)
         self.self_attn: StreamingMultiheadAttention = StreamingMultiheadAttention(
             causal=causal, past_context=past_context, rope=rope, qk_layer_norm=qk_layer_norm,
-            kv_repeat=kv_repeat, position_size = position_size, **blockwise_attention_kwargs, **lora_kwargs, **sparse_kwargs, **attn_kwargs, **factory_kwargs)  # type: ignore
+            kv_repeat=kv_repeat, position_size = position_size, **blockwise_attention_kwargs, **lora_kwargs, **attn_kwargs, **factory_kwargs)  # type: ignore
         # Redefine feedforward layers to expose bias parameter
         self.linear1 = nn.Linear(d_model, dim_feedforward, bias=bias_ff, **factory_kwargs)
         self.linear2 = nn.Linear(dim_feedforward, d_model, bias=bias_ff, **factory_kwargs)

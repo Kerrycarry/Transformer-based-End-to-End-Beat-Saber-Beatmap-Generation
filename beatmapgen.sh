@@ -3,7 +3,7 @@
 # 启动 parser API
 start_parser_api() {
     echo "Starting Deno API..."
-    nohup deno run --allow-net --allow-read --allow-write audiocraft/data/beatmap_parser.ts > beatmapgen_log_parser_api.txt 2>&1 &
+    nohup deno run --allow-net --allow-read --allow-write audiocraft/data/beatmap_parser.ts > "$LOG_FILE2" 2>&1 &
     API_PID=$!
     sleep 5
     echo "Deno API PID: $API_PID"
@@ -18,7 +18,7 @@ run_dora_process_1() {
         conditioner=text2music \
         cache.path=/mnt/workspace/cache/bs_rank \
         cache.write=True \
-        $CLEAR_OPTION > beatmapgen_log_dora.txt 2>&1 &
+        ${MORE_CONFIG[@]} > "$LOG_FILE" 2>&1 &
     DORA_PID=$!
     wait $DORA_PID
 }
@@ -32,7 +32,7 @@ run_dora_process_2() {
         conditioner=text2music \
         cache.path=/mnt/workspace/cache/bs_rank \
         continue_from=/root/autodl-tmp/audiocraft_download/beatmapgen_finetune_musicgen-small.th \
-        $CLEAR_OPTION > beatmapgen_log_dora.txt 2>&1 &
+        ${MORE_CONFIG[@]} > "$LOG_FILE" 2>&1 &
     DORA_PID=$!
     wait $DORA_PID
 }
@@ -45,7 +45,7 @@ run_dora_process_3() {
         model/lm/model_scale=small \
         conditioner=text2music \
         continue_from=/root/autodl-tmp/audiocraft_download/beatmapgen_finetune_musicgen-small.th \
-        $CLEAR_OPTION > beatmapgen_log_dora.txt 2>&1 &
+        ${MORE_CONFIG[@]} > "$LOG_FILE" 2>&1 &
     DORA_PID=$!
     wait $DORA_PID
 }
@@ -55,7 +55,7 @@ run_dora_process_3() {
 run_python_process() {
     echo "Running manifest pipeline..."
     nohup python -m audiocraft.data.audio_dataset_beatmap \
-        dataset/CustomLevels egs/bs_rank/data.jsonl 0.125 --write_parse_switch > beatmapgen_log_dora.txt 2>&1 &
+        dataset/CustomLevels egs/bs_rank/data.jsonl 0.125 --write_parse_switch > log/manifest_pipeline.txt 2>&1 &
     PYTHON_PID=$!
     wait $PYTHON_PID
 }
@@ -82,32 +82,41 @@ kill_process() {
         fi
     fi
 }
-# 根据参数运行不同的流程
-CLEAR_OPTION="" # 默认不使用 --clear
-if [[ "$2" == "--clear" ]]; then
-    CLEAR_OPTION="--clear"
-fi
+
+echo "Calling command: $0 $@" 
+FIRST_ARG=$1
+TAG=$2
+shift  # 移除第一个参数
+shift  # 移除第二个参数
+MORE_CONFIG=("$@")  # 捕获剩余的参数到数组中
+
+LOG_DIR="log" # 定义日志文件夹
+LOG_FILE="${LOG_DIR}/beatmapgen_log_${TAG}.dora"
+LOG_FILE2="${LOG_DIR}/beatmapgen_log_${TAG}.api"
+
+# 确保日志文件夹存在
+mkdir -p "$LOG_DIR"
 
 # 根据参数运行不同的流程
-if [[ "$1" == "-1" ]]; then
+if [[ "$FIRST_ARG" == "-1" ]]; then
     start_parser_api
     run_dora_process_1
     stop_parser_api
-elif [[ "$1" == "-2" ]]; then
+elif [[ "$FIRST_ARG" == "-2" ]]; then
     start_parser_api
     run_dora_process_2
     stop_parser_api
-elif [[ "$1" == "-3" ]]; then
+elif [[ "$FIRST_ARG" == "-3" ]]; then
     start_parser_api
     run_dora_process_3
     stop_parser_api
-elif [[ "$1" == "-4" ]]; then
+elif [[ "$FIRST_ARG" == "-4" ]]; then
     start_parser_api
     run_python_process
     stop_parser_api
-elif [[ "$1" == "-5" ]]; then
+elif [[ "$FIRST_ARG" == "-5" ]]; then
     start_parser_api
-elif [[ "$1" == "-6" ]]; then
+elif [[ "$FIRST_ARG" == "-6" ]]; then
     for PROCESS in deno dora
     do
         kill_process "$PROCESS"
@@ -118,14 +127,14 @@ fi
 
 # usage 
 # 启动主流程
-# nohup ./beatmapgen.sh -1 > beatmapgen_log.txt 2>&1 &
-# nohup ./beatmapgen.sh -2 > beatmapgen_log.txt 2>&1 &
-# nohup ./beatmapgen.sh -3 > beatmapgen_log.txt 2>&1 &
-# nohup ./beatmapgen.sh -1 --clear > beatmapgen_log.txt 2>&1 &
-# nohup ./beatmapgen.sh -2 --clear > beatmapgen_log.txt 2>&1 &
-# nohup ./beatmapgen.sh -3 --clear > beatmapgen_log.txt 2>&1 &
+# nohup ./beatmapgen.sh -1 default > log/beatmapgen_log.txt 2>&1 &
+# nohup ./beatmapgen.sh -2 default > log/beatmapgen_log.txt 2>&1 &
+# nohup ./beatmapgen.sh -3 default > log/beatmapgen_log.txt 2>&1 &
+# nohup ./beatmapgen.sh -1 default --clear > log/beatmapgen_log.txt 2>&1 &
+# nohup ./beatmapgen.sh -2 default --clear > log/beatmapgen_log.txt 2>&1 &
+# nohup ./beatmapgen.sh -3 default --clear > log/beatmapgen_log.txt 2>&1 &
 # 启动manifest制作流程
-# nohup ./beatmapgen.sh -4 > beatmapgen_log.txt 2>&1 &
+# nohup ./beatmapgen.sh -4 > log/beatmapgen_log.txt 2>&1 &
 # 启动 api
 # ./beatmapgen.sh -5
 # kill 掉api和dora

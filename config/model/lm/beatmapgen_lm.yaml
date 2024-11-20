@@ -41,15 +41,14 @@ transformer_lm:
   block_pos_embeding: True
   blockwise_attention_kwargs:
     block_self_attention: True
+    local_self_attention: False
+    sa_window_size: 32 # attend to previous 32 notes, final window_size = 32 * 12 + 1 (+1 because attend itself)
     block_cross_attention: False
     local_cross_attention: True
     singlehead_cross_attention: False
 
   pad_kv: False
   # V100 need float32 instead of float16 for xformers. turn it False and set higher transfer_num_heads if using newer cards
-  sparse_kwargs:
-    use_sparse: False
-    window_size: 4 # attend to previous 4 notes, final window_size = 32 * 12 + 1 (+1 because attend itself)
 
   lora_kwargs: 
     use_lora: True
