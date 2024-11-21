@@ -35,17 +35,15 @@ transformer_lm:
   zero_bias_init: true
   attention_as_float32: false 
 
-  difficulty_num: 5
-  token_id_size: 18  # need + 1 in code because 18 itself is padding token
-  position_size: 12
   block_pos_embeding: True
   blockwise_attention_kwargs:
     block_self_attention: True
     local_self_attention: False
-    sa_window_size: 32 # attend to previous 32 notes, final window_size = 32 * 12 + 1 (+1 because attend itself)
+    sa_window_size: 32 # attend to previous 32 blocks including the block current step belong to
     block_cross_attention: False
     local_cross_attention: True
-    singlehead_cross_attention: False
+    sa_head_num: 8 # overide transfer_lm.transfer_num_heads
+    ca_head_num: 8  # overide transfer_lm.transfer_num_heads
 
   pad_kv: False
   # V100 need float32 instead of float16 for xformers. turn it False and set higher transfer_num_heads if using newer cards
@@ -54,3 +52,22 @@ transformer_lm:
     use_lora: True
     lora_r: 16
     lora_alpha: 16
+
+dataset:
+  beatmap_kwargs:
+    difficulty_num: 5
+    position_size: 12
+    note_type:  
+      colorNotes: True
+      chains: False 
+      bombNotes: False
+      obstacles: False
+      arcs: False
+    note_size:  
+      colorNotes: 18
+      chains: 2
+      bombNotes: 1
+      obstacles: 2
+      arcs: 0 # obstacles and arcs must come together
+
+    

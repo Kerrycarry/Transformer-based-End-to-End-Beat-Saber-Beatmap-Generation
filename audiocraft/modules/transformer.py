@@ -207,6 +207,8 @@ class StreamingMultiheadAttention(StreamingModule):
         self.block_self_attention = block_self_attention
         self.block_cross_attention = block_cross_attention
         self.local_cross_attention = local_cross_attention
+        self.local_self_attention = local_self_attention
+        self.sa_window_size = sa_window_size
         self.pad_kv = pad_kv
         if cross_attention:
             assert not causal, "Causal cannot work with cross attention."
@@ -320,9 +322,12 @@ class StreamingMultiheadAttention(StreamingModule):
         if self.past_context is not None:
             offset = max(0, nk.shape[time_dim] - self.past_context)
         if self._is_streaming:
-            self._streaming_state['past_keys'] = nk[:, offset:]
+            index = 0
+            if self.local_self_attention:
+                index = - self.sa_window_size * self.position_size     
+            self._streaming_state['past_keys'] = nk[:, offset:, index:]
             if v is not k:
-                self._streaming_state['past_values'] = nv[:, offset:]
+                self._streaming_state['past_values'] = nv[:, offset:, index:]
             if 'offset' in self._streaming_state:
                 self._streaming_state['offset'] += offset
             else:
@@ -382,11 +387,20 @@ class StreamingMultiheadAttention(StreamingModule):
                 custom_attn_mask = True
                 assert current_steps == key.shape[1]
                 assert current_steps == value.shape[1]
-                
-                attn_mask = torch.tril(torch.ones(1, 1, current_steps, current_steps, dtype=torch.bool))
-                # add full block attention along diagonal line
-                for i in range(0, current_steps, N):
-                    attn_mask[..., i:i+N, i:i+N] = True
+                if not self.local_self_attention:
+                    attn_mask = torch.tril(torch.ones(1, 1, current_steps, current_steps, dtype=torch.bool))
+                    # add full block attention along diagonal line
+                    for i in range(0, current_steps, N):
+                        attn_mask[..., i:i+N, i:i+N] = True
+                else:
+                    # add full block attention along diagonal line and tringular mask within block size
+                    attn_mask = torch.zeros(1, 1, current_steps, current_steps, dtype=torch.bool)
+                    for i in range(0, current_steps, N):
+                        index = i - N * self.sa_window_size
+                        if index < 0:
+                            index = 0
+                        attn_mask[..., i:i+N, index:i+N] = True
+                    
             # beatmapgen ca training case
             else:
                 if not self.local_cross_attention: # full cross attention case
@@ -609,7 +623,10 @@ class StreamingTransformerLayer(nn.TransformerEncoderLayer):
             'attention_as_float32': attention_as_float32,
             'pad_kv': pad_kv,
         }
-        singlehead_cross_attention = blockwise_attention_kwargs.pop('singlehead_cross_attention', None)
+        sa_head_num = blockwise_attention_kwargs.pop('sa_head_num', None)
+        ca_head_num = blockwise_attention_kwargs.pop('ca_head_num', None)
+        if sa_head_num: 
+            attn_kwargs['num_heads'] = sa_head_num
         self.self_attn: StreamingMultiheadAttention = StreamingMultiheadAttention(
             causal=causal, past_context=past_context, rope=rope, qk_layer_norm=qk_layer_norm,
             kv_repeat=kv_repeat, position_size = position_size, **blockwise_attention_kwargs, **lora_kwargs, **attn_kwargs, **factory_kwargs)  # type: ignore
@@ -628,8 +645,8 @@ class StreamingTransformerLayer(nn.TransformerEncoderLayer):
 
         self.cross_attention: tp.Optional[nn.Module] = None
         if cross_attention:
-            if singlehead_cross_attention:
-                attn_kwargs['num_heads'] = 1
+            if ca_head_num: 
+                attn_kwargs['num_heads'] = ca_head_num
             self.cross_attention = StreamingMultiheadAttention(
                 cross_attention=True, qk_layer_norm=qk_layer_norm_cross, **blockwise_attention_kwargs,
                 **attn_kwargs, **factory_kwargs)

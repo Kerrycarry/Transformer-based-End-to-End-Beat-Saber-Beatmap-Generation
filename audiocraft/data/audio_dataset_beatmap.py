@@ -592,6 +592,7 @@ class AudioDataset:
                  meta: tp.List[AudioMeta],
                  token_id_size: int,
                  position_size: int,
+                 note_type: dict,
                  segment_duration: tp.Optional[float] = None,
                  shuffle: bool = True,
                  num_samples: int = 10_000,

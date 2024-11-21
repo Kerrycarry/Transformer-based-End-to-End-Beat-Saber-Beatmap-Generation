@@ -185,6 +185,22 @@ class BeatmapGenSolver(base.StandardSolver):
 
     def build_dataloaders(self) -> None:
         """Instantiate audio dataloaders for each stage."""
+        from omegaconf import OmegaConf
+        OmegaConf.set_struct(self.cfg, False)  # 禁用 struct 模式
+        beatmap_kwargs = self.cfg.dataset.pop("beatmap_kwargs")
+        position_size = beatmap_kwargs.position_size
+        difficulty_num = beatmap_kwargs.difficulty_num
+        token_id_size = sum(
+            size for note, size in beatmap_kwargs.note_size.items()
+            if beatmap_kwargs.note_type.get(note, False)
+        )
+        self.cfg.transformer_lm.difficulty_num = difficulty_num
+        self.cfg.transformer_lm.position_size = position_size
+        self.cfg.transformer_lm.token_id_size = token_id_size
+        self.cfg.dataset.position_size = position_size
+        self.cfg.dataset.token_id_size = token_id_size
+        self.cfg.dataset.note_type = beatmap_kwargs.note_type
+        OmegaConf.set_struct(self.cfg, True)  # 如果需要，可以重新启用 struct 模式
         self.dataloaders = builders.get_audio_datasets(self.cfg, dataset_type=self.DATASET_TYPE)
 
     def show(self) -> None:

@@ -359,7 +359,7 @@ def get_audio_datasets(cfg: omegaconf.DictConfig,
         elif dataset_type == DatasetType.AUDIO:
             dataset = data.info_audio_dataset.InfoAudioDataset.from_meta(path, return_info=return_info, **kwargs)
         elif dataset_type == DatasetType.BEATMAP:
-            dataset = data.audio_dataset_beatmap.AudioDataset.from_meta(path,return_info=return_info, **kwargs, token_id_size = cfg.transformer_lm.token_id_size, position_size = cfg.transformer_lm.position_size)
+            dataset = data.audio_dataset_beatmap.AudioDataset.from_meta(path,return_info=return_info, **kwargs)
         else:
             raise ValueError(f"Dataset type is unsupported: {dataset_type}")
 
