@@ -546,7 +546,6 @@ class StreamingMultiheadAttention(StreamingModule):
                 x = torch.einsum(f"b h t k, {key_layout} -> {layout}", w, v)
             x = x.to(dtype)
             x = rearrange(x, f"{layout} -> b t (h d)", h=self.num_heads)
-            x = self.out_proj(x)
             if self.use_lora:
                 x = self.out_proj(x) + self.lora_out_proj(x)
             else:
