@@ -190,6 +190,9 @@ class BeatmapGenSolver(base.StandardSolver):
         beatmap_kwargs = self.cfg.dataset.pop("beatmap_kwargs")
         position_size = beatmap_kwargs.position_size
         difficulty_num = beatmap_kwargs.difficulty_num
+        beatmap_sample_window = beatmap_kwargs.beatmap_sample_window
+        code_rate = beatmap_kwargs.code_rate
+        minimum_note = beatmap_kwargs.minimum_note
         token_id_size = sum(
             size for note, size in beatmap_kwargs.note_size.items()
             if beatmap_kwargs.note_type.get(note, False)
@@ -199,8 +202,11 @@ class BeatmapGenSolver(base.StandardSolver):
         self.cfg.transformer_lm.token_id_size = token_id_size
         self.cfg.dataset.position_size = position_size
         self.cfg.dataset.token_id_size = token_id_size
-        self.cfg.dataset.note_type = beatmap_kwargs.note_type
-        OmegaConf.set_struct(self.cfg, True)  # 如果需要，可以重新启用 struct 模式
+        self.cfg.dataset.note_type = {f"use_{key}":value for key, value in beatmap_kwargs["note_type"].items()}
+        self.cfg.dataset.beatmap_sample_window = beatmap_sample_window
+        self.cfg.dataset.code_rate = code_rate
+        self.cfg.dataset.minimum_note = minimum_note
+        OmegaConf.set_struct(self.cfg, True)
         self.dataloaders = builders.get_audio_datasets(self.cfg, dataset_type=self.DATASET_TYPE)
 
     def show(self) -> None:
@@ -499,7 +505,7 @@ class BeatmapGenSolver(base.StandardSolver):
         for segment_info, beatmap_token in zip(segment_infos, beatmap_tokens):
             beatmap_token = beatmap_token[segment_info.note_code_map]
             reconstructed_beatmap_file = segment_info.beatmap_class.detokenize(beatmap_token)
-            result = segment_info.beatmap_class.check_difference(reconstructed_beatmap_file, segment_info.beatmap_file, note_types = ['colorNotes'])
+            result = segment_info.beatmap_class.check_difference(reconstructed_beatmap_file, segment_info.beatmap_file)
             beatmap_alignment_result.append(result)
         
         reconstructed_audios = self.compression_model.decode(audio_tokens, None)

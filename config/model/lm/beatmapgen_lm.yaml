@@ -57,6 +57,9 @@ dataset:
   beatmap_kwargs:
     difficulty_num: 5
     position_size: 12
+    beatmap_sample_window: 32
+    code_rate: 50
+    minimum_note: 0.125
     note_type:  
       colorNotes: True
       chains: False 
@@ -68,6 +71,6 @@ dataset:
       chains: 2
       bombNotes: 1
       obstacles: 2
-      arcs: 0 # obstacles and arcs must come together
+      arcs: 2
 
     

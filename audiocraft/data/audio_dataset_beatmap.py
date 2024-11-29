@@ -71,6 +71,11 @@ class AudioMeta(BaseInfo):
     bpm: float
     njs: float
     njsoffset: float
+    colorNotes_num: int
+    bombNotes_num: int
+    obstacles_num: int
+    arcs_num: int
+    chains_num: int
     duration: tp.Optional[float] = None
     amplitude: tp.Optional[float] = None
     weight: tp.Optional[float] = None
@@ -90,38 +95,54 @@ class AudioMeta(BaseInfo):
             d['info_path'] = str(d['info_path'])
         return d
 
-
-
-
-
 @dataclass
 class Beatmap:
     minimum_note: float # 最小的beat eg 0.125 =>八分音符
     duration: float # 时间长度 second为单位
     token_id_size: int # 以后记得更改！
     position_size: int
-    code_rate: int = 50
+    #note toggle
+    use_colorNotes: bool
+    use_chains: bool 
+    use_bombNotes: bool
+    use_obstacles: bool
+    use_arcs: bool
+
+    code_rate: int
     # (posX, posY) => token pos
     position_map = {(0, 0): 0, (1, 0): 1, (2, 0): 2, (3, 0): 3, (0, 1): 4, (1, 1): 5, (2, 1): 6, (3, 1): 7, (0, 2): 8, (1, 2): 9, (2, 2): 10, (3, 2): 11}
     position_map_reversed = {value:key for key, value in position_map.items()}
     # (color, direction) => token id
-    # color_note_map = {(0, 0): 0, (0, 1): 1, (0, 2): 2, (0, 3): 3, (0, 4): 4, (0, 5): 5, (0, 6): 6, (0, 7): 7, (0, 8): 8, (1, 0): 10, (1, 1): 11, (1, 2): 12, (1, 3): 13, (1, 4): 14, (1, 5): 15, (1, 6): 16, (1, 7): 17, (1, 8): 18}
     color_note_map = {(0, 0): 0, (0, 1): 1, (0, 2): 2, (0, 3): 3, (0, 4): 4, (0, 5): 5, (0, 6): 6, (0, 7): 7, (0, 8): 8, (1, 0): 9, (1, 1): 10, (1, 2): 11, (1, 3): 12, (1, 4): 13, (1, 5): 14, (1, 6): 15, (1, 7): 16, (1, 8): 17}
     color_note_map_reversed = {value:key for key, value in color_note_map.items()}
-    # chain, color => tokenid
-    # chain_color_map = {0: 9, 1: 19}
-    # chain_color_map_reversed = {value:key for key, value in chain_color_map.items()}
-    # threadhold_duration_chain = 0.5
-    # bomb
-    # bomb_note_id = 22
-    # obstacles
-    # obstacle_head_id = 23
-    # obstacle_tail_id = 24 # if no tail follows, assume obstacle occupies only one time spot
-    # arc 
-    # arc_head_id = 20
-    # arc_tail_id = 21
-    # from 0 to 24,
-    # token_id_size = 25
+    def __post_init__(self):
+        assert self.use_colorNotes, "use color note by default"
+        # assign token id to note depending on note toggle
+        # chain, color => tokenid
+        padding_id = 18
+        if self.use_chains:
+            self.chain_red_id = padding_id
+            self.chain_blue_id = padding_id + 1
+            padding_id = padding_id + 2
+            self.chain_color_map = {0: self.chain_red_id, 1: self.chain_blue_id}
+            self.chain_color_map_reversed = {value:key for key, value in self.chain_color_map.items()}
+            self.threadhold_duration_chain = 0.5
+        # bomb    
+        if self.use_bombNotes:
+            self.bomb_note_id = padding_id
+            padding_id += 1
+        # arc
+        if self.use_arcs:
+            self.arc_head_id = padding_id
+            self.arc_tail_id = padding_id + 1
+            padding_id = padding_id + 2
+        # obstacles
+        if self.use_obstacles:
+            self.obstacle_head_id = padding_id
+            self.obstacle_tail_id = padding_id + 1  # if no tail follows, assume obstacle occupies only one time spot
+            padding_id = padding_id + 2
+        assert padding_id == self.token_id_size
+    
     empty_light = {
             "customData": {},
             "waypoints": [],
@@ -134,7 +155,7 @@ class Beatmap:
             "basicEventTypesWithKeywords": {"list": []},
             "useNormalEventsAsCompatibleEvents": True
         }
-    
+
     def sample_beatmap_file(self, beatmap: json, seek_time_in_quaver: int, end_time_in_quaver: int):
         colorNotes = []
         chains = []
@@ -162,80 +183,84 @@ class Beatmap:
             return True, int(time_after)
         else:
             return False, time_after
-        
-    def tokenize(self, beatmap_origin: json, bpm: float) -> torch.Tensor:
+    
+    def tokenize(self, beatmap_origin: json, bpm: float, segment_duration_in_quaver) -> torch.Tensor:
         """
         :param beatmap data: JSON
         """
-        code_duration = self.duration * self.code_rate
-        duration_in_note = self.duration / 60 * bpm
-        #计算从0到duration_in_note的所有八分音符，ex 0, 1/8, 2/8,......
-        note = [x for x in np.arange(0, duration_in_note, self.minimum_note)] # [0, duration_in_note] 范围内的八分音符，duration_in_note是exlucsive
+        code_duration = math.ceil(self.duration * self.code_rate)
+        # [0, segment_duration_in_quaver*self.minimum_note] 范围内的八分音符，segment_duration_in_quaver*minimum_note是exlucsive
+        note = list(range(segment_duration_in_quaver))
+        note = [x * self.minimum_note for x in note]
         note_code_map = [round(x * 60 / bpm * self.code_rate) for x in note]
+        if note_code_map[-1] == code_duration:
+            note_code_map.pop()
         unsupported_note = []
         token = torch.full((code_duration, self.position_size), self.token_id_size, dtype=torch.int64).cuda()
-        # tokenize color note 
-        for color_note in beatmap_origin['difficulty']['colorNotes']:
-            is_integer, time_after = self.time_map(color_note['time'])
-            if is_integer:
-                code = note_code_map[time_after]
-                token_pos = self.position_map[(color_note['posX'], color_note['posY'])]
-                token_id = self.color_note_map[(color_note['color'], color_note['direction'])]
-                token[code, token_pos] = token_id
-            else:
-                unsupported_note.append((color_note, "时间不是minimum note的倍数"))
-        # tokenize chain note 
-        # for chain in beatmap_origin['difficulty']['chains']:
-        #     head_time_after = self.time_map(chain['time'])
-        #     tail_time_after = self.time_map(chain['tailTime'])
-        #     if head_time_after and tail_time_after:
-        #         # 确保head time对应的note存在
-        #         token_pos = self.position_map[(chain['posX'], chain['posY'])]
-        #         token_id = self.color_note_map[(chain['color'], chain['direction'])]
-        #         if token[head_time_after, token_pos] == token_id:
-        #             token_pos = self.position_map[(chain['tailPosX'], chain['tailPosY'])]
-        #             token[tail_time_after, token_pos] = self.chain_color_map[chain['color']]
-        #         else:
-        #             unsupported_note.append(chain)
-        #     else:
-        #         unsupported_note.append(chain)
-        # # tokenize bomb note
-        # for bomb in beatmap_origin['difficulty']['bombNotes']:
-        #     time_after = self.time_map(bomb['time'])
-        #     if time_after:
-        #         token_pos = self.position_map[(bomb['posX'], bomb['posY'])]
-        #         token_id = self.bomb_note_id
-        #         token[time_after, token_pos] = token_id
-        #     else:
-        #         unsupported_note.append(bomb)
-        # # tokenize obstacle note
-        # # for obstacle in beatmap_origin['difficulty']['obstacles']:
+        if self.use_colorNotes:
+            for color_note in beatmap_origin['difficulty']['colorNotes']:
+                is_integer, time_after = self.time_map(color_note['time'])
+                if is_integer:
+                    code = note_code_map[time_after]
+                    token_pos = self.position_map[(color_note['posX'], color_note['posY'])]
+                    token_id = self.color_note_map[(color_note['color'], color_note['direction'])]
+                    token[code, token_pos] = token_id
+                else:
+                    unsupported_note.append((color_note, "时间不是minimum note的倍数"))
+        if self.use_chains:
+            for chain in beatmap_origin['difficulty']['chains']:
+                head_time_after = self.time_map(chain['time'])
+                tail_time_after = self.time_map(chain['tailTime'])
+                if head_time_after and tail_time_after:
+                    # 确保head time对应的note存在
+                    token_pos = self.position_map[(chain['posX'], chain['posY'])]
+                    token_id = self.color_note_map[(chain['color'], chain['direction'])]
+                    if token[head_time_after, token_pos] == token_id:
+                        token_pos = self.position_map[(chain['tailPosX'], chain['tailPosY'])]
+                        token[tail_time_after, token_pos] = self.chain_color_map[chain['color']]
+                    else:
+                        unsupported_note.append(chain)
+                else:
+                    unsupported_note.append(chain)
+        if self.use_bombNotes:
+            for bomb in beatmap_origin['difficulty']['bombNotes']:
+                time_after = self.time_map(bomb['time'])
+                if time_after:
+                    token_pos = self.position_map[(bomb['posX'], bomb['posY'])]
+                    token_id = self.bomb_note_id
+                    token[time_after, token_pos] = token_id
+                else:
+                    unsupported_note.append(bomb)
+        # tokenize obstacle note
+        # for obstacle in beatmap_origin['difficulty']['obstacles']:
             
-        # # tokenize arc note
-        # for arc in beatmap_origin['difficulty']['arcs']:
-        #     head_time_after = self.time_map(arc['time'])
-        #     tail_time_after = self.time_map(arc['tailTime'])
-        #     if head_time_after and tail_time_after:
-        #         # 确保head time和tail time对应的note存在
-        #         head_token_pos = self.position_map[(arc['posX'], arc['posY'])]
-        #         head_token_id = self.color_note_map[(arc['color'], arc['direction'])]
-        #         tail_token_pos = self.position_map[(arc['tailPosX'], arc['tailPosY'])]
-        #         tail_token_id = self.color_note_map[(arc['color'], arc['tailDirection'])]
-        #         if token[head_time_after, head_token_pos] == head_token_id and token[tail_time_after, tail_token_pos] == tail_token_id:
-        #             # 在tail note 后一个时间单位同一个位置添加，先检查是否有note
-        #             if token[head_time_after+1, head_token_pos] == self.token_id_size and token[tail_time_after-1, tail_token_pos] == self.token_id_size:
-        #                 token[head_time_after+1, head_token_pos] = self.arc_head_id
-        #                 token[tail_time_after-1, tail_token_pos] = self.arc_tail_id
-        #             else:
-        #                 unsupported_note.append((arc, "arc添加的位置已经有note了"))
-        #         else:
-        #             unsupported_note.append((arc, "arc的head time和tail time对应的note不存在"))
-        #     else:
-        #         unsupported_note.append((arc, "时间不是minimum note的倍数"))
-        # print("number of beatmap.unsupported_note:", len(unsupported_note))
-        unsupported_note = [(tuple((key, value) for key, value in sorted(note.items()) if not isinstance(value, dict)),msg) for note, msg in unsupported_note]
-        # for item, msg in unsupported_note:
-        #     print(item, msg)
+        # tokenize arc note
+        if self.use_arcs:
+            for arc in beatmap_origin['difficulty']['arcs']:
+                head_time_after = self.time_map(arc['time'])
+                tail_time_after = self.time_map(arc['tailTime'])
+                if head_time_after and tail_time_after:
+                    # 确保head time和tail time对应的note存在
+                    head_token_pos = self.position_map[(arc['posX'], arc['posY'])]
+                    head_token_id = self.color_note_map[(arc['color'], arc['direction'])]
+                    tail_token_pos = self.position_map[(arc['tailPosX'], arc['tailPosY'])]
+                    tail_token_id = self.color_note_map[(arc['color'], arc['tailDirection'])]
+                    if token[head_time_after, head_token_pos] == head_token_id and token[tail_time_after, tail_token_pos] == tail_token_id:
+                        # 在tail note 后一个时间单位同一个位置添加，先检查是否有note
+                        if token[head_time_after+1, head_token_pos] == self.token_id_size and token[tail_time_after-1, tail_token_pos] == self.token_id_size:
+                            token[head_time_after+1, head_token_pos] = self.arc_head_id
+                            token[tail_time_after-1, tail_token_pos] = self.arc_tail_id
+                        else:
+                            unsupported_note.append((arc, "arc添加的位置已经有note了"))
+                    else:
+                        unsupported_note.append((arc, "arc的head time和tail time对应的note不存在"))
+                else:
+                    unsupported_note.append((arc, "时间不是minimum note的倍数"))
+        if unsupported_note:
+            print("number of beatmap.unsupported_note:", len(unsupported_note))
+            unsupported_note = [(tuple((key, value) for key, value in sorted(note.items()) if not isinstance(value, dict)),msg) for note, msg in unsupported_note]
+            for item, msg in unsupported_note:
+                print(item, msg)
         return token, note_code_map
     def detokenize(self, tokens: torch.Tensor):
         beatmap_reconstructe = {'difficulty':{}}
@@ -253,7 +278,7 @@ class Beatmap:
                 time_after = time * self.minimum_note
                 posX, posY = self.position_map_reversed[pos]
                 # look for color note
-                if token_id in self.color_note_map_reversed:
+                if self.use_colorNotes and token_id in self.color_note_map_reversed:
                     color, direction = self.color_note_map_reversed[token_id]
                     colorNotes.append({
                         "color": color,
@@ -266,68 +291,68 @@ class Beatmap:
                         "customData": {}
                         })
                     # look for arc at the same time
-                #     if hold_stack and color in hold_stack and tokens[time-1][pos] == self.arc_tail_id:
-                #         head_color_note = hold_stack.pop(color)
-                #         arcs.append({
-                #             "color": color,
-                #             "time": head_color_note['time'],
-                #             "posX": head_color_note['posX'],
-                #             "posY": head_color_note['posY'],
-                #             "direction": head_color_note['direction'],
-                #             "lengthMultiplier": 1,
-                #             "tailTime": time_after,
-                #             "tailPosX": posX,
-                #             "tailPosY": posY,
-                #             "tailDirection": direction,
-                #             "tailLengthMultiplier": 1,
-                #             "midAnchor": 0,
-                #             "laneRotation": 0,
-                #             "tailLaneRotation": 0,
-                #             "customData": {}
-                #             })
-                # # look for chain note
-                # elif token_id in self.chain_color_map_reversed:
-                #     color = self.chain_color_map_reversed[token_id]
-                #     for color_note in reversed(colorNotes):
-                #         if time_after == color_note['time'] or color_note['color'] != color:
-                #             continue
-                #         elif time_after - color_note['time'] > self.threadhold_duration_chain:
-                #             break
-                #         chains.append({
-                #             "color": color,
-                #             "time": color_note['time'],
-                #             "posX": color_note['posX'],
-                #             "posY": color_note['posY'],
-                #             "direction": color_note['direction'],
-                #             "tailTime": time_after,
-                #             "tailPosX": posX,
-                #             "tailPosY": posY,
-                #             "sliceCount": 5,
-                #             "squish": 1,
-                #             "tailLaneRotation": 0,
-                #             "laneRotation": 0,
-                #             "customData": {}
-                #             })
-                # # look for bomb note
-                # elif token_id == self.bomb_note_id:
-                #     bombNotes.append({
-                #         "posX": posX,
-                #         "posY": posY,
-                #         "time": time_after,
-                #         "customData": {},
-                #         "laneRotation": 0,
-                #         "color": -1,
-                #         "direction": 0
-                #         })
-                # # look for arc 
-                # elif token_id == self.arc_head_id:
-                #     # 遇到arc head token，找上一个时间同一位置的token
-                #     for color_note in reversed(colorNotes):
-                #         if time_after - color_note['time'] == self.minimum_note and posX == color_note['posX'] and posY == color_note['posY']:
-                #             # 放入stack中直到遇到连接着的color note 和arc tail note再处理
-                #             hold_stack[color_note['color']] = color_note
-                #         elif time_after - color_note['time'] > self.minimum_note:
-                #             break
+                    if hold_stack and color in hold_stack and tokens[time-1][pos] == self.arc_tail_id:
+                        head_color_note = hold_stack.pop(color)
+                        arcs.append({
+                            "color": color,
+                            "time": head_color_note['time'],
+                            "posX": head_color_note['posX'],
+                            "posY": head_color_note['posY'],
+                            "direction": head_color_note['direction'],
+                            "lengthMultiplier": 1,
+                            "tailTime": time_after,
+                            "tailPosX": posX,
+                            "tailPosY": posY,
+                            "tailDirection": direction,
+                            "tailLengthMultiplier": 1,
+                            "midAnchor": 0,
+                            "laneRotation": 0,
+                            "tailLaneRotation": 0,
+                            "customData": {}
+                            })
+                # look for chain note
+                elif self.use_chains and token_id in self.chain_color_map_reversed:
+                    color = self.chain_color_map_reversed[token_id]
+                    for color_note in reversed(colorNotes):
+                        if time_after == color_note['time'] or color_note['color'] != color:
+                            continue
+                        elif time_after - color_note['time'] > self.threadhold_duration_chain:
+                            break
+                        chains.append({
+                            "color": color,
+                            "time": color_note['time'],
+                            "posX": color_note['posX'],
+                            "posY": color_note['posY'],
+                            "direction": color_note['direction'],
+                            "tailTime": time_after,
+                            "tailPosX": posX,
+                            "tailPosY": posY,
+                            "sliceCount": 5,
+                            "squish": 1,
+                            "tailLaneRotation": 0,
+                            "laneRotation": 0,
+                            "customData": {}
+                            })
+                # look for bomb note
+                elif self.use_bombNotes and token_id == self.bomb_note_id:
+                    bombNotes.append({
+                        "posX": posX,
+                        "posY": posY,
+                        "time": time_after,
+                        "customData": {},
+                        "laneRotation": 0,
+                        "color": -1,
+                        "direction": 0
+                        })
+                # look for arc 
+                elif self.use_arcs and token_id == self.arc_head_id:
+                    # 遇到arc head token，找上一个时间同一位置的token
+                    for color_note in reversed(colorNotes):
+                        if time_after - color_note['time'] == self.minimum_note and posX == color_note['posX'] and posY == color_note['posY']:
+                            # 放入stack中直到遇到连接着的color note 和arc tail note再处理
+                            hold_stack[color_note['color']] = color_note
+                        elif time_after - color_note['time'] > self.minimum_note:
+                            break
                 
         beatmap_reconstructe['difficulty']['colorNotes'] = colorNotes
         beatmap_reconstructe['difficulty']['chains'] = chains
@@ -337,19 +362,30 @@ class Beatmap:
         beatmap_reconstructe["lightshow"] = self.empty_light
         return beatmap_reconstructe
 
-    def check_difference(self, data: json, data2: json, note_types = ['colorNotes', 'chains', 'bombNotes', 'arcs']):
-        # data is origin beatmap 
+    def check_difference(self, origin_data: json, reconstructed_data: json):
+        note_types = []
+        if self.use_colorNotes:
+            note_types.append('colorNotes')
+        if self.use_chains:
+            note_types.append('chains')
+        if self.use_bombNotes:
+            note_types.append('bombNotes')
+        if self.use_arcs:
+            note_types.append('arcs')
+        if self.use_obstacles:
+            note_types.append('obstacles')
         output = ""
         for note_type in note_types:
             # with open('beatmap_origin.json', 'w') as json_file:
             #     json.dump(data['difficulty'][note_type], json_file)
             # with open('beatmap_reconstructed.json', 'w') as json_file:
             #     json.dump(data2['difficulty'][note_type], json_file)
-            output += f"比较{note_type}\n"
-            output += f"直接比较: {data['difficulty'][note_type] == data2['difficulty'][note_type]}\n"
+            output += "*************************************\n"
+            output += f"比较{note_type}, origin_len = {len(origin_data['difficulty'][note_type])}, reconstructed_len = {len(reconstructed_data['difficulty'][note_type])}\n"
+            output += f"直接比较: {origin_data['difficulty'][note_type] == reconstructed_data['difficulty'][note_type]}\n"
 
-            data1 = [tuple((key, float(value) if key == 'time' or key == 'tailTime' else value ) for key, value in sorted(note.items()) if not isinstance(value, dict)) for note in data['difficulty'][note_type]]
-            data2 = [tuple((key, float(value) if key == 'time' or key == 'tailTime' else value ) for key, value in sorted(note.items()) if not isinstance(value, dict)) for note in data2['difficulty'][note_type]]
+            data1 = [tuple((key, float(value) if key == 'time' or key == 'tailTime' else value ) for key, value in sorted(note.items()) if not isinstance(value, dict)) for note in origin_data['difficulty'][note_type]]
+            data2 = [tuple((key, float(value) if key == 'time' or key == 'tailTime' else value ) for key, value in sorted(note.items()) if not isinstance(value, dict)) for note in reconstructed_data['difficulty'][note_type]]
             counter1 = set(data1)
             counter2 = set(data2)
 
@@ -363,6 +399,8 @@ class Beatmap:
                 output += "还原数据中有而原始数据中没有的元素:\n"
                 for item in counter2 - counter1:
                     output += f"{item}\n"
+            if counter1 == counter2:
+                output = ""
         return output
 
 @dataclass(order=True)
@@ -593,6 +631,9 @@ class AudioDataset:
                  token_id_size: int,
                  position_size: int,
                  note_type: dict,
+                 code_rate: int,
+                 beatmap_sample_window: int,
+                 minimum_note: float,
                  segment_duration: tp.Optional[float] = None,
                  shuffle: bool = True,
                  num_samples: int = 10_000,
@@ -643,6 +684,10 @@ class AudioDataset:
         self.load_wav = load_wav
         self.token_id_size = token_id_size
         self.position_size = position_size
+        self.note_type = note_type
+        self.code_rate = code_rate
+        self.beatmap_sample_window = beatmap_sample_window
+        self.minimum_note = minimum_note
         if not load_wav:
             assert segment_duration is not None
         self.permutation_on_files = permutation_on_files
@@ -734,7 +779,7 @@ class AudioDataset:
             duration_in_quaver = round(file_meta.duration / 60 * file_meta.bpm * 8) # 音频长度用八分音符的数量来衡量
             segment_duration_in_quaver = round(self.segment_duration / 60 * file_meta.bpm *8)
             #选择抽取的时间点
-            window = 32
+            window = self.beatmap_sample_window
             duration_in_quaver_window = int(duration_in_quaver / window)
             segment_duration_window = int(segment_duration_in_quaver / window)
             max_seek = max(0, int(duration_in_quaver_window - segment_duration_window * self.min_segment_ratio))
@@ -755,9 +800,9 @@ class AudioDataset:
                     beatmap_file = json.load(f)
                 # 打开beatmap
                 error_path = file_meta.beatmap_file_path
-                beatmap = Beatmap(minimum_note = 0.125, duration = self.segment_duration, token_id_size = self.token_id_size, position_size = self.position_size)
+                beatmap = Beatmap(minimum_note = self.minimum_note, duration = self.segment_duration, token_id_size = self.token_id_size, position_size = self.position_size, **self.note_type, code_rate = self.code_rate)
                 beatmap_file = beatmap.sample_beatmap_file(beatmap_file, seek_time_in_quaver,  seek_time_in_quaver + segment_duration_in_quaver)
-                beatmap_token, note_code_map = beatmap.tokenize(beatmap_file, file_meta.bpm)
+                beatmap_token, note_code_map = beatmap.tokenize(beatmap_file, file_meta.bpm, segment_duration_in_quaver)
                 segment_info = SegmentInfo(file_meta, round(seek_time_in_quaver / 8), n_frames=n_frames, total_frames=target_frames,
                                                 sample_rate=self.sample_rate, channels=out_resampled.shape[0], wav_slice=out_resampled, beatmap_file=beatmap_file, beatmap_class=beatmap, note_code_map = note_code_map)
             except Exception as exc:
