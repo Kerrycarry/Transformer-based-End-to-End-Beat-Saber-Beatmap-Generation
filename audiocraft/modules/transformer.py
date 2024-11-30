@@ -181,7 +181,7 @@ class StreamingMultiheadAttention(StreamingModule):
                  safe_streaming: bool = True, qk_layer_norm: bool = False, kv_repeat: int = 1,
                  use_lora: bool = False, lora_r: int = 8, lora_alpha: int = 16, 
                  position_size: int = 12, pad_kv: bool = False,
-                 block_self_attention: bool = False, local_self_attention: bool = False, sa_window_size: int = 32, block_cross_attention: bool = False, local_cross_attention: bool = False, 
+                 use_transfer_lm: bool = False, block_self_attention: bool = False, local_self_attention: bool = False, sa_window_size: int = 32, block_cross_attention: bool = False, local_cross_attention: bool = False, 
                  device=None, dtype=None):
         super().__init__()
         factory_kwargs = {'device': device, 'dtype': dtype}
@@ -210,6 +210,7 @@ class StreamingMultiheadAttention(StreamingModule):
         self.local_self_attention = local_self_attention
         self.sa_window_size = sa_window_size
         self.pad_kv = pad_kv
+        self.use_transfer_lm = use_transfer_lm
         if cross_attention:
             assert not causal, "Causal cannot work with cross attention."
             assert rope is None, "Rope cannot work with cross attention."
@@ -324,7 +325,10 @@ class StreamingMultiheadAttention(StreamingModule):
         if self._is_streaming:
             index = 0
             if self.local_self_attention:
-                index = - self.sa_window_size * self.position_size     
+                if self.block_self_attention:
+                    index = - self.sa_window_size * self.position_size
+                else:
+                    index = - self.sa_window_size
             self._streaming_state['past_keys'] = nk[:, offset:, index:]
             if v is not k:
                 self._streaming_state['past_values'] = nv[:, offset:, index:]
@@ -367,7 +371,7 @@ class StreamingMultiheadAttention(StreamingModule):
 
         custom_attn_mask = attn_mask is not None
 
-        if not self.block_self_attention:
+        if not self.use_transfer_lm:
             # musicgen case
             if self.causal:
                 assert attn_mask is None
@@ -376,46 +380,63 @@ class StreamingMultiheadAttention(StreamingModule):
                 assert value.shape[1] == key.shape[1], "Causal only for same length query / key / value"
                 attn_mask = self._get_mask(query.shape[1], query.device, query.dtype)
         else:
-            # beatmapgen inference case
             N = self.position_size
             current_steps = query.shape[1]
-            assert current_steps % self.position_size == 0
+            if self.block_self_attention:
+                assert current_steps % self.position_size == 0
+            # beatmapgen inference case
             if self._is_streaming:
                 attn_mask = None
             # beatmapgen sa training case
             elif self.causal:
-                custom_attn_mask = True
                 assert current_steps == key.shape[1]
                 assert current_steps == value.shape[1]
-                if not self.local_self_attention:
-                    attn_mask = torch.tril(torch.ones(1, 1, current_steps, current_steps, dtype=torch.bool))
-                    # add full block attention along diagonal line
-                    for i in range(0, current_steps, N):
-                        attn_mask[..., i:i+N, i:i+N] = True
+                if self.block_self_attention:
+                    custom_attn_mask = True
+                    if not self.local_self_attention:
+                        attn_mask = torch.tril(torch.ones(1, 1, current_steps, current_steps, dtype=torch.float16))
+                        # add full block attention along diagonal line
+                        for i in range(0, current_steps, N):
+                            attn_mask[..., i:i+N, i:i+N] = 1
+                    else:
+                        # add full block attention along diagonal line and tringular mask within block size
+                        attn_mask = torch.zeros(1, 1, current_steps, current_steps, dtype=torch.float16)
+                        for i in range(0, current_steps, N):
+                            index = i - N * self.sa_window_size
+                            if index < 0:
+                                index = 0
+                            attn_mask[..., i:i+N, index:i+N] = 1
                 else:
-                    # add full block attention along diagonal line and tringular mask within block size
-                    attn_mask = torch.zeros(1, 1, current_steps, current_steps, dtype=torch.bool)
-                    for i in range(0, current_steps, N):
-                        index = i - N * self.sa_window_size
-                        if index < 0:
-                            index = 0
-                        attn_mask[..., i:i+N, index:i+N] = True
-                    
+                    if not self.local_self_attention:
+                        custom_attn_mask = False
+                        is_causal = True
+                    else:
+                        custom_attn_mask = True
+                        attn_mask = torch.zeros(1, 1, current_steps, current_steps, dtype=torch.float16)
+                        for i in range(0, current_steps, 1):
+                            index = i - self.sa_window_size
+                            if index < 0:
+                                index = 0
+                            attn_mask[..., i, index:i+1] = 1
             # beatmapgen ca training case
             else:
                 if not self.local_cross_attention: # full cross attention case
                     attn_mask = None
                 else:
-                    assert (current_steps // self.position_size) == key.shape[1]
-                    assert (current_steps // self.position_size) == value.shape[1]
+                    if self.block_self_attention:
+                        assert (current_steps // self.position_size) == key.shape[1]
+                        assert (current_steps // self.position_size) == value.shape[1]
+                    else:
+                        assert current_steps == key.shape[1]
+                        assert current_steps == value.shape[1]
                     cross_src_length = key.shape[1]
                     custom_attn_mask = True
-                    if self.block_cross_attention:
-                        attn_mask = torch.eye(cross_src_length, cross_src_length, dtype=torch.bool).unsqueeze(0).unsqueeze(0)
+                    if self.block_cross_attention or not self.block_self_attention:
+                        attn_mask = torch.eye(cross_src_length, cross_src_length, dtype=torch.float16).unsqueeze(0).unsqueeze(0)
                     else:
-                        attn_mask = torch.zeros(1, 1, current_steps, cross_src_length, dtype=torch.bool)
+                        attn_mask = torch.zeros(1, 1, current_steps, cross_src_length, dtype=torch.float16)
                         for i in range(0, cross_src_length):
-                            attn_mask[..., i*N:(i+1)*N, i] = True
+                            attn_mask[..., i*N:(i+1)*N, i] = 1
 
         if self.custom:
             # custom implementation
@@ -514,12 +535,12 @@ class StreamingMultiheadAttention(StreamingModule):
 
                 p = self.dropout if self.training else 0
                 if _efficient_attention_backend == 'torch':
-                    if not self.block_self_attention:
+                    if not self.use_transfer_lm:
                         x = torch.nn.functional.scaled_dot_product_attention(
                             q, k, v, is_causal=attn_mask is not None, dropout_p=p)
                     else:
                         x = torch.nn.functional.scaled_dot_product_attention(
-                            q, k, v, attn_mask=attn_mask, dropout_p=p)
+                            q, k, v, attn_mask=attn_mask, is_causal =is_causal, dropout_p=p)
                 else:
                     x = ops.memory_efficient_attention(q, k, v, attn_mask, p=p)
             else:
@@ -741,7 +762,7 @@ class StreamingTransformer(StreamingModule):
                  positional_embedding: str = 'sin', max_period: float = 10_000, positional_scale: float = 1.,
                  xpos: bool = False, lr: tp.Optional[float] = None, weight_decay: tp.Optional[float] = None,
                  layer_class: tp.Type[StreamingTransformerLayer] = StreamingTransformerLayer,
-                 checkpointing: str = 'none', position_size: int = 12, block_pos_embeding: bool = False, device=None, dtype=None, **kwargs):
+                 checkpointing: str = 'none', position_size: int = 12, block_self_attention: bool = False, device=None, dtype=None, **kwargs):
         super().__init__()
         assert d_model % num_heads == 0
 
@@ -782,8 +803,8 @@ class StreamingTransformer(StreamingModule):
                 layer._magma_checkpointed = True  # type: ignore
         
         self.position_size = position_size
-        self.block_pos_embeding = block_pos_embeding
-        if block_pos_embeding:
+        self.block_self_attention = block_self_attention
+        if block_self_attention:
             self.local_pos_embedding = nn.Embedding(position_size, d_model)
     def _apply_layer(self, layer, *args, **kwargs):
         method = self.checkpointing
@@ -825,13 +846,13 @@ class StreamingTransformer(StreamingModule):
             offsets = torch.zeros(B, dtype=torch.long, device=x.device)
 
         if self.positional_embedding in ['sin', 'sin_rope']:
-            if self.block_pos_embeding:
+            if self.block_self_attention:
                 assert T % self.position_size == 0
                 T = T // self.position_size
             positions = torch.arange(T, device=x.device).view(1, -1, 1)
             positions = positions + offsets.view(-1, 1, 1)
             pos_emb = create_sin_embedding(positions, C, max_period=self.max_period, dtype=x.dtype)
-            if self.block_pos_embeding:
+            if self.block_self_attention:
                 pos_emb = pos_emb.repeat_interleave(self.position_size, dim=1)
                 indices = torch.arange(self.position_size).unsqueeze(0).repeat(B, 1).to(x.device)
                 local_pos_emb = self.local_pos_embedding(indices)

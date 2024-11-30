@@ -35,8 +35,8 @@ transformer_lm:
   zero_bias_init: true
   attention_as_float32: false 
 
-  block_pos_embeding: True
   blockwise_attention_kwargs:
+    use_transfer_lm: True
     block_self_attention: True
     local_self_attention: False
     sa_window_size: 32 # attend to previous 32 blocks including the block current step belong to
@@ -57,7 +57,7 @@ dataset:
   beatmap_kwargs:
     difficulty_num: 5
     position_size: 12
-    beatmap_sample_window: 32
+    beatmap_sample_window: 32 # it must be divisble by 8
     code_rate: 50
     minimum_note: 0.125
     note_type:  
