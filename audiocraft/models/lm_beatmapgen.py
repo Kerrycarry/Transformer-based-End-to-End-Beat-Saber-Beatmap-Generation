@@ -173,7 +173,7 @@ class BeatmapLMModel(StreamingModule):
         if self.block_self_attention:
             self.difficulty_emb = ScaledEmbedding(self.difficulty_num, transfer_dim * position_size, lr=emb_lr)
             self.beatmap_emb = ScaledEmbedding(self.token_id_size, transfer_dim, lr=emb_lr)
-            self.linear_out = nn.Linear(self.transfer_dim, self.token_id_size, bias=bias_proj)
+            self.linear_out = nn.Linear(transfer_dim, self.token_id_size, bias=bias_proj)
         else:
             self.difficulty_emb = ScaledEmbedding(self.difficulty_num, transfer_dim, lr=emb_lr)
             self.beatmap_emb = nn.ModuleList([ScaledEmbedding(self.token_id_size, transfer_dim, lr=emb_lr) for _ in range(self.position_size)])

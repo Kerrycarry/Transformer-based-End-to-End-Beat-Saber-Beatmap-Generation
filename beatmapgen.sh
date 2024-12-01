@@ -55,7 +55,10 @@ run_dora_process_3() {
 run_python_process() {
     echo "Running manifest pipeline..."
     nohup python -m audiocraft.data.audio_dataset_beatmap \
-        dataset/CustomLevels egs/bs_rank/data.jsonl 0.125 --write_parse_switch > log/manifest_pipeline.txt 2>&1 &
+        dataset/$SOURCE_DIR egs/$MANIFEST_DIR/data.jsonl 0.125 \
+        --write_parse_switch > "$LOG_FILE" 2>&1 &
+        # > "$LOG_FILE" 2>&1 &
+
     PYTHON_PID=$!
     wait $PYTHON_PID
 }
@@ -86,6 +89,10 @@ kill_process() {
 echo "Calling command: $0 $@" 
 FIRST_ARG=$1
 TAG=$2
+if [[ "$FIRST_ARG" == "-4" ]]; then
+    SOURCE_DIR=$2
+    MANIFEST_DIR=$3
+fi
 shift  # 移除第一个参数
 shift  # 移除第二个参数
 MORE_CONFIG=("$@")  # 捕获剩余的参数到数组中
@@ -111,9 +118,12 @@ elif [[ "$FIRST_ARG" == "-3" ]]; then
     run_dora_process_3
     stop_parser_api
 elif [[ "$FIRST_ARG" == "-4" ]]; then
-    start_parser_api
+    TAG="manifest"
+    LOG_FILE="${LOG_DIR}/beatmapgen_log_${TAG}.dora"
+    LOG_FILE2="${LOG_DIR}/beatmapgen_log_${TAG}.api"
+    # start_parser_api
     run_python_process
-    stop_parser_api
+    # stop_parser_api
 elif [[ "$FIRST_ARG" == "-5" ]]; then
     start_parser_api
 elif [[ "$FIRST_ARG" == "-6" ]]; then
@@ -134,7 +144,7 @@ fi
 # nohup ./beatmapgen.sh -2 default --clear > log/beatmapgen_log.txt 2>&1 &
 # nohup ./beatmapgen.sh -3 default --clear > log/beatmapgen_log.txt 2>&1 &
 # 启动manifest制作流程
-# nohup ./beatmapgen.sh -4 > log/beatmapgen_log.txt 2>&1 &
+# nohup ./beatmapgen.sh -4 CustomLevels2 bs_curated > log/beatmapgen_log.txt 2>&1 &
 # 启动 api
 # ./beatmapgen.sh -5
 # kill 掉api和dora

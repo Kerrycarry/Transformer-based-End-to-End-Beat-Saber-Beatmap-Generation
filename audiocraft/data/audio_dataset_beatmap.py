@@ -921,11 +921,12 @@ def main():
     if response.status_code == 200:
         data = response.json()
         out_originput_meta = data.pop('output_meta')  # 提取并删除 out_originput_meta
-
-        # print(data)
+        print("request finished, summary:")
+        print(data)
 
     else:
         print(f"Error: {response.status_code}, {response.text}")
+        return
     
     meta = find_audio_files(out_originput_meta, DEFAULT_EXTS, progress=True,
                             resolve=args.resolve, minimal=args.minimal, workers=args.workers)

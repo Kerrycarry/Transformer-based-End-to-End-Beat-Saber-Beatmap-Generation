@@ -394,30 +394,30 @@ class StreamingMultiheadAttention(StreamingModule):
                 if self.block_self_attention:
                     custom_attn_mask = True
                     if not self.local_self_attention:
-                        attn_mask = torch.tril(torch.ones(1, 1, current_steps, current_steps, dtype=torch.float16))
+                        attn_mask = torch.tril(torch.ones(1, 1, current_steps, current_steps, dtype=torch.bool))
                         # add full block attention along diagonal line
                         for i in range(0, current_steps, N):
-                            attn_mask[..., i:i+N, i:i+N] = 1
+                            attn_mask[..., i:i+N, i:i+N] = True
                     else:
                         # add full block attention along diagonal line and tringular mask within block size
-                        attn_mask = torch.zeros(1, 1, current_steps, current_steps, dtype=torch.float16)
+                        attn_mask = torch.zeros(1, 1, current_steps, current_steps, dtype=torch.bool)
                         for i in range(0, current_steps, N):
                             index = i - N * self.sa_window_size
                             if index < 0:
                                 index = 0
-                            attn_mask[..., i:i+N, index:i+N] = 1
+                            attn_mask[..., i:i+N, index:i+N] = True
                 else:
                     if not self.local_self_attention:
                         custom_attn_mask = False
                         is_causal = True
                     else:
                         custom_attn_mask = True
-                        attn_mask = torch.zeros(1, 1, current_steps, current_steps, dtype=torch.float16)
+                        attn_mask = torch.zeros(1, 1, current_steps, current_steps, dtype=torch.bool)
                         for i in range(0, current_steps, 1):
                             index = i - self.sa_window_size
                             if index < 0:
                                 index = 0
-                            attn_mask[..., i, index:i+1] = 1
+                            attn_mask[..., i, index:i+1] = True
             # beatmapgen ca training case
             else:
                 if not self.local_cross_attention: # full cross attention case
@@ -432,11 +432,11 @@ class StreamingMultiheadAttention(StreamingModule):
                     cross_src_length = key.shape[1]
                     custom_attn_mask = True
                     if self.block_cross_attention or not self.block_self_attention:
-                        attn_mask = torch.eye(cross_src_length, cross_src_length, dtype=torch.float16).unsqueeze(0).unsqueeze(0)
+                        attn_mask = torch.eye(cross_src_length, cross_src_length, dtype=torch.bool).unsqueeze(0).unsqueeze(0)
                     else:
-                        attn_mask = torch.zeros(1, 1, current_steps, cross_src_length, dtype=torch.float16)
+                        attn_mask = torch.zeros(1, 1, current_steps, cross_src_length, dtype=torch.bool)
                         for i in range(0, cross_src_length):
-                            attn_mask[..., i*N:(i+1)*N, i] = 1
+                            attn_mask[..., i*N:(i+1)*N, i] = True
 
         if self.custom:
             # custom implementation
