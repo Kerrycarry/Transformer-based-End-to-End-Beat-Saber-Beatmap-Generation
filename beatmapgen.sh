@@ -15,7 +15,7 @@ run_dora_process_1() {
     nohup dora run \
         solver=beatmapgen/beatmapgen_base_32khz \
         model/lm/model_scale=xsmall \
-        conditioner=text2music \
+        conditioner=none \
         cache.path=/mnt/workspace/cache/bs_rank \
         cache.write=True \
         ${MORE_CONFIG[@]} > "$LOG_FILE" 2>&1 &
@@ -29,7 +29,7 @@ run_dora_process_2() {
     nohup dora run \
         solver=beatmapgen/beatmapgen_base_32khz \
         model/lm/model_scale=small \
-        conditioner=text2music \
+        conditioner=none \
         cache.path=/mnt/workspace/cache/bs_rank \
         continue_from=/root/autodl-tmp/audiocraft_download/beatmapgen_finetune_musicgen-small.th \
         ${MORE_CONFIG[@]} > "$LOG_FILE" 2>&1 &
@@ -43,7 +43,7 @@ run_dora_process_3() {
     nohup dora run \
         solver=beatmapgen/beatmapgen_base_32khz \
         model/lm/model_scale=small \
-        conditioner=text2music \
+        conditioner=none \
         continue_from=/root/autodl-tmp/audiocraft_download/beatmapgen_finetune_musicgen-small.th \
         ${MORE_CONFIG[@]} > "$LOG_FILE" 2>&1 &
     DORA_PID=$!
@@ -121,9 +121,9 @@ elif [[ "$FIRST_ARG" == "-4" ]]; then
     TAG="manifest"
     LOG_FILE="${LOG_DIR}/beatmapgen_log_${TAG}.dora"
     LOG_FILE2="${LOG_DIR}/beatmapgen_log_${TAG}.api"
-    # start_parser_api
+    start_parser_api
     run_python_process
-    # stop_parser_api
+    stop_parser_api
 elif [[ "$FIRST_ARG" == "-5" ]]; then
     start_parser_api
 elif [[ "$FIRST_ARG" == "-6" ]]; then

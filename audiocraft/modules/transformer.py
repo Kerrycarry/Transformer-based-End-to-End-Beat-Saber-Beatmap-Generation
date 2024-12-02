@@ -628,7 +628,8 @@ class StreamingTransformerLayer(nn.TransformerEncoderLayer):
                  qk_layer_norm: bool = False, qk_layer_norm_cross: bool = False,
                  cross_attention: bool = False, layer_scale: tp.Optional[float] = None,
                  rope: tp.Optional[RotaryEmbedding] = None, attention_dropout: tp.Optional[float] = None,
-                 kv_repeat: int = 1, norm: str = 'layer_norm', position_size: int = 12, device=None, dtype=None, pad_kv: bool = False, **kwargs):
+                 kv_repeat: int = 1, norm: str = 'layer_norm', position_size: int = 12, sa_head_num: tp.Optional[int] = None, ca_head_num: tp.Optional[int] = None,
+                 device=None, dtype=None, pad_kv: bool = False, **kwargs):
         super().__init__(d_model, num_heads, dim_feedforward, dropout,
                          device=device, dtype=dtype, batch_first=True, **kwargs)
         factory_kwargs = {'device': device, 'dtype': dtype}
@@ -643,8 +644,7 @@ class StreamingTransformerLayer(nn.TransformerEncoderLayer):
             'attention_as_float32': attention_as_float32,
             'pad_kv': pad_kv,
         }
-        sa_head_num = blockwise_attention_kwargs.pop('sa_head_num', None)
-        ca_head_num = blockwise_attention_kwargs.pop('ca_head_num', None)
+
         if sa_head_num: 
             attn_kwargs['num_heads'] = sa_head_num
         self.self_attn: StreamingMultiheadAttention = StreamingMultiheadAttention(
@@ -664,6 +664,8 @@ class StreamingTransformerLayer(nn.TransformerEncoderLayer):
             self.layer_scale_2 = LayerScale(d_model, layer_scale, **factory_kwargs)
 
         self.cross_attention: tp.Optional[nn.Module] = None
+        if 'use_transfer_lm' in blockwise_attention_kwargs:
+            cross_attention = True
         if cross_attention:
             if ca_head_num: 
                 attn_kwargs['num_heads'] = ca_head_num
@@ -786,6 +788,12 @@ class StreamingTransformer(StreamingModule):
             _verify_xformers_internal_compat()
 
         self.layers = nn.ModuleList()
+        sa_head_num = None
+        ca_head_num = None
+        key = 'blockwise_attention_kwargs'
+        if key in kwargs:
+            sa_head_num = kwargs[key].pop('sa_head_num', None)
+            ca_head_num = kwargs[key].pop('ca_head_num', None)
         for idx in range(num_layers):
             self.layers.append(
                 layer_class(
@@ -794,7 +802,7 @@ class StreamingTransformer(StreamingModule):
                     causal=causal, past_context=past_context, custom=custom,
                     memory_efficient=memory_efficient, attention_as_float32=attention_as_float32,
                     cross_attention=cross_attention, layer_scale=layer_scale, rope=self.rope,
-                    device=device, dtype=dtype, position_size = position_size, **kwargs))
+                    device=device, dtype=dtype, position_size = position_size, sa_head_num = sa_head_num, ca_head_num = ca_head_num, **kwargs))
 
         if self.checkpointing != 'none':
             for layer in self.layers:

@@ -150,7 +150,7 @@ class BeatmapLMModel(StreamingModule):
                  zero_bias_init: bool = False, cfg_dropout: float = 0, cfg_coef: float = 1.0,
                  attribute_dropout: tp.Dict[str, tp.Dict[str, float]] = {}, two_step_cfg: bool = False, difficulty_num: int = 5, 
                  transfer_dim: int = 64, transfer_num_heads: int = 4, transfer_num_layers: int = 1,
-                 lora_kwargs: dict = {}, blockwise_attention_kwargs: dict = {},
+                 use_mask: bool = False, lora_kwargs: dict = {}, blockwise_attention_kwargs: dict = {}, transfer_lr: tp.Optional[float] = None,
                  **kwargs):
         super().__init__()
         self.cfg_coef = cfg_coef
@@ -170,13 +170,14 @@ class BeatmapLMModel(StreamingModule):
         # beatmap token id
         self.token_id_size = token_id_size + 1
         self.position_size = position_size
+        self.use_mask = use_mask
         if self.block_self_attention:
-            self.difficulty_emb = ScaledEmbedding(self.difficulty_num, transfer_dim * position_size, lr=emb_lr)
-            self.beatmap_emb = ScaledEmbedding(self.token_id_size, transfer_dim, lr=emb_lr)
+            self.difficulty_emb = ScaledEmbedding(self.difficulty_num, transfer_dim * position_size, lr=transfer_lr)
+            self.beatmap_emb = ScaledEmbedding(self.token_id_size, transfer_dim, lr=transfer_lr)
             self.linear_out = nn.Linear(transfer_dim, self.token_id_size, bias=bias_proj)
         else:
-            self.difficulty_emb = ScaledEmbedding(self.difficulty_num, transfer_dim, lr=emb_lr)
-            self.beatmap_emb = nn.ModuleList([ScaledEmbedding(self.token_id_size, transfer_dim, lr=emb_lr) for _ in range(self.position_size)])
+            self.difficulty_emb = ScaledEmbedding(self.difficulty_num, transfer_dim, lr=transfer_lr)
+            self.beatmap_emb = nn.ModuleList([ScaledEmbedding(self.token_id_size, transfer_dim, lr=transfer_lr) for _ in range(self.position_size)])
             self.linear_out = nn.ModuleList([nn.Linear(transfer_dim, self.token_id_size, bias=bias_proj) for _ in range(self.position_size)])
         self.transfer_dim = transfer_dim
         self.local_cross_attention = blockwise_attention_kwargs['local_cross_attention']
@@ -194,16 +195,16 @@ class BeatmapLMModel(StreamingModule):
             self.out_norm2 = create_norm_fn(norm, transfer_dim)
         self.transfer_lm = StreamingTransformer(
             d_model=transfer_dim, num_heads=transfer_num_heads, dim_feedforward=int(hidden_scale * transfer_dim), num_layers = transfer_num_layers,
-            norm=norm, norm_first=norm_first, position_size = position_size, blockwise_attention_kwargs = blockwise_attention_kwargs, block_self_attention = self.block_self_attention, **kwargs)
+            norm=norm, norm_first=norm_first, position_size = position_size, blockwise_attention_kwargs = blockwise_attention_kwargs, block_self_attention = self.block_self_attention, lr = transfer_lr, **kwargs)
         if blockwise_attention_kwargs['block_cross_attention']:
             transfer_dim_num = self.transfer_dim * self.position_size
         else:
             transfer_dim_num = self.transfer_dim
         self.linear_transfer = nn.Linear(dim, transfer_dim_num, bias=bias_proj)
         self._init_weights(weight_init, depthwise_init, zero_bias_init)
-        
-        self.mask_token_embedding = nn.Parameter(torch.empty((self.dim,)))
-        nn.init.uniform_(self.mask_token_embedding, -0.1, 0.1)
+        if self.use_mask:
+            self.mask_token_embedding = nn.Parameter(torch.empty((self.dim,)))
+            nn.init.uniform_(self.mask_token_embedding, -0.1, 0.1)
 
         self._fsdp: tp.Optional[nn.Module]
         self.__dict__['_fsdp'] = None
@@ -299,11 +300,11 @@ class BeatmapLMModel(StreamingModule):
         )
         assert K == self.num_codebooks, "Sequence shape must match the specified number of codebooks"
         input_ = sum([self.emb[k](sequence[:, k]) for k in range(K)]) # batch, sequence, dim
-        mask_positions = [[pos + 4 for pos in positions] for positions in note_code_maps]
-        for i, positions in enumerate(mask_positions):
-            input_[i, positions, :] += self.mask_token_embedding
-        cross_attention_input = torch.zeros(B, 1, self.dim).cuda()
-        out = self.transformer(input_, cross_attention_src=cross_attention_input,
+        if self.use_mask:
+            mask_positions = [[pos + 4 for pos in positions] for positions in note_code_maps]
+            for i, positions in enumerate(mask_positions):
+                input_[i, positions, :] += self.mask_token_embedding
+        out = self.transformer(input_, cross_attention_src=None,
                                src_mask=(self.attn_mask_per_stage[stage] if stage >= 0 else None))
         if self.out_norm:
             out = self.out_norm(out)

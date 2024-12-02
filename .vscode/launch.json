@@ -9,7 +9,10 @@
             "type": "debugpy",
             "request": "launch",
             "program": "${file}",
-            "console": "integratedTerminal"
+            "console": "integratedTerminal",
+            "env": {
+                "PYTHONPATH": "${workspaceFolder}"
+            }
         },
         {
             "name": "finetune_precompute_token.sh",
@@ -72,7 +75,7 @@
                 "run",
                 "solver=beatmapgen/beatmapgen_base_32khz_test",
                 "model/lm/model_scale=xsmall",
-                "conditioner=text2music",
+                "conditioner=none",
                 "cache.path=/root/autodl-tmp/cache/bs_rank",
                 "cache.write=True",
                 "--clear",
@@ -90,7 +93,7 @@
                 "solver=beatmapgen/beatmapgen_base_32khz_test",
                 "model/lm/model_scale=small",
                 "continue_from=/root/autodl-tmp/audiocraft_download/beatmapgen_finetune_musicgen-small.th",
-                "conditioner=text2music",
+                "conditioner=none",
                 "cache.path=/root/autodl-tmp/cache/bs_rank",
                 "--clear",
             ],
@@ -106,7 +109,7 @@
                 "run",
                 "solver=beatmapgen/beatmapgen_base_32khz_test",
                 "model/lm/model_scale=xsmall",
-                "conditioner=text2music",
+                "conditioner=none",
                 "cache.path=/root/autodl-tmp/cache/bs_rank",
                 "--clear",
             ],
@@ -123,7 +126,7 @@
                 "solver=beatmapgen/beatmapgen_base_32khz_test",
                 "model/lm/model_scale=small",
                 "continue_from=/root/autodl-tmp/audiocraft_download/beatmapgen_finetune_musicgen-small.th",
-                "conditioner=text2music",
+                "conditioner=none",
                 "--clear",
             ],
         },
