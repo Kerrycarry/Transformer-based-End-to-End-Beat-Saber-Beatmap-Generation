@@ -63,7 +63,7 @@ optim:
   epochs: 48
   updates_per_epoch: 200
   optimizer: dadam
-  lr: 0.1
+  lr: 1
   ema:
     use: true
     updates: 10

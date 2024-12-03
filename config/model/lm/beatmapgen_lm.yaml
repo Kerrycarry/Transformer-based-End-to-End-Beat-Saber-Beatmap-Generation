@@ -36,15 +36,9 @@ transformer_lm:
   attention_as_float32: false 
   
   transfer_lr: null
-  blockwise_attention_kwargs:
+  transfer_lm_kwargs:
     use_transfer_lm: True
-    block_self_attention: False
-    local_self_attention: False
-    sa_window_size: 32 # attend to previous 32 blocks including the block current step belong to
-    block_cross_attention: False
     local_cross_attention: True
-    sa_head_num: 8 # overide transfer_lm.transfer_num_heads
-    ca_head_num: 8  # overide transfer_lm.transfer_num_heads
 
   pad_kv: False
   use_mask: False

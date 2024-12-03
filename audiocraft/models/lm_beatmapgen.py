@@ -150,7 +150,7 @@ class BeatmapLMModel(StreamingModule):
                  zero_bias_init: bool = False, cfg_dropout: float = 0, cfg_coef: float = 1.0,
                  attribute_dropout: tp.Dict[str, tp.Dict[str, float]] = {}, two_step_cfg: bool = False, difficulty_num: int = 5, 
                  transfer_dim: int = 64, transfer_num_heads: int = 4, transfer_num_layers: int = 1,
-                 use_mask: bool = False, lora_kwargs: dict = {}, blockwise_attention_kwargs: dict = {}, transfer_lr: tp.Optional[float] = None,
+                 use_mask: bool = False, lora_kwargs: dict = {}, transfer_lm_kwargs: dict = {}, transfer_lr: tp.Optional[float] = None,
                  **kwargs):
         super().__init__()
         self.cfg_coef = cfg_coef
@@ -166,23 +166,15 @@ class BeatmapLMModel(StreamingModule):
         # self.two_step_cfg = two_step_cfg
         self.emb = nn.ModuleList([ScaledEmbedding(embed_dim, dim, lr=emb_lr) for _ in range(n_q)])
         self.difficulty_num = difficulty_num
-        self.block_self_attention = blockwise_attention_kwargs['block_self_attention']
         # beatmap token id
         self.token_id_size = token_id_size + 1
         self.position_size = position_size
         self.use_mask = use_mask
-        if self.block_self_attention:
-            self.difficulty_emb = ScaledEmbedding(self.difficulty_num, transfer_dim * position_size, lr=transfer_lr)
-            self.beatmap_emb = ScaledEmbedding(self.token_id_size, transfer_dim, lr=transfer_lr)
-            self.linear_out = nn.Linear(transfer_dim, self.token_id_size, bias=bias_proj)
-        else:
-            self.difficulty_emb = ScaledEmbedding(self.difficulty_num, transfer_dim, lr=transfer_lr)
-            self.beatmap_emb = nn.ModuleList([ScaledEmbedding(self.token_id_size, transfer_dim, lr=transfer_lr) for _ in range(self.position_size)])
-            self.linear_out = nn.ModuleList([nn.Linear(transfer_dim, self.token_id_size, bias=bias_proj) for _ in range(self.position_size)])
+        self.difficulty_emb = ScaledEmbedding(self.difficulty_num, transfer_dim, lr=transfer_lr)
+        self.beatmap_emb = nn.ModuleList([ScaledEmbedding(self.token_id_size, transfer_dim, lr=transfer_lr) for _ in range(self.position_size)])
+        self.linear_out = nn.ModuleList([nn.Linear(transfer_dim, self.token_id_size, bias=bias_proj) for _ in range(self.position_size)])
         self.transfer_dim = transfer_dim
-        self.local_cross_attention = blockwise_attention_kwargs['local_cross_attention']
-        if blockwise_attention_kwargs['block_cross_attention']:
-            assert blockwise_attention_kwargs['block_self_attention'], "block_cross_attention need block_self_attention"
+        self.local_cross_attention = transfer_lm_kwargs['local_cross_attention']
         if 'activation' in kwargs:
             kwargs['activation'] = get_activation_fn(kwargs['activation'])
         self.transformer = StreamingTransformer(
@@ -195,12 +187,8 @@ class BeatmapLMModel(StreamingModule):
             self.out_norm2 = create_norm_fn(norm, transfer_dim)
         self.transfer_lm = StreamingTransformer(
             d_model=transfer_dim, num_heads=transfer_num_heads, dim_feedforward=int(hidden_scale * transfer_dim), num_layers = transfer_num_layers,
-            norm=norm, norm_first=norm_first, position_size = position_size, blockwise_attention_kwargs = blockwise_attention_kwargs, block_self_attention = self.block_self_attention, lr = transfer_lr, **kwargs)
-        if blockwise_attention_kwargs['block_cross_attention']:
-            transfer_dim_num = self.transfer_dim * self.position_size
-        else:
-            transfer_dim_num = self.transfer_dim
-        self.linear_transfer = nn.Linear(dim, transfer_dim_num, bias=bias_proj)
+            norm=norm, norm_first=norm_first, position_size = position_size, transfer_lm_kwargs = transfer_lm_kwargs, lr = transfer_lr, **kwargs)
+        self.linear_transfer = nn.Linear(dim, self.transfer_dim, bias=bias_proj)
         self._init_weights(weight_init, depthwise_init, zero_bias_init)
         if self.use_mask:
             self.mask_token_embedding = nn.Parameter(torch.empty((self.dim,)))
@@ -231,14 +219,9 @@ class BeatmapLMModel(StreamingModule):
         for emb_layer in self.emb:
             init_layer(emb_layer, method=weight_init, init_depth=None, zero_bias_init=zero_bias_init)
         init_layer(self.difficulty_emb, method=weight_init, init_depth=None, zero_bias_init=zero_bias_init)
-        if self.block_self_attention:
-            init_layer(self.beatmap_emb, method=weight_init, init_depth=None, zero_bias_init=zero_bias_init)
-        else:
-            for emb_layer in self.beatmap_emb:
-                init_layer(emb_layer, method=weight_init, init_depth=None, zero_bias_init=zero_bias_init)
-
-        if self.block_self_attention:
-            init_layer(self.transfer_lm.local_pos_embedding, method=weight_init, init_depth=None, zero_bias_init=zero_bias_init)
+        
+        for emb_layer in self.beatmap_emb:
+            init_layer(emb_layer, method=weight_init, init_depth=None, zero_bias_init=zero_bias_init)
 
         transformer_to_initialize = [self.transformer.layers, self.transfer_lm.layers]
         for module in transformer_to_initialize:
@@ -252,12 +235,10 @@ class BeatmapLMModel(StreamingModule):
                 tr_layer.apply(init_fn)
 
         init_layer(self.linear_transfer, method=weight_init, init_depth=None, zero_bias_init=zero_bias_init)
-        if self.block_self_attention:
-            init_layer(self.linear_out, method=weight_init, init_depth=None, zero_bias_init=zero_bias_init)
-        else:
-            for linear in self.linear_out:
-                init_layer(linear, method=weight_init, init_depth=None, zero_bias_init=zero_bias_init)
-            
+        
+        for linear in self.linear_out:
+            init_layer(linear, method=weight_init, init_depth=None, zero_bias_init=zero_bias_init)
+        
     @property
     def special_token_id(self) -> int:
         return self.card
@@ -352,14 +333,9 @@ class BeatmapLMModel(StreamingModule):
         for one_out, note_code_map, one_beatmap, one_difficulty in zip(out, note_code_maps, beatmap, difficulty):
             # use note represenetation
             cross_attention_input = self.linear_transfer(one_out[note_code_map])
-            if self.block_self_attention:
-                one_beatmap = one_beatmap[note_code_map][:-1].view(-1) # [(S-1)*P]
-                input_ = self.beatmap_emb(one_beatmap) # [(S-1)*P, dim]
-                input_ = torch.cat((self.difficulty_emb(one_difficulty).reshape(self.position_size, -1), input_), dim=0) #[S*P, dim]
-            else:
-                one_beatmap = one_beatmap[note_code_map][:-1] #[(S-1), P]
-                input_ = sum([self.beatmap_emb[p](one_beatmap[:, p]) for p in range(self.position_size)]) # [(S-1), dim]
-                input_ = torch.cat((self.difficulty_emb(one_difficulty).unsqueeze(0), input_), dim=0) #[S, dim]
+            one_beatmap = one_beatmap[note_code_map][:-1] #[(S-1), P]
+            input_ = sum([self.beatmap_emb[p](one_beatmap[:, p]) for p in range(self.position_size)]) # [(S-1), dim]
+            input_ = torch.cat((self.difficulty_emb(one_difficulty).unsqueeze(0), input_), dim=0) #[S, dim]
             logit = self.transfer_lm_forward(input_ = input_.unsqueeze(0), cross_attention_input = cross_attention_input.unsqueeze(0)) # [1, S*P, card]
             logits.append(logit)
         return logits
@@ -372,12 +348,10 @@ class BeatmapLMModel(StreamingModule):
                             src_mask=(self.attn_mask_per_stage[stage] if stage >= 0 else None)) # [B, S*P, dim] / [B, S, dim]
         if self.out_norm2:
             out = self.out_norm2(out) 
-        if self.block_self_attention:
-            logit = self.linear_out(out) # [B, S*P, card]
-        else:
-            logit = torch.stack([self.linear_out[p](out) for p in range(self.position_size)], dim=2)
-            B, S, P, C = logit.shape
-            logit = logit.view(B, -1, C)
+        
+        logit = torch.stack([self.linear_out[p](out) for p in range(self.position_size)], dim=2)
+        B, S, P, C = logit.shape
+        logit = logit.view(B, -1, C)
         return logit
 
     def _sample_next_token(self,
@@ -470,15 +444,9 @@ class BeatmapLMModel(StreamingModule):
                     curr_sequence = gen_sequence[prev_offset:offset]
                     # sample next token from the model, next token and curr_sequence shape is [1]
                     if offset == self.position_size:
-                        if self.block_self_attention:
-                            input = self.difficulty_emb(one_difficulty).reshape(self.position_size, -1)
-                        else:
-                            input = self.difficulty_emb(one_difficulty).unsqueeze(0)
+                        input = self.difficulty_emb(one_difficulty).unsqueeze(0)
                     else:
-                        if self.block_self_attention:
-                            input = self.beatmap_emb(curr_sequence)
-                        else:
-                            input = sum([self.beatmap_emb[p](curr_sequence[p]) for p in range(self.position_size)]).unsqueeze(0)
+                        input = sum([self.beatmap_emb[p](curr_sequence[p]) for p in range(self.position_size)]).unsqueeze(0)
                     if self.local_cross_attention:
                         index = offset // self.position_size - 1
                         cross_attention_src = cross_attention_input[index].unsqueeze(0).unsqueeze(0)
