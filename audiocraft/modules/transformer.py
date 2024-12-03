@@ -517,18 +517,25 @@ class StreamingMultiheadAttention(StreamingModule):
                 q, k, v = [x.float() for x in [q, k, v]]
             if self.memory_efficient:
                 if custom_attn_mask:
+                    query_len = query.shape[1]
+                    key_len = key.shape[1]
+                    if self.pad_kv:
+                        if _efficient_attention_backend == 'xformers':
+                            padding_number = 8
+                        else:
+                            padding_number = 16
+                        padding_needed = (padding_number - key_len % padding_number) % padding_number
+                        if _efficient_attention_backend == 'xformers':
+                            k = F.pad(k, (0, 0, 0, 0, 0, padding_needed))
+                            v = F.pad(v, (0, 0, 0, 0, 0, padding_needed))
+                        else:
+                            k = F.pad(k, (0, 0, 0, padding_needed))
+                            v = F.pad(v, (0, 0, 0, padding_needed))
+                        attn_mask = F.pad(attn_mask, (0, padding_needed))
+                        key_len += padding_needed
                     if _efficient_attention_backend == 'xformers':
                         # When using a custom attn mask:
                         # Move to query's device, repeat for each sample, remove align8 padding
-                        query_len = query.shape[1]
-                        key_len = key.shape[1]
-                        # so far assume using xformer 
-                        padding_needed = (8 - key_len % 8) % 8
-                        if self.pad_kv and padding_needed:
-                            k = F.pad(k, (0, 0, 0, 0, 0, padding_needed))
-                            v = F.pad(v, (0, 0, 0, 0, 0, padding_needed))
-                            attn_mask = F.pad(attn_mask, (0, padding_needed))
-                            key_len += padding_needed
                         attn_mask = attn_mask.expand((q.shape[0], q.shape[2], query_len, key_len))
                         attn_mask = attn_mask.to(q.dtype)
                     attn_mask = attn_mask.to(q.device)
