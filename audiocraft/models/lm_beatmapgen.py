@@ -12,6 +12,7 @@ import typing as tp
 
 import torch
 from torch import nn
+from torch.nn import functional as F
 
 from ..utils import utils
 from ..modules.streaming import StreamingModule, State
@@ -27,7 +28,7 @@ from ..modules.conditioners import (
 )
 from ..modules.codebooks_patterns import CodebooksPatternProvider
 from ..modules.activations import get_activation_fn
-from audiocraft.modules.transformer import set_efficient_attention_backend
+
 
 logger = logging.getLogger(__name__)
 ConditionTensors = tp.Dict[str, ConditionType]
@@ -142,7 +143,7 @@ class BeatmapLMModel(StreamingModule):
         two_step_cfg (bool): Whether to run classifier free-guidance with 2 distinct steps.
         **kwargs: Additional parameters for the transformer encoder.
     """
-    def __init__(self, pattern_provider: CodebooksPatternProvider, condition_provider: ConditioningProvider,
+    def __init__(self, pattern_provider: CodebooksPatternProvider, condition_provider: ConditioningProvider, beatmap_pattern_provider: CodebooksPatternProvider,
                  fuser: ConditionFuser, token_id_size: int, position_size: int, n_q: int = 8, card: int = 1024, dim: int = 128, num_heads: int = 8, num_layers: int = 8,
                  hidden_scale: int = 4, norm: str = 'layer_norm', norm_first: bool = False,
                  emb_lr: tp.Optional[float] = None, bias_proj: bool = True,
@@ -150,7 +151,7 @@ class BeatmapLMModel(StreamingModule):
                  zero_bias_init: bool = False, cfg_dropout: float = 0, cfg_coef: float = 1.0,
                  attribute_dropout: tp.Dict[str, tp.Dict[str, float]] = {}, two_step_cfg: bool = False, difficulty_num: int = 5, 
                  transfer_dim: int = 64, transfer_num_heads: int = 4, transfer_num_layers: int = 1,
-                 use_mask: bool = False, lora_kwargs: dict = {}, transfer_lm_kwargs: dict = {}, transfer_lr: tp.Optional[float] = None,
+                 use_mask: bool = False, lora_kwargs: dict = {}, transfer_lm_kwargs: dict = {}, transfer_lr: tp.Optional[float] = None, 
                  **kwargs):
         super().__init__()
         self.cfg_coef = cfg_coef
@@ -167,7 +168,8 @@ class BeatmapLMModel(StreamingModule):
         self.emb = nn.ModuleList([ScaledEmbedding(embed_dim, dim, lr=emb_lr) for _ in range(n_q)])
         self.difficulty_num = difficulty_num
         # beatmap token id
-        self.token_id_size = token_id_size + 1
+        self.token_id_size = token_id_size + 1 # token_id_size is no_note_id, token_id_size + 1 is padding_id, token_id_size + 2 is actual size
+        
         self.position_size = position_size
         self.use_mask = use_mask
         self.difficulty_emb = ScaledEmbedding(self.difficulty_num, transfer_dim, lr=transfer_lr)
@@ -175,6 +177,7 @@ class BeatmapLMModel(StreamingModule):
         self.linear_out = nn.ModuleList([nn.Linear(transfer_dim, self.token_id_size, bias=bias_proj) for _ in range(self.position_size)])
         self.transfer_dim = transfer_dim
         self.local_cross_attention = transfer_lm_kwargs['local_cross_attention']
+        self.beatmap_pattern_provider = beatmap_pattern_provider
         if 'activation' in kwargs:
             kwargs['activation'] = get_activation_fn(kwargs['activation'])
         self.transformer = StreamingTransformer(
@@ -271,7 +274,6 @@ class BeatmapLMModel(StreamingModule):
         Returns:
             torch.Tensor: Logits.
         """
-        set_efficient_attention_backend("torch")
         B, K, T = codes.shape
         codes = codes.contiguous()
         # map codes [B, K, T] into pattern sequence [B, K, S] using special_token_id for masked tokens
@@ -329,33 +331,53 @@ class BeatmapLMModel(StreamingModule):
         model = self if self._fsdp is None else self._fsdp
         out = model(codes, note_code_maps, stage=stage)
         
-        logits = []
+        logit_list = []
         for one_out, note_code_map, one_beatmap, one_difficulty in zip(out, note_code_maps, beatmap, difficulty):
             # use note represenetation
-            cross_attention_input = self.linear_transfer(one_out[note_code_map])
-            one_beatmap = one_beatmap[note_code_map][:-1] #[(S-1), P]
-            input_ = sum([self.beatmap_emb[p](one_beatmap[:, p]) for p in range(self.position_size)]) # [(S-1), dim]
-            input_ = torch.cat((self.difficulty_emb(one_difficulty).unsqueeze(0), input_), dim=0) #[S, dim]
-            logit = self.transfer_lm_forward(input_ = input_.unsqueeze(0), cross_attention_input = cross_attention_input.unsqueeze(0)) # [1, S*P, card]
-            logits.append(logit)
-        return logits
+            cross_attention_input = self.linear_transfer(one_out[note_code_map]).unsqueeze(0)
+            codes = one_beatmap[note_code_map].unsqueeze(0).permute(0, 2, 1) 
+            B, K, T = codes.shape
+            codes = codes.contiguous()
+            pattern = self.beatmap_pattern_provider.get_pattern(T)
+            sequence_codes, sequence_indexes, sequence_mask = pattern.build_pattern_sequence(
+                codes, self.token_id_size, keep_only_valid_steps=keep_only_valid_steps,
+            )
+            sequence_codes = sequence_codes[:, :, 1:-1]
+            logits = self.transfer_lm_forward(sequence=sequence_codes,cross_attention_input = cross_attention_input, difficulty= one_difficulty.unsqueeze(0).unsqueeze(0))
+            logits = F.pad(logits, (0, 0, 0, 1))
+            logits = logits.permute(0, 3, 1, 2)  # [B, card, K, S]
+            logits, logits_indexes, logits_mask = pattern.revert_pattern_logits(
+                logits, float('nan'), keep_only_valid_steps=keep_only_valid_steps
+            )
+            logits = logits.permute(0, 2, 3, 1)  # [B, K, T, card]
+            logits_mask = logits_mask[None, :, :].expand(B, -1, -1)  # [K, T] -> [B, K, T]
+            logit_list.append(LMOutput(logits, logits_mask))
+        return logit_list
     
-    def transfer_lm_forward(self, input_: torch.Tensor, # [B, S*P, card]
+    def transfer_lm_forward(self, 
                 cross_attention_input: torch.Tensor,
+                sequence: tp.Optional[torch.Tensor] = None,
+                difficulty: tp.Optional[torch.Tensor] = None,
                 stage: int = -1) -> torch.Tensor:
-        set_efficient_attention_backend("torch")
+        if sequence is not None:
+            B, K, S = sequence.shape
+            assert K == self.position_size, "Sequence shape must match the specified number of codebooks"
+            input_ = sum([self.beatmap_emb[k](sequence[:, k]) for k in range(K)])
+            if difficulty is not None:
+                input_ = torch.cat((self.difficulty_emb(difficulty), input_), dim=1)
+        else:
+            assert difficulty is not None
+            input_ = self.difficulty_emb(difficulty)
         out = self.transfer_lm(input_, cross_attention_src=cross_attention_input,
                             src_mask=(self.attn_mask_per_stage[stage] if stage >= 0 else None)) # [B, S*P, dim] / [B, S, dim]
         if self.out_norm2:
             out = self.out_norm2(out) 
         
-        logit = torch.stack([self.linear_out[p](out) for p in range(self.position_size)], dim=2)
-        B, S, P, C = logit.shape
-        logit = logit.view(B, -1, C)
-        return logit
+        logits = torch.stack([self.linear_out[p](out) for p in range(self.position_size)], dim=1)
+        return logits
 
     def _sample_next_token(self,
-                           input: torch.Tensor,
+                           sequence: torch.Tensor,
                            cross_attention_input: torch.Tensor,
                            unconditional_state: State,
                            use_sampling: bool = False,
@@ -363,7 +385,8 @@ class BeatmapLMModel(StreamingModule):
                            top_k: int = 0,
                            top_p: float = 0.0,
                            cfg_coef: tp.Optional[float] = None,
-                           two_step_cfg: tp.Optional[bool] = None) -> torch.Tensor:
+                           two_step_cfg: tp.Optional[bool] = None,
+                           difficulty: tp.Optional[torch.Tensor] = None) -> torch.Tensor:
         """Sample next token from the model given a sequence and a set of conditions. The model supports
         multiple sampling strategies (greedy sampling, softmax, top-k, top-p...).
 
@@ -381,11 +404,12 @@ class BeatmapLMModel(StreamingModule):
         Returns:
             next_token (torch.Tensor): Next token tensor of shape [B, K, 1].
         """
-        logit = self.transfer_lm_forward(input_ = input, cross_attention_input = cross_attention_input) # [1, 1, card]
-
+        logits = self.transfer_lm_forward(sequence = sequence, cross_attention_input = cross_attention_input, difficulty = difficulty) # [1, 1, card]
+        logits = logits.permute(0, 1, 3, 2)  # [B, K, card, T]
+        logits = logits[..., -1]  # [B x K x card]
         # Apply softmax for sampling if temp > 0. Else, do greedy sampling to avoid zero division error.
         if use_sampling and temp > 0.0:
-            probs = torch.softmax(logit / temp, dim=-1)
+            probs = torch.softmax(logits / temp, dim=-1)
             if top_p > 0.0:
                 next_token = utils.sample_top_p(probs, p=top_p)
             elif top_k > 0:
@@ -393,7 +417,7 @@ class BeatmapLMModel(StreamingModule):
             else:
                 next_token = utils.multinomial(probs, num_samples=1)
         else:
-            next_token = torch.argmax(logit, dim=-1, keepdim=True)
+            next_token = torch.argmax(logits, dim=-1, keepdim=True)
 
         return next_token
 
@@ -424,44 +448,56 @@ class BeatmapLMModel(StreamingModule):
         model = self if self._fsdp is None else self._fsdp
         out = model(codes, note_code_maps, stage=stage)
         
-        out_codes = []
+        out_codes_list = []
         for one_out, one_difficulty, note_code_map in zip(out, difficulty, note_code_maps):
              # use note represenetation
             cross_attention_input = self.linear_transfer(one_out[note_code_map])
-            unknown_token = -1
-            max_gen_len = (len(note_code_map) + 1) * self.position_size
-            gen_sequence = torch.full((max_gen_len,), unknown_token, dtype=torch.long, device=device)
-            gen_sequence[0:self.position_size] = one_difficulty
             
-
-            start_offset_sequence = self.position_size
+            max_gen_len = len(note_code_map)
+            pattern = self.beatmap_pattern_provider.get_pattern(max_gen_len)
+            unknown_token = -1
+            gen_codes = torch.full((1, self.position_size, max_gen_len), unknown_token, dtype=torch.long, device=device) # gencodes.shape [3, 4, 400] max_gen_len = 400
+            gen_sequence, indexes, mask = pattern.build_pattern_sequence(gen_codes, self.token_id_size) # gen_sequence.shape 如果没有prompt, [3,4,404] 3
+            start_offset = 0
+            start_offset_sequence = pattern.get_first_step_with_timesteps(start_offset) # start_offset = 0, start_offset_sequence = 1
+            assert start_offset_sequence is not None
+            B = 1
             with self.streaming():
                 unconditional_state = self.get_streaming_state()
                 prev_offset = 0
                 gen_sequence_len = gen_sequence.shape[-1]  # gen_sequence shape is [(S+1) * P]
-                for offset in range(start_offset_sequence, gen_sequence_len, self.position_size):
+                for offset in range(start_offset_sequence, gen_sequence_len):
                     # get current sequence (note that the streaming API is providing the caching over previous offsets)
-                    curr_sequence = gen_sequence[prev_offset:offset]
+                    curr_sequence = gen_sequence[..., prev_offset:offset] # shape is [B, K, 1]
+                    curr_mask = mask[None, ..., prev_offset:offset].expand(B, -1, -1)
+                    if check:
+                        # check coherence between mask and sequence
+                        assert (curr_sequence == torch.where(curr_mask, curr_sequence, self.token_id_size)).all()
+                        # should never happen as gen_sequence is filled progressively
+                        assert not (curr_sequence == unknown_token).any()
                     # sample next token from the model, next token and curr_sequence shape is [1]
-                    if offset == self.position_size:
-                        input = self.difficulty_emb(one_difficulty).unsqueeze(0)
-                    else:
-                        input = sum([self.beatmap_emb[p](curr_sequence[p]) for p in range(self.position_size)]).unsqueeze(0)
                     if self.local_cross_attention:
-                        index = offset // self.position_size - 1
+                        index = offset - 1
                         cross_attention_src = cross_attention_input[index].unsqueeze(0).unsqueeze(0)
                     else:
                         cross_attention_src = cross_attention_input.unsqueeze(0)
+                    if offset == 1:
+                        one_difficulty = one_difficulty.unsqueeze(0).unsqueeze(0)
+                        curr_sequence = None
+                    else:
+                        one_difficulty = None
                     next_token = self._sample_next_token(
-                        input.unsqueeze(0), cross_attention_src, unconditional_state, use_sampling, temp, top_k, top_p,
-                        cfg_coef=cfg_coef, two_step_cfg=two_step_cfg)
-                    next_token = next_token.view(-1)
+                        curr_sequence, cross_attention_src, unconditional_state, use_sampling, temp, top_k, top_p,
+                        cfg_coef=cfg_coef, two_step_cfg=two_step_cfg, difficulty=one_difficulty)
+                    # ensure the tokens that should be masked are properly set to special_token_id
+                    # as the model never output special_token_id
+                    valid_mask = mask[..., offset:offset+1].expand(B, -1, -1)
+                    next_token[~valid_mask] = self.token_id_size
                     # ensure we don't overwrite prompt tokens, we only write over unknown tokens
                     # (then mask tokens should be left as is as well, which is correct)
-                    assert (gen_sequence[offset:offset+self.position_size] == unknown_token).any()
-                    gen_sequence[offset:offset+self.position_size] = torch.where(
-                        gen_sequence[offset:offset+self.position_size] == unknown_token,
-                        next_token, gen_sequence[offset:offset+self.position_size]
+                    gen_sequence[..., offset:offset+1] = torch.where(
+                        gen_sequence[..., offset:offset+1] == unknown_token,
+                        next_token, gen_sequence[..., offset:offset+1]
                     )
                     prev_offset = offset
                     if callback is not None:
@@ -469,12 +505,24 @@ class BeatmapLMModel(StreamingModule):
             unconditional_state.clear()
             # ensure sequence has been entirely filled
             assert not (gen_sequence == unknown_token).any()
+            # ensure gen_sequence pattern and mask are matching
+            # which means the gen_sequence is valid according to the pattern
+            assert (
+                gen_sequence == torch.where(mask[None, ...].expand(B, -1, -1), gen_sequence, self.token_id_size)
+            ).all()
             # get back the codes, trimming the prompt if needed and cutting potentially incomplete timesteps
-            out_code = gen_sequence[self.position_size:]
+            out_codes, out_indexes, out_mask = pattern.revert_pattern_sequence(gen_sequence, special_token=unknown_token)
+
             # sanity checks over the returned codes and corresponding masks
-            assert (out_code[:max_gen_len] != unknown_token).all()
+            assert (out_codes[..., :max_gen_len] != unknown_token).all()
+            assert (out_mask[..., :max_gen_len] == 1).all()
+
+            out_start_offset = start_offset if remove_prompts else 0
+            out_codes = out_codes[..., out_start_offset:max_gen_len]
+
             # ensure the returned codes are all valid
-            assert (out_code >= 0).all() and (out_code <= self.token_id_size).all()
-            out_codes.append(out_code.reshape(1, -1, self.position_size))
-        return out_codes
+            assert (out_codes >= 0).all() and (out_codes <= self.token_id_size).all()
+            out_codes.permute(0, 2, 1)
+            out_codes_list.append(out_codes)
+        return out_codes_list
         

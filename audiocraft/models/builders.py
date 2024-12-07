@@ -158,6 +158,12 @@ def get_beatmapgen_lm_model(cfg: omegaconf.DictConfig) -> LMModel:
 
         pattern_provider = get_codebooks_pattern_provider(n_q, codebooks_pattern_cfg)
         
+        position_size = kwargs['position_size']
+        beatmap_pattern_modeling = kwargs.pop("beatmap_pattern_modeling", None)
+        codebooks_pattern_cfg = omegaconf.OmegaConf.create(
+                {"modeling": beatmap_pattern_modeling, "delay": {"delays": list(range(position_size))}}
+            )
+        beatmap_pattern_provider = get_codebooks_pattern_provider(position_size, codebooks_pattern_cfg)
         transfer_lm_kwargs = dict_from_config(getattr(cfg, "transfer_lm"))
         return BeatmapLMModel(
             pattern_provider=pattern_provider,
@@ -166,6 +172,7 @@ def get_beatmapgen_lm_model(cfg: omegaconf.DictConfig) -> LMModel:
             cfg_dropout=cfg_prob,
             cfg_coef=cfg_coef,
             attribute_dropout=attribute_dropout,
+            beatmap_pattern_provider = beatmap_pattern_provider,
             dtype=getattr(torch, cfg.dtype),
             device=cfg.device,
             **transfer_lm_kwargs,

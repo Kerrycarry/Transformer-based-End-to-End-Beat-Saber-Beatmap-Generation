@@ -258,7 +258,7 @@ class BeatmapGenSolver(base.StandardSolver):
         return state
 
     def _compute_cross_entropy(
-        self, logits: torch.Tensor, targets: torch.Tensor, note_code_maps: list,
+        self, logits: torch.Tensor, targets: torch.Tensor, mask: torch.Tensor
     ) -> tp.Tuple[torch.Tensor, tp.List[torch.Tensor]]:
         """Compute cross entropy between multi-codebook targets and model's logits.
         The cross entropy is computed per codebook to provide codebook-level cross entropy.
@@ -266,30 +266,28 @@ class BeatmapGenSolver(base.StandardSolver):
         timesteps are set to 0.
 
         Args:
-            logits (torch.Tensor): Model's logits of shape [B, S, P, card].
-            targets (torch.Tensor): Target codes, of shape [B, S, P].
-            
+            logits (torch.Tensor): Model's logits of shape [B, K, T, card].
+            targets (torch.Tensor): Target codes, of shape [B, K, T].
+            mask (torch.Tensor): Mask for valid target codes, of shape [B, K, T].
         Returns:
             ce (torch.Tensor): Cross entropy averaged over the codebooks
             ce_per_codebook (list of torch.Tensor): Cross entropy per codebook (detached).
         """
-        B, S, P = targets.shape
+        B, K, T = targets.shape
+        assert logits.shape[:-1] == targets.shape
+        assert mask.shape == targets.shape
         ce = torch.zeros([], device=targets.device)
-        for logit, target, note_code_map in zip(logits, targets, note_code_maps):
-            target = target[note_code_map]
-            assert logit.squeeze(0).shape[:-1] == target.view(-1).shape
-            
-            logits_k = logit.contiguous().view(-1,logit.size(-1))
-            targets_k = target.view(-1)
-            ce += F.cross_entropy(logits_k, targets_k)
-
-
-        return ce
-        # note_mask = (targets == self.model.outputLM.token_id_size).float()  # 0 for notes, 1 for rests
-        # rest_logits = logits[..., self.model.outputLM.token_id_size] 
-        # rhythm_loss = F.binary_cross_entropy_with_logits(rest_logits.view(-1), note_mask.view(-1))
-
-        # return ce, rhythm_loss
+        ce_per_codebook: tp.List[torch.Tensor] = []
+        for k in range(K):
+            logits_k = logits[:, k, ...].contiguous().view(-1, logits.size(-1))  # [B x T, card]
+            targets_k = targets[:, k, ...].contiguous().view(-1)  # [B x T]
+            mask_k = mask[:, k, ...].contiguous().view(-1)  # [B x T]
+            ce_targets = targets_k[mask_k]
+            ce_logits = logits_k[mask_k]
+            q_ce = F.cross_entropy(ce_logits, ce_targets)
+            ce += q_ce
+            ce_per_codebook.append(q_ce.detach())
+        return ce, ce_per_codebook
     
     def tokenize_difficulty(self, segment_infos):
         difficulty_map = {'Easy': 0, 'Normal': 1, 'Hard': 2, 'Expert': 3, 'ExpertPlus': 4}
@@ -400,11 +398,19 @@ class BeatmapGenSolver(base.StandardSolver):
         assert (beatmap_tokens >= 0).all(), "beatmap_tokens contains negative values!"
         assert (beatmap_tokens <= self.model.token_id_size).all(), f"beatmap_tokens contains invalid class indices! Max target: {beatmap_tokens.max()}"
         with self.autocast:
-            logits = self.model.compute_predictions(audio_tokens, beatmap_tokens, difficulty, note_code_maps)  # type: ignore # [B, S, P, card]
-            # ce, rhythm_loss = self._compute_cross_entropy(logits, beatmap_tokens)
-            # loss = ce + rhythm_loss
-            ce = self._compute_cross_entropy(logits, beatmap_tokens, note_code_maps)
-            loss = ce
+            model_output_list = self.model.compute_predictions(audio_tokens, beatmap_tokens, difficulty, note_code_maps)  # type: ignore # [B, S, P, card]
+            loss = torch.zeros([], device=self.device)
+            total_ce_per_codebook = [torch.zeros([], device=self.device) for _ in range(self.model.position_size)]
+            for model_output, one_token, one_map in zip(model_output_list, beatmap_tokens, note_code_maps): 
+                logits = model_output.logits
+                mask = model_output.mask
+                one_token = one_token[one_map].permute(1, 0).unsqueeze(0)
+                ce, ce_per_codebook = self._compute_cross_entropy(logits, one_token, mask)
+                loss += ce
+                total_ce_per_codebook = [
+                    total + ce_cb for total, ce_cb in zip(total_ce_per_codebook, ce_per_codebook)
+                ]
+            ce_per_codebook = total_ce_per_codebook
         self.deadlock_detect.update('loss')
 
         if check_synchronization_points:

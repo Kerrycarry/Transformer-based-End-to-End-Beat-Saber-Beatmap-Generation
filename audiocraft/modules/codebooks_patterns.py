@@ -52,7 +52,7 @@ class Pattern:
         self._validate_layout()
         self._build_reverted_sequence_scatter_indexes = lru_cache(100)(self._build_reverted_sequence_scatter_indexes)
         self._build_pattern_sequence_scatter_indexes = lru_cache(100)(self._build_pattern_sequence_scatter_indexes)
-        logger.info("New pattern, time steps: %d, sequence steps: %d", self.timesteps, len(self.layout))
+        # logger.info("New pattern, time steps: %d, sequence steps: %d", self.timesteps, len(self.layout))
 
     def _validate_layout(self):
         """Runs checks on the layout to ensure a valid pattern is defined.

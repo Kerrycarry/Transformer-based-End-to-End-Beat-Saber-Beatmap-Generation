@@ -490,7 +490,7 @@ class LMModel(StreamingModule):
         gen_sequence, indexes, mask = pattern.build_pattern_sequence(gen_codes, self.special_token_id) # gen_sequence.shape 如果没有prompt, [3,4,404] 3
         # retrieve the start_offset in the sequence:
         # it is the first sequence step that contains the `start_offset` timestep
-        start_offset_sequence = pattern.get_first_step_with_timesteps(start_offset) # start_offset = 1, start_offset_sequence = 1
+        start_offset_sequence = pattern.get_first_step_with_timesteps(start_offset) # start_offset = 0, start_offset_sequence = 1
         assert start_offset_sequence is not None
 
         with self.streaming():

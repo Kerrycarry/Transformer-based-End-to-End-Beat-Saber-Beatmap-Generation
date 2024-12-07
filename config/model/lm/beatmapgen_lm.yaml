@@ -39,6 +39,7 @@ transformer_lm:
   transfer_lm_kwargs:
     use_transfer_lm: True
     local_cross_attention: True
+  beatmap_pattern_modeling: parallel
 
   pad_kv: False
   use_mask: False
