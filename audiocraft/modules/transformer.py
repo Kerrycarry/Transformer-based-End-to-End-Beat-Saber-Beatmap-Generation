@@ -396,8 +396,8 @@ class StreamingMultiheadAttention(StreamingModule):
                     custom_attn_mask = True
                     if not self.local_self_attention:
                         len = query_length // self.position_size
-                        d = torch.arange(len).repeat_interleave(self.position_size)
-                        dT = torch.arange(len).repeat_interleave(self.position_size)
+                        d = torch.arange(len, device=query.device).repeat_interleave(self.position_size)
+                        dT = torch.arange(len, device=query.device).repeat_interleave(self.position_size)
                         mask_op = ">="
                     else:
                         # add full block attention along diagonal line and tringular mask within block size
@@ -437,8 +437,8 @@ class StreamingMultiheadAttention(StreamingModule):
                     if self.block_cross_attention or not self.block_self_attention:
                         attn_mask = torch.eye(cross_src_length, cross_src_length, dtype=torch.bool).unsqueeze(0).unsqueeze(0)
                     else:
-                        d = torch.arange(cross_src_length).repeat_interleave(self.position_size)
-                        dT = torch.arange(cross_src_length)
+                        d = torch.arange(cross_src_length, device=query.device).repeat_interleave(self.position_size)
+                        dT = torch.arange(cross_src_length, device=query.device)
                         mask_op = "=="
 
         if self.custom:
@@ -534,19 +534,21 @@ class StreamingMultiheadAttention(StreamingModule):
                         else:
                             k = F.pad(k, (0, 0, 0, padding_needed))
                             v = F.pad(v, (0, 0, 0, padding_needed))
-                        dT = torch.cat((dT, torch.full([padding_needed], key_len)), dim=0)
+                        dT = torch.cat((dT, torch.full([padding_needed], key_len, device = dT.device)), dim=0)
                         key_len += padding_needed
                     #calculate attn_bias for attention here                    
-                    d = d.view(1, -1, 1).to(q.device)
-                    dT = dT.view(1, -1, 1).transpose(1, 2).to(q.device)
+                    d = d.view(1, -1, 1)
+                    dT = dT.view(1, -1, 1).transpose(1, 2)
                     if mask_op == ">=":
                         mask = d >= dT
                     elif mask_op == "==":
                         mask = d == dT
-                    attn_bias = torch.where(mask, torch.tensor(0.0, dtype=q.dtype), torch.tensor(float('-inf'), dtype=q.dtype)).reshape(1, 1, query_len, key_len)
+                    zero_tensor = torch.full((1,), 0.0, dtype=q.dtype, device=q.device)
+                    neg_inf_tensor = torch.full((1,), float('-inf'), dtype=q.dtype, device=q.device)
+                    attn_bias = torch.where(mask, zero_tensor, neg_inf_tensor).reshape(1, 1, query_len, key_len)
                     if _efficient_attention_backend == 'xformers':
                         attn_bias = attn_bias.expand((q.shape[0], q.shape[2], query_len, key_len))
-
+                    attn_bias.requires_grad = False
                 p = self.dropout if self.training else 0
                 if _efficient_attention_backend == 'torch':
                     if not self.use_transfer_lm:
@@ -876,7 +878,7 @@ class StreamingTransformer(StreamingModule):
             pos_emb = create_sin_embedding(positions, C, max_period=self.max_period, dtype=x.dtype)
             if self.block_self_attention:
                 pos_emb = pos_emb.repeat_interleave(self.position_size, dim=1)
-                indices = torch.arange(self.position_size).unsqueeze(0).repeat(B, 1).to(x.device)
+                indices = torch.arange(self.position_size, device=x.device).unsqueeze(0).repeat(B, 1)
                 local_pos_emb = self.local_pos_embedding(indices)
                 local_pos_emb = local_pos_emb.repeat(1, T, 1)
                 pos_emb += local_pos_emb

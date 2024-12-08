@@ -261,6 +261,7 @@ class Beatmap:
             unsupported_note = [(tuple((key, value) for key, value in sorted(note.items()) if not isinstance(value, dict)),msg) for note, msg in unsupported_note]
             for item, msg in unsupported_note:
                 print(item, msg)
+        note_code_map = torch.tensor(note_code_map, device=token.device)
         return token, note_code_map
     def detokenize(self, tokens: torch.Tensor):
         beatmap_reconstructe = {'difficulty':{}}
