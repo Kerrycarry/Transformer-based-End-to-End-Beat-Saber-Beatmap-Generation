@@ -35,10 +35,11 @@ transformer_lm:
   zero_bias_init: true
   attention_as_float32: false 
   
+  transfer_efficient_backend: xformers # can be torch or xformers.
   transfer_lr: null
   blockwise_attention_kwargs:
     use_transfer_lm: True
-    block_self_attention: False
+    block_self_attention: True
     local_self_attention: False
     sa_window_size: 32 # attend to previous 32 blocks including the block current step belong to
     block_cross_attention: False
@@ -46,7 +47,7 @@ transformer_lm:
     sa_head_num: 8 # overide transfer_lm.transfer_num_heads
     ca_head_num: 8  # overide transfer_lm.transfer_num_heads
 
-  pad_kv: False
+  pad_kv: True
   use_mask: False
   lora_kwargs: 
     use_lora: False

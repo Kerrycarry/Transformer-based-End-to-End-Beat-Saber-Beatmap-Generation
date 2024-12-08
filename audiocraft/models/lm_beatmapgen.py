@@ -151,6 +151,7 @@ class BeatmapLMModel(StreamingModule):
                  attribute_dropout: tp.Dict[str, tp.Dict[str, float]] = {}, two_step_cfg: bool = False, difficulty_num: int = 5, 
                  transfer_dim: int = 64, transfer_num_heads: int = 4, transfer_num_layers: int = 1,
                  use_mask: bool = False, lora_kwargs: dict = {}, blockwise_attention_kwargs: dict = {}, transfer_lr: tp.Optional[float] = None,
+                 transfer_efficient_backend: str = 'torch',
                  **kwargs):
         super().__init__()
         self.cfg_coef = cfg_coef
@@ -171,6 +172,7 @@ class BeatmapLMModel(StreamingModule):
         self.token_id_size = token_id_size + 1
         self.position_size = position_size
         self.use_mask = use_mask
+        self.transfer_efficient_backend = transfer_efficient_backend
         if self.block_self_attention:
             self.difficulty_emb = ScaledEmbedding(self.difficulty_num, transfer_dim * position_size, lr=transfer_lr)
             self.beatmap_emb = ScaledEmbedding(self.token_id_size, transfer_dim, lr=transfer_lr)
@@ -367,7 +369,7 @@ class BeatmapLMModel(StreamingModule):
     def transfer_lm_forward(self, input_: torch.Tensor, # [B, S*P, card]
                 cross_attention_input: torch.Tensor,
                 stage: int = -1) -> torch.Tensor:
-        set_efficient_attention_backend("torch")
+        set_efficient_attention_backend(self.transfer_efficient_backend)
         out = self.transfer_lm(input_, cross_attention_src=cross_attention_input,
                             src_mask=(self.attn_mask_per_stage[stage] if stage >= 0 else None)) # [B, S*P, dim] / [B, S, dim]
         if self.out_norm2:

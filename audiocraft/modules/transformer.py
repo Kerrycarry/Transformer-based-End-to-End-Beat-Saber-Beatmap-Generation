@@ -24,6 +24,7 @@ from xformers import ops
 
 from .rope import RotaryEmbedding
 from .streaming import StreamingModule
+from xformers.ops import LowerTriangularMask
 
 import math
 _efficient_attention_backend: str = 'torch'
@@ -381,27 +382,27 @@ class StreamingMultiheadAttention(StreamingModule):
                 attn_mask = self._get_mask(query.shape[1], query.device, query.dtype)
         else:
             N = self.position_size
-            current_steps = query.shape[1]
+            query_length = query.shape[1]
             if self.block_self_attention:
-                assert current_steps % self.position_size == 0
+                assert query_length % self.position_size == 0
             # beatmapgen inference case
             if self._is_streaming:
-                attn_mask = None
+                attn_bias = None
             # beatmapgen sa training case
             elif self.causal:
-                assert current_steps == key.shape[1]
-                assert current_steps == value.shape[1]
+                assert query_length == key.shape[1]
+                assert query_length == value.shape[1]
                 if self.block_self_attention:
                     custom_attn_mask = True
                     if not self.local_self_attention:
-                        attn_mask = torch.tril(torch.ones(1, 1, current_steps, current_steps, dtype=torch.bool))
-                        # add full block attention along diagonal line
-                        for i in range(0, current_steps, N):
-                            attn_mask[..., i:i+N, i:i+N] = True
+                        len = query_length // self.position_size
+                        d = torch.arange(len).repeat_interleave(self.position_size)
+                        dT = torch.arange(len).repeat_interleave(self.position_size)
+                        mask_op = ">="
                     else:
                         # add full block attention along diagonal line and tringular mask within block size
-                        attn_mask = torch.zeros(1, 1, current_steps, current_steps, dtype=torch.bool)
-                        for i in range(0, current_steps, N):
+                        attn_mask = torch.zeros(1, 1, query_length, query_length, dtype=torch.bool)
+                        for i in range(0, query_length, N):
                             index = i - N * self.sa_window_size
                             if index < 0:
                                 index = 0
@@ -410,10 +411,12 @@ class StreamingMultiheadAttention(StreamingModule):
                     if not self.local_self_attention:
                         custom_attn_mask = False
                         is_causal = True
+                        if _efficient_attention_backend == 'xformers':
+                            attn_bias = LowerTriangularMask()
                     else:
                         custom_attn_mask = True
-                        attn_mask = torch.zeros(1, 1, current_steps, current_steps, dtype=torch.bool)
-                        for i in range(0, current_steps, 1):
+                        attn_mask = torch.zeros(1, 1, query_length, query_length, dtype=torch.bool)
+                        for i in range(0, query_length, 1):
                             index = i - self.sa_window_size
                             if index < 0:
                                 index = 0
@@ -424,19 +427,19 @@ class StreamingMultiheadAttention(StreamingModule):
                     attn_mask = None
                 else:
                     if self.block_self_attention:
-                        assert (current_steps // self.position_size) == key.shape[1]
-                        assert (current_steps // self.position_size) == value.shape[1]
+                        assert (query_length // self.position_size) == key.shape[1]
+                        assert (query_length // self.position_size) == value.shape[1]
                     else:
-                        assert current_steps == key.shape[1]
-                        assert current_steps == value.shape[1]
+                        assert query_length == key.shape[1]
+                        assert query_length == value.shape[1]
                     cross_src_length = key.shape[1]
                     custom_attn_mask = True
                     if self.block_cross_attention or not self.block_self_attention:
                         attn_mask = torch.eye(cross_src_length, cross_src_length, dtype=torch.bool).unsqueeze(0).unsqueeze(0)
                     else:
-                        attn_mask = torch.zeros(1, 1, current_steps, cross_src_length, dtype=torch.bool)
-                        for i in range(0, cross_src_length):
-                            attn_mask[..., i*N:(i+1)*N, i] = True
+                        d = torch.arange(cross_src_length).repeat_interleave(self.position_size)
+                        dT = torch.arange(cross_src_length)
+                        mask_op = "=="
 
         if self.custom:
             # custom implementation
@@ -531,14 +534,18 @@ class StreamingMultiheadAttention(StreamingModule):
                         else:
                             k = F.pad(k, (0, 0, 0, padding_needed))
                             v = F.pad(v, (0, 0, 0, padding_needed))
-                        attn_mask = F.pad(attn_mask, (0, padding_needed))
+                        dT = torch.cat((dT, torch.full([padding_needed], key_len)), dim=0)
                         key_len += padding_needed
+                    #calculate attn_bias for attention here                    
+                    d = d.view(1, -1, 1).to(q.device)
+                    dT = dT.view(1, -1, 1).transpose(1, 2).to(q.device)
+                    if mask_op == ">=":
+                        mask = d >= dT
+                    elif mask_op == "==":
+                        mask = d == dT
+                    attn_bias = torch.where(mask, torch.tensor(0.0, dtype=q.dtype), torch.tensor(float('-inf'), dtype=q.dtype)).reshape(1, 1, query_len, key_len)
                     if _efficient_attention_backend == 'xformers':
-                        # When using a custom attn mask:
-                        # Move to query's device, repeat for each sample, remove align8 padding
-                        attn_mask = attn_mask.expand((q.shape[0], q.shape[2], query_len, key_len))
-                        attn_mask = attn_mask.to(q.dtype)
-                    attn_mask = attn_mask.to(q.device)
+                        attn_bias = attn_bias.expand((q.shape[0], q.shape[2], query_len, key_len))
 
                 p = self.dropout if self.training else 0
                 if _efficient_attention_backend == 'torch':
@@ -547,9 +554,9 @@ class StreamingMultiheadAttention(StreamingModule):
                             q, k, v, is_causal=attn_mask is not None, dropout_p=p)
                     else:
                         x = torch.nn.functional.scaled_dot_product_attention(
-                            q, k, v, attn_mask=attn_mask, is_causal =is_causal, dropout_p=p)
+                            q, k, v, attn_mask=attn_bias, is_causal =is_causal, dropout_p=p)
                 else:
-                    x = ops.memory_efficient_attention(q, k, v, attn_mask, p=p)
+                    x = ops.memory_efficient_attention(q, k, v, attn_bias, p=p)
             else:
                 # We include the dot product as float32, for consistency
                 # with the other implementations that include that step
