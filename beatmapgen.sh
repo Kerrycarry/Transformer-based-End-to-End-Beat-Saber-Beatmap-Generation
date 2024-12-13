@@ -9,36 +9,8 @@ start_parser_api() {
     echo "Deno API PID: $API_PID"
 }
 
-# 流程 1：Dora 主流程 1
-run_dora_process_1() {
-    echo "Running beatmapgen pre compute token ..."
-    nohup dora run \
-        solver=beatmapgen/beatmapgen_base_32khz \
-        model/lm/model_scale=xsmall \
-        conditioner=none \
-        cache.path=/mnt/workspace/cache/bs_rank \
-        cache.write=True \
-        ${MORE_CONFIG[@]} > "$LOG_FILE" 2>&1 &
-    DORA_PID=$!
-    wait $DORA_PID
-}
-
-# 流程 2：Dora 主流程 2
-run_dora_process_2() {
-    echo "Running beatmapgen with precomputerd token..."
-    nohup dora run \
-        solver=beatmapgen/beatmapgen_base_32khz \
-        model/lm/model_scale=small \
-        conditioner=none \
-        cache.path=/mnt/workspace/cache/bs_rank \
-        continue_from=/root/autodl-tmp/audiocraft_download/beatmapgen_finetune_musicgen-small.th \
-        ${MORE_CONFIG[@]} > "$LOG_FILE" 2>&1 &
-    DORA_PID=$!
-    wait $DORA_PID
-}
-
 #
-run_dora_process_3() {
+run_dora_process() {
     echo "Running beatmapgen without caching"
     nohup dora run \
         solver=beatmapgen/beatmapgen_base_32khz \
@@ -105,28 +77,20 @@ LOG_FILE2="${LOG_DIR}/beatmapgen_log_${TAG}.api"
 mkdir -p "$LOG_DIR"
 
 # 根据参数运行不同的流程
-if [[ "$FIRST_ARG" == "-1" ]]; then
+elif [[ "$FIRST_ARG" == "-1" ]]; then
     start_parser_api
-    run_dora_process_1
+    run_dora_process
     stop_parser_api
 elif [[ "$FIRST_ARG" == "-2" ]]; then
-    start_parser_api
-    run_dora_process_2
-    stop_parser_api
-elif [[ "$FIRST_ARG" == "-3" ]]; then
-    start_parser_api
-    run_dora_process_3
-    stop_parser_api
-elif [[ "$FIRST_ARG" == "-4" ]]; then
     TAG="manifest"
     LOG_FILE="${LOG_DIR}/beatmapgen_log_${TAG}.dora"
     LOG_FILE2="${LOG_DIR}/beatmapgen_log_${TAG}.api"
     start_parser_api
     run_python_process
     stop_parser_api
-elif [[ "$FIRST_ARG" == "-5" ]]; then
+elif [[ "$FIRST_ARG" == "-3" ]]; then
     start_parser_api
-elif [[ "$FIRST_ARG" == "-6" ]]; then
+elif [[ "$FIRST_ARG" == "-4" ]]; then
     for PROCESS in deno dora
     do
         kill_process "$PROCESS"
@@ -138,16 +102,12 @@ fi
 # usage 
 # 启动主流程
 # nohup ./beatmapgen.sh -1 default > log/beatmapgen_log.txt 2>&1 &
-# nohup ./beatmapgen.sh -2 default > log/beatmapgen_log.txt 2>&1 &
-# nohup ./beatmapgen.sh -3 default > log/beatmapgen_log.txt 2>&1 &
 # nohup ./beatmapgen.sh -1 default --clear > log/beatmapgen_log.txt 2>&1 &
-# nohup ./beatmapgen.sh -2 default --clear > log/beatmapgen_log.txt 2>&1 &
-# nohup ./beatmapgen.sh -3 default --clear > log/beatmapgen_log.txt 2>&1 &
 # 启动manifest制作流程
-# nohup ./beatmapgen.sh -4 CustomLevels2 bs_curated > log/beatmapgen_log.txt 2>&1 &
+# nohup ./beatmapgen.sh -2 CustomLevels2 bs_curated > log/beatmapgen_log.txt 2>&1 &
 # 启动 api
-# ./beatmapgen.sh -5
+# ./beatmapgen.sh -3
 # kill 掉api和dora
-# ./beatmapgen.sh -6
+# ./beatmapgen.sh -4
 
 

@@ -16,7 +16,6 @@ from torch import nn
 from ..utils import utils
 from ..modules.streaming import StreamingModule, State
 from ..modules.transformer import StreamingTransformer, create_norm_fn
-from ..modules.beatmapgen_modules import OutputLMModel
 from ..modules.conditioners import (
     ConditionFuser,
     ClassifierFreeGuidanceDropout,
