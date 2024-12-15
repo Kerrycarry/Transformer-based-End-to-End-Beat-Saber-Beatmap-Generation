@@ -57,7 +57,6 @@
                 "solver=beatmapgen/beatmapgen_base_32khz_test",
                 "model/lm/model_scale=xsmall",
                 "conditioner=none",
-                "dataset.segment_duration=128",
                 "--clear",
             ],
         },

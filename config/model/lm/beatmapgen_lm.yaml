@@ -59,7 +59,6 @@ dataset:
     difficulty_num: 5
     position_size: 12
     beatmap_sample_window: 32 # it must be divisble by 8
-    code_rate: 50
     minimum_note: 0.125
     note_type:  
       colorNotes: True

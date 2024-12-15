@@ -201,7 +201,7 @@ class BeatmapLMModel(StreamingModule):
             transfer_dim_num = self.transfer_dim * self.position_size
         else:
             transfer_dim_num = self.transfer_dim
-        self.linear_transfer = nn.Linear(dim, transfer_dim_num, bias=bias_proj)
+        self.linear_transfer = nn.Linear(128, transfer_dim_num, bias=bias_proj)
         self._init_weights(weight_init, depthwise_init, zero_bias_init)
         if self.use_mask:
             self.mask_token_embedding = nn.Parameter(torch.empty((self.dim,)))
@@ -268,7 +268,6 @@ class BeatmapLMModel(StreamingModule):
         return self.n_q
 
     def forward(self, codes: torch.Tensor,
-                note_code_maps: list,
                 # conditions: tp.List[ConditioningAttributes],
                 # condition_tensors: tp.Optional[ConditionTensors] = None,
                 stage: int = -1) -> torch.Tensor:
@@ -301,10 +300,10 @@ class BeatmapLMModel(StreamingModule):
         )
         assert K == self.num_codebooks, "Sequence shape must match the specified number of codebooks"
         input_ = sum([self.emb[k](sequence[:, k]) for k in range(K)]) # batch, sequence, dim
-        if self.use_mask:
-            mask_positions = [[pos + 4 for pos in positions] for positions in note_code_maps]
-            for i, positions in enumerate(mask_positions):
-                input_[i, positions, :] += self.mask_token_embedding
+        # if self.use_mask:
+        #     mask_positions = [[pos + 4 for pos in positions] for positions in note_code_maps]
+        #     for i, positions in enumerate(mask_positions):
+        #         input_[i, positions, :] += self.mask_token_embedding
         out = self.transformer(input_, cross_attention_src=None,
                                src_mask=(self.attn_mask_per_stage[stage] if stage >= 0 else None))
         if self.out_norm:
@@ -317,7 +316,6 @@ class BeatmapLMModel(StreamingModule):
             self, codes: torch.Tensor,
             beatmap: torch.Tensor,
             difficulty: torch.Tensor,
-            note_code_maps: list,
             stage: int = -1,
             keep_only_valid_steps: bool = True):
         """Given an input tensor of codes [B, K, T] and list of conditions, runs the model
@@ -345,20 +343,17 @@ class BeatmapLMModel(StreamingModule):
                     Given the specified interleaving strategies, parts of the logits and codes should
                     not be considered as valid predictions because of invalid context.
         """
-        # use musicgen output as cross attention source for transfer LM
-        model = self if self._fsdp is None else self._fsdp
-        out = model(codes, note_code_maps, stage=stage)
         
         logits = []
-        for one_out, note_code_map, one_beatmap, one_difficulty in zip(out, note_code_maps, beatmap, difficulty):
+        for one_out, one_beatmap, one_difficulty in zip(codes, beatmap, difficulty):
             # use note represenetation
-            cross_attention_input = self.linear_transfer(one_out[note_code_map])
+            cross_attention_input = self.linear_transfer(one_out)
             if self.block_self_attention:
-                one_beatmap = one_beatmap[note_code_map][:-1].view(-1) # [(S-1)*P]
+                one_beatmap = one_beatmap[:-1].view(-1) # [(S-1)*P]
                 input_ = self.beatmap_emb(one_beatmap) # [(S-1)*P, dim]
                 input_ = torch.cat((self.difficulty_emb(one_difficulty).reshape(self.position_size, -1), input_), dim=0) #[S*P, dim]
             else:
-                one_beatmap = one_beatmap[note_code_map][:-1] #[(S-1), P]
+                one_beatmap = one_beatmap[:-1] #[(S-1), P]
                 input_ = sum([self.beatmap_emb[p](one_beatmap[:, p]) for p in range(self.position_size)]) # [(S-1), dim]
                 input_ = torch.cat((self.difficulty_emb(one_difficulty).unsqueeze(0), input_), dim=0) #[S, dim]
             logit = self.transfer_lm_forward(input_ = input_.unsqueeze(0), cross_attention_input = cross_attention_input.unsqueeze(0)) # [1, S*P, card]
@@ -429,7 +424,6 @@ class BeatmapLMModel(StreamingModule):
     def generate(
             self, codes: torch.Tensor,
             difficulty: torch.Tensor,
-            note_code_maps: list,
             stage: int = -1,
             prompt: tp.Optional[torch.Tensor] = None,
             num_samples: tp.Optional[int] = None,
@@ -446,17 +440,14 @@ class BeatmapLMModel(StreamingModule):
         assert not self.training, "generation shouldn't be used in training mode."
         first_param = next(iter(self.parameters()))
         device = first_param.device
-
-        # use musicgen output as cross attention source for transfer LM
-        model = self if self._fsdp is None else self._fsdp
-        out = model(codes, note_code_maps, stage=stage)
         
         out_codes = []
-        for one_out, one_difficulty, note_code_map in zip(out, difficulty, note_code_maps):
+        for one_out, one_difficulty in zip(codes, difficulty):
              # use note represenetation
-            cross_attention_input = self.linear_transfer(one_out[note_code_map])
+            cross_attention_input = self.linear_transfer(one_out)
             unknown_token = -1
-            max_gen_len = (len(note_code_map) + 1) * self.position_size
+            length = cross_attention_input.shape[-2]
+            max_gen_len = (length + 1) * self.position_size
             gen_sequence = torch.full((max_gen_len,), unknown_token, dtype=torch.long, device=device)
             gen_sequence[0:self.position_size] = one_difficulty
             

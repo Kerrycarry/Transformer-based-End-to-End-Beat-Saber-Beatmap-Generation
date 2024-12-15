@@ -61,7 +61,7 @@ kill_process() {
 echo "Calling command: $0 $@" 
 FIRST_ARG=$1
 TAG=$2
-if [[ "$FIRST_ARG" == "-4" ]]; then
+if [[ "$FIRST_ARG" == "-2" ]]; then
     SOURCE_DIR=$2
     MANIFEST_DIR=$3
 fi
@@ -77,7 +77,7 @@ LOG_FILE2="${LOG_DIR}/beatmapgen_log_${TAG}.api"
 mkdir -p "$LOG_DIR"
 
 # 根据参数运行不同的流程
-elif [[ "$FIRST_ARG" == "-1" ]]; then
+if [[ "$FIRST_ARG" == "-1" ]]; then
     start_parser_api
     run_dora_process
     stop_parser_api

@@ -214,9 +214,9 @@ class SampleManager:
                     relative_path = os.path.relpath(file_path, source_folder)
                     zipf.write(file_path, relative_path)
 
-    def add_sample(self, save_directory, audio, meta, beatmap, save_directory_zip, sample_id):
+    def add_sample(self, save_directory, audio, meta, beatmap, save_directory_zip, sample_id, sample_rate):
         song_name = 'song'
-        audio_write(save_directory / song_name, audio, self.xp.cfg.sample_rate, format="ogg")
+        audio_write(save_directory / song_name, audio, sample_rate, format="ogg")
         with open((save_directory / meta.difficulty).with_suffix('.json'), 'w', encoding='utf-8') as f:
             json.dump(beatmap, f, ensure_ascii=False, indent=2)
         
@@ -262,12 +262,12 @@ class SampleManager:
             generated_path = self.base_folder / 'generated' / sample_id
             reference_path_zip = self.base_folder / 'reference_zip' / sample_id
             generated_path_zip = self.base_folder / 'generated_zip' / sample_id
-            self.add_sample(reference_path, audio, meta, ground_truth_beatmap, reference_path_zip, sample_id)
-            self.add_sample(generated_path, audio, meta, gen_beatmap, generated_path_zip, sample_id)
+            self.add_sample(reference_path, audio, meta, ground_truth_beatmap, reference_path_zip, sample_id, meta.sample_rate)
+            self.add_sample(generated_path, audio, meta, gen_beatmap, generated_path_zip, sample_id, meta.sample_rate)
 
             alignment_path = self.base_folder / 'alignment' / sample_id
             alignment_path_zip = self.base_folder / 'alignment_zip' / sample_id
-            self.add_sample(alignment_path, reconstructed_audio, meta, ground_truth_beatmap, alignment_path_zip, sample_id)
+            self.add_sample(alignment_path, reconstructed_audio, meta, ground_truth_beatmap, alignment_path_zip, sample_id, self.xp.cfg.sample_rate)
             with open((alignment_path / 'beatmap_alignment_result').with_suffix('.txt'), "w", encoding="utf-8") as f:
                 f.write(beatmap_alignment_result)
 
