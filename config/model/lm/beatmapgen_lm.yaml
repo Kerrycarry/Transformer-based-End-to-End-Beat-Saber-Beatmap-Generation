@@ -58,8 +58,8 @@ dataset:
   beatmap_kwargs:
     difficulty_num: 5
     position_size: 12
-    beatmap_sample_window: 32 # it must be divisble by 8
-    minimum_note: 0.125
+    beatmap_sample_window: 16 # it must be divisble by minimum note
+    minimum_note: 0.25
     note_type:  
       colorNotes: True
       chains: False 

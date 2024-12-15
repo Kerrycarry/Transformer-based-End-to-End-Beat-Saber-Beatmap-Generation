@@ -24,8 +24,7 @@ async def generate_audio_token(input_data: AudioInput):
         dict: A dictionary containing the audio tokens as a list.
     """
     y_beat_times = torch.tensor(input_data.y_beat_times, device='cuda').unsqueeze(0).unsqueeze(0)  # B, 1, T
-    torch.save(y_beat_times,'/home/kk/project/audiocraft/tensor1.pth')
     audio_token = model.model.encoder(y_beat_times).permute(0, 2, 1).squeeze(0)  # B, S, D
     return {"audio_token": audio_token.cpu().detach().numpy().tolist()}
 
-# uvicorn tests.data.test_codec:app --host 0.0.0.0 --port 8000
+# uvicorn tests.data.test_codec:app --host 0.0.0.0 --port 8001

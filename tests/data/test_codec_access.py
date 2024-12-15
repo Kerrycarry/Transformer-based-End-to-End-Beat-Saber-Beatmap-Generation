@@ -26,8 +26,8 @@ def call_api(api_url, y_beat_times):
     return audio_token
 
 def one_tried(bpm,length, log=False):
-    api_url = "http://localhost:8000/generate_audio_token"  # Adjust URL as needed
-    segment_duration_in_quaver = length *bpm /60 * 8
+    api_url = "http://localhost:8001/generate_audio_token"  # Adjust URL as needed
+    segment_duration_in_quaver = length *bpm /60 * 4
     length = length*32000
     y_beat_times, times = dataset.generate_y_beat_times(bpm, segment_duration_in_quaver,length)
     y_beat_times = y_beat_times.tolist()
@@ -47,8 +47,7 @@ def one_tried(bpm,length, log=False):
         print(f"Sample labels start: {results['sample_labels_start']}")
         print(f"Sample labels end: {results['sample_labels_end']}")
         print()
-# api 
-# uvicorn tests.data.test_codec:app --host 0.0.0.0 --port 8000
+
 # Example usage
 if __name__ == "__main__":
     bpm = 220

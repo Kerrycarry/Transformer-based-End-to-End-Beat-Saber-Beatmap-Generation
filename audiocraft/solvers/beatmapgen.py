@@ -335,7 +335,7 @@ class BeatmapGenSolver(base.StandardSolver):
             labels = torch.from_numpy(result['labels']).cuda()
             segment_duration_in_quaver = info.segment_duration_in_quaver
             num_continuous_blocks = result['continuous_blocks']
-            assert num_continuous_blocks*2 == segment_duration_in_quaver or num_continuous_blocks*2 == segment_duration_in_quaver+1
+            assert num_continuous_blocks == segment_duration_in_quaver
             
             labels_diff = torch.diff(labels, prepend=torch.tensor([0], device=labels.device))
             block_ids = torch.cumsum(labels_diff == 1, dim=0) * labels
@@ -343,9 +343,9 @@ class BeatmapGenSolver(base.StandardSolver):
             weights = 1.0 / block_sizes[block_ids - 1].float() 
             result = torch.zeros((block_sizes.shape[0], embedding.shape[-1]), dtype=embedding.dtype, device=embedding.device)  
             result.index_add_(0, block_ids[labels == 1] - 1, embedding[labels == 1] * weights[labels == 1].unsqueeze(1))
-            result = result.repeat_interleave(2, dim=0)
-            if result.shape[0] == segment_duration_in_quaver+1:
-                result=result[:-1, :]
+            # result = result.repeat_interleave(2, dim=0)
+            # if result.shape[0] == segment_duration_in_quaver+1:
+            #     result=result[:-1, :]
             processed_audio_tokens.append(result)
         return processed_audio_tokens
         
