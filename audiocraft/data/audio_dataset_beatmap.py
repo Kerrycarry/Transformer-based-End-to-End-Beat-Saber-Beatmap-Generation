@@ -38,6 +38,7 @@ try:
 except ImportError:
     dora = None  # type: ignore
 
+from .audio import get_spec
 
 @dataclass(order=True)
 class BaseInfo:
@@ -140,6 +141,8 @@ class Beatmap:
             self.obstacle_head_id = padding_id
             self.obstacle_tail_id = padding_id + 1  # if no tail follows, assume obstacle occupies only one time spot
             padding_id = padding_id + 2
+            self.threadhold_duration_obstacles_in_sec = 0.016
+            self.threadhold_duration_obstacles_tolerance = 0.001
         assert padding_id == self.token_id_size
     
     empty_light = {
@@ -183,7 +186,7 @@ class Beatmap:
         else:
             return False, time_after
     
-    def tokenize(self, beatmap_origin: json, segment_duration_in_quaver) -> torch.Tensor:
+    def tokenize(self, beatmap_origin: json, segment_duration_in_quaver: int, bpm: float) -> torch.Tensor:
         """
         :param beatmap data: JSON
         """
@@ -246,19 +249,47 @@ class Beatmap:
                 else:
                     unsupported_note.append((arc, "时间不是minimum note的倍数"))
         # tokenize obstacle note
-        # if self.use_obstacles:
-        #     for obstacle in beatmap_origin['difficulty']['obstacles']:
-        #         is_integer, time_after = self.time_map(obstacle['time'])
-        #         duration_is_integer, duration_time_after = self.time_map(obstacle['duration '])
-        #         if is_integer and duration_is_integer:
-        #             # 检查横轴需要放墙的地方
-        #             posX = obstacle['posX']
-        #             width = obstacle['width']
-        #             posY = obstacle['posY']
-        #             posX_list = list(range(posX, posX+width))
-        #             posY_list = list(range(posY, 4))
-                    
-                    
+        if self.use_obstacles:
+            for obstacle in beatmap_origin['difficulty']['obstacles']:
+                is_integer, time_after = self.time_map(obstacle['time'])
+                # 判断是否是单片障碍
+                duration = obstacle['duration']
+                is_continued = False
+                if abs(bpm / 60 * self.threadhold_duration_obstacles_in_sec - duration) < self.threadhold_duration_obstacles_tolerance:
+                    is_continued = True
+                if is_continued:
+                    duration_is_integer, duration_time_after = self.time_map(duration)
+                    if not duration_is_integer:
+                        unsupported_note.append((obstacle, "duration时间不是minimum note的倍数"))
+                        continue
+                if is_integer:
+                    # 检查横轴需要放墙的地方
+                    posX = obstacle['posX']
+                    width = obstacle['width']
+                    posY = obstacle['posY']
+                    posX_list = list(range(posX, posX+width))
+                    posY_list = list(range(posY, 4))
+
+                    found = False
+                    for x in posX_list:
+                        if found:
+                            break
+                        for y in posY_list:
+                            token_pos = self.position_map[(x, y)]
+                            if token[time_after, token_pos] != self.token_id_size:
+                                unsupported_note.append((obstacle, "obstacle添加的位置已经有note了"))
+                                found = True
+                                break
+
+                    for x in posX_list:
+                        for y in posY_list:
+                            token_pos = self.position_map[(x, y)]
+                            token[time_after, token_pos] = self.obstacle_head_id
+                            if duration_is_integer:
+                                token[time_after + duration_time_after, token_pos] = self.obstacle_tail_id
+                else:
+                    unsupported_note.append((obstacle, "时间不是minimum note的倍数"))
+   
         if unsupported_note:
             print("number of beatmap.unsupported_note:", len(unsupported_note))
             unsupported_note = [(tuple((key, value) for key, value in sorted(note.items()) if not isinstance(value, dict)),msg) for note, msg in unsupported_note]
@@ -356,6 +387,8 @@ class Beatmap:
                             hold_stack[color_note['color']] = color_note
                         elif time_after - color_note['time'] > self.minimum_note:
                             break
+                # elif self.use_obstacles and token_id == self.obstacle_head_id:
+
                 
         beatmap_reconstructe['difficulty']['colorNotes'] = colorNotes
         beatmap_reconstructe['difficulty']['chains'] = chains
@@ -761,18 +794,8 @@ class AudioDataset:
             assert self.segment_duration is not None
             n_frames = int(self.sample_rate * self.segment_duration)
             return torch.zeros(self.channels, n_frames), self.sample_rate
-    
-    def generate_y_beat_times(self, bpm: float, segment_duration_in_quaver: float, length:int, minimum_note = 0.25):
-        def traditional_round(n):
+    def traditional_round(self, n):
             return int(n + 0.5) if n > 0 else int(n - 0.5)
-        # [0, segment_duration_in_quaver*minimum_note] 范围内的四分音符，segment_duration_in_quaver*minimum_note是exlucsive
-        segment_duration_in_quarter = traditional_round(segment_duration_in_quaver)
-        note = list(range(segment_duration_in_quarter))
-        note = [x * minimum_note * 60 / bpm for x in note]
-        note = np.array(note)        
-        time_interval = 60 / bpm * minimum_note
-        y_beat_times = librosa.clicks(times=note, sr=self.sample_rate, click_duration=time_interval,length=length)
-        return y_beat_times, len(note)
     
     def __getitem__(self, index: int) -> tp.Tuple[SegmentInfo, torch.Tensor, torch.Tensor]:
         # 抽取时间点，resample整个音频，原始音频对应被抽取的片段，对应beatmap的片段，还有对应beatmap片段tokenize后的tensor
@@ -807,17 +830,20 @@ class AudioDataset:
                 # 打开audio，使用encodec需要的sr resample整个audio
                 error_path = file_meta.song_path
                 origin_sample, sr = audio_read(file_meta.song_path, seek_time_in_second, self.segment_duration, pad=False)
-                resample_sample = convert_audio(origin_sample, sr, self.sample_rate, self.channels)
-                #pad resample 后的音频
-                n_frames = resample_sample.shape[-1]
-                target_frames = int(self.segment_duration * self.sample_rate)
-                if self.pad:
-                    resample_sample = F.pad(resample_sample, (0, target_frames - n_frames))
+                #求spectrogram
+                quaver_in_sec = 60 / file_meta.bpm * self.minimum_note
+                quaver_in_frames = quaver_in_sec * file_meta.sample_rate
+                hop_length = self.traditional_round(quaver_in_frames)
                 # pad origin
                 n_frames = origin_sample.shape[-1]
-                target_frames = int(self.segment_duration * file_meta.sample_rate)
+                target_frames = int(hop_length * segment_duration_in_quaver)
                 if self.pad:
                     origin_sample = F.pad(origin_sample, (0, target_frames - n_frames))
+                audio_token = get_spec(y = origin_sample.numpy(), sr = file_meta.sample_rate, n_fft = hop_length, hop_length = hop_length, center = False)
+                audio_token = audio_token[:,:segment_duration_in_quaver]
+                assert audio_token.shape[-1] == segment_duration_in_quaver, f"audio_token.shape[-1] = {audio_token.shape[-1]}, segment_duration_in_quaver = {segment_duration_in_quaver}"
+                audio_token = np.mean(audio_token, axis=0) 
+                audio_token = torch.from_numpy(audio_token).permute(1,0)
                 # 打开beatmap
                 with open(file_meta.beatmap_file_path, 'r', encoding = 'utf-8') as f:
                     beatmap_file = json.load(f)
@@ -825,36 +851,29 @@ class AudioDataset:
                 error_path = file_meta.beatmap_file_path
                 beatmap = Beatmap(minimum_note = self.minimum_note, token_id_size = self.token_id_size, position_size = self.position_size, **self.note_type)
                 beatmap_file = beatmap.sample_beatmap_file(beatmap_file, seek_time_in_quaver,  seek_time_in_quaver + segment_duration_in_quaver)
-                beatmap_token = beatmap.tokenize(beatmap_file, segment_duration_in_quaver)
+                beatmap_token = beatmap.tokenize(beatmap_file, segment_duration_in_quaver, file_meta.bpm)
                 segment_info = SegmentInfo(file_meta, round(seek_time_in_quaver * self.minimum_note),segment_duration_in_quaver=segment_duration_in_quaver, n_frames=n_frames, total_frames=target_frames,
                                                 sample_rate=self.sample_rate, channels=origin_sample.shape[0], origin_sample=origin_sample, beatmap_file=beatmap_file, beatmap_class=beatmap)
-                y_beat_times, times = self.generate_y_beat_times(file_meta.bpm, segment_duration_in_quaver,resample_sample.shape[-1] )
-                y_beat_times = torch.from_numpy(y_beat_times).unsqueeze(0).unsqueeze(0)
-
             except Exception as exc:
                 logger.warning("Error opening file %s, seek time, %d,  %r", error_path, round(seek_time_in_quaver * self.minimum_note), exc)
                 if retry == self.max_read_retry - 1:
                     raise
             else:
                 break
-        return segment_info, resample_sample, beatmap_token, y_beat_times
-
+        
+        return segment_info, audio_token, beatmap_token
     def collater(self, samples):
         """The collater function has to be provided to the dataloader
         if AudioDataset has return_info=True in order to properly collate
         the samples of a batch.
         """
-        segment_infos, resample_samples, beatmap_tokens, y_beat_times = zip(*samples)
+        segment_infos, audio_tokens, beatmap_tokens = zip(*samples)
+
         segment_infos = list(segment_infos)
-        resample_samples = list(resample_samples)
+        audio_tokens = list(audio_tokens)
         beatmap_tokens = list(beatmap_tokens)        
-        y_beat_times = list(y_beat_times)
-        new_resample_samples = []
-        for y, r in zip(y_beat_times, resample_samples):
-            combined = torch.cat((y, r.unsqueeze(0)), dim=0)
-            new_resample_samples.append(combined)
-        
-        return segment_infos, new_resample_samples, beatmap_tokens
+
+        return segment_infos, audio_tokens, beatmap_tokens
 
     def _filter_duration(self, meta: tp.List[AudioMeta]) -> tp.List[AudioMeta]:
         """Filters out_origin audio files with audio durations that will not allow to sample examples from them."""

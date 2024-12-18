@@ -231,7 +231,7 @@ def audio_write(stem_name: tp.Union[str, Path],
     return path
 
 
-def get_spec(y, sr=16000, n_fft=4096, hop_length=128, dur=8) -> np.ndarray:
+def get_spec(y, sr=16000, n_fft=4096, hop_length=128, dur=8, center=True) -> np.ndarray:
     """Get the mel-spectrogram from the raw audio.
 
     Args:
@@ -247,7 +247,7 @@ def get_spec(y, sr=16000, n_fft=4096, hop_length=128, dur=8) -> np.ndarray:
     import librosa.display
 
     spectrogram = librosa.feature.melspectrogram(
-        y=y, sr=sr, n_fft=n_fft, hop_length=hop_length
+        y=y, sr=sr, n_fft=n_fft, hop_length=hop_length, center=center
     )
     spectrogram_db = librosa.power_to_db(spectrogram, ref=np.max)
     return spectrogram_db

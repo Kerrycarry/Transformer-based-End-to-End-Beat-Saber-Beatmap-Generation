@@ -214,9 +214,9 @@ class SampleManager:
                     relative_path = os.path.relpath(file_path, source_folder)
                     zipf.write(file_path, relative_path)
 
-    def add_sample(self, save_directory, audio, meta, beatmap, save_directory_zip, sample_id, sample_rate):
+    def add_sample(self, save_directory, audio, meta, beatmap, save_directory_zip, sample_id):
         song_name = 'song'
-        audio_write(save_directory / song_name, audio, sample_rate, format="ogg")
+        audio_write(save_directory / song_name, audio, meta.sample_rate, format="ogg")
         with open((save_directory / meta.difficulty).with_suffix('.json'), 'w', encoding='utf-8') as f:
             json.dump(beatmap, f, ensure_ascii=False, indent=2)
         
@@ -237,7 +237,7 @@ class SampleManager:
 
     def add_samples(self, sample_ids: list, audios: list, metas: list, epoch: int,
                     ground_truth_beatmaps: list,
-                    gen_beatmaps: list, beatmap_alignment_results: list, reconstructed_audios: list,
+                    gen_beatmaps: list, beatmap_alignment_results: list,
                     conditioning: tp.Optional[tp.List[tp.Dict[str, tp.Any]]] = None,
                     generation_args: tp.Optional[tp.Dict[str, tp.Any]] = None) -> tp.List[Sample]:
         """Adds a batch of samples.
@@ -256,19 +256,15 @@ class SampleManager:
             generation_args (dict[str, Any], optional): Dictionary of other arguments used during generation.
         """
         
-        for index, (sample_id, audio, meta, ground_truth_beatmap, gen_beatmap, beatmap_alignment_result, reconstructed_audio) in enumerate(zip(sample_ids, audios, metas, ground_truth_beatmaps, gen_beatmaps, beatmap_alignment_results, reconstructed_audios)):
+        for index, (sample_id, audio, meta, ground_truth_beatmap, gen_beatmap, beatmap_alignment_result) in enumerate(zip(sample_ids, audios, metas, ground_truth_beatmaps, gen_beatmaps, beatmap_alignment_results)):
             sample_id = f"{epoch}-{index}_{sample_id}"
             reference_path = self.base_folder / 'reference' / sample_id
             generated_path = self.base_folder / 'generated' / sample_id
             reference_path_zip = self.base_folder / 'reference_zip' / sample_id
             generated_path_zip = self.base_folder / 'generated_zip' / sample_id
-            self.add_sample(reference_path, audio, meta, ground_truth_beatmap, reference_path_zip, sample_id, meta.sample_rate)
-            self.add_sample(generated_path, audio, meta, gen_beatmap, generated_path_zip, sample_id, meta.sample_rate)
-
-            alignment_path = self.base_folder / 'alignment' / sample_id
-            alignment_path_zip = self.base_folder / 'alignment_zip' / sample_id
-            self.add_sample(alignment_path, reconstructed_audio, meta, ground_truth_beatmap, alignment_path_zip, sample_id, self.xp.cfg.sample_rate)
-            with open((alignment_path / 'beatmap_alignment_result').with_suffix('.txt'), "w", encoding="utf-8") as f:
+            self.add_sample(reference_path, audio, meta, ground_truth_beatmap, reference_path_zip, sample_id, )
+            self.add_sample(generated_path, audio, meta, gen_beatmap, generated_path_zip, sample_id)
+            with open((generated_path / 'beatmap_alignment_result').with_suffix('.txt'), "w", encoding="utf-8") as f:
                 f.write(beatmap_alignment_result)
 
     def get_samples(self, epoch: int = -1, max_epoch: int = -1, exclude_prompted: bool = False,
