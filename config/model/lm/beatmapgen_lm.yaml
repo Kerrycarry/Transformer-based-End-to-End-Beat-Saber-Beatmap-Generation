@@ -55,11 +55,12 @@ transformer_lm:
     lora_alpha: 16
 
 dataset:
+  center: False
   beatmap_kwargs:
     difficulty_num: 5
     position_size: 12
-    beatmap_sample_window: 16 # it must be divisble by minimum note
-    minimum_note: 0.25
+    beatmap_sample_window: 32 # it must be divisble by minimum note
+    minimum_note: 0.125
     note_type:  
       colorNotes: True
       chains: False 

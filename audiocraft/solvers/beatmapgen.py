@@ -489,14 +489,14 @@ class BeatmapGenSolver(base.StandardSolver):
         
         ref_audio = [segment_info.origin_sample for segment_info in segment_infos]
         ref_beatmap_file = [segment_info.beatmap_file for segment_info in segment_infos]
-        gen_beatmap_file = [segment_info.beatmap_class.detokenize(gen_beatmap_token.squeeze(0)) for gen_beatmap_token, segment_info in zip(gen_beatmap_tokens, segment_infos) ]
+        gen_beatmap_file = [segment_info.beatmap_class.detokenize(gen_beatmap_token.squeeze(0), segment_info.meta.bpm) for gen_beatmap_token, segment_info in zip(gen_beatmap_tokens, segment_infos) ]
         sample_id = [f"{segment_info.meta.id}_{segment_info.seek_time}" for segment_info in segment_infos]
         meta = [segment_info.meta for segment_info in segment_infos]
         bench_end = time.time()
         # 测试对齐
         beatmap_alignment_result = []
         for segment_info, beatmap_token in zip(segment_infos, beatmap_tokens):
-            reconstructed_beatmap_file = segment_info.beatmap_class.detokenize(beatmap_token)
+            reconstructed_beatmap_file = segment_info.beatmap_class.detokenize(beatmap_token, segment_info.meta.bpm)
             result = segment_info.beatmap_class.check_difference(reconstructed_beatmap_file, segment_info.beatmap_file)
             beatmap_alignment_result.append(result)
 

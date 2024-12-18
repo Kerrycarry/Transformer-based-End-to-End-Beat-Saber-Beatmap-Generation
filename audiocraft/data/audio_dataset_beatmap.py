@@ -119,6 +119,18 @@ class Beatmap:
         assert self.use_colorNotes, "use color note by default"
         # assign token id to note depending on note toggle
         # chain, color => tokenid
+        self.note_types = []
+        if self.use_colorNotes:
+            self.note_types.append('colorNotes')
+        if self.use_chains:
+            self.note_types.append('chains')
+        if self.use_bombNotes:
+            self.note_types.append('bombNotes')
+        if self.use_arcs:
+            self.note_types.append('arcs')
+        if self.use_obstacles:
+            self.note_types.append('obstacles')
+        
         padding_id = 18
         if self.use_chains:
             self.chain_red_id = padding_id
@@ -158,22 +170,30 @@ class Beatmap:
             "useNormalEventsAsCompatibleEvents": True
         }
 
-    def sample_beatmap_file(self, beatmap: json, seek_time_in_quaver: int, end_time_in_quaver: int):
-        colorNotes = []
-        chains = []
-        bombNotes = []
-        arcs = []
-        obstacles = []
-        for color_note in beatmap['difficulty']['colorNotes']:
-            is_integer, time_after = self.time_map(color_note['time'])
-            if is_integer and time_after >= seek_time_in_quaver and time_after < end_time_in_quaver:
-                color_note['time'] = color_note['time'] - seek_time_in_quaver * self.minimum_note
-                colorNotes.append(color_note)
-        beatmap['difficulty']['colorNotes'] = colorNotes
-        beatmap['difficulty']['chains'] = chains
-        beatmap['difficulty']['bombNotes'] = bombNotes
-        beatmap['difficulty']['arcs'] = arcs
-        beatmap['difficulty']['obstacles'] = obstacles
+    def sample_beatmap_file(self, beatmap: json, seek_time_in_quaver: int, end_time_in_quaver: int, bpm: float):
+        beatmap_difficulty = beatmap['difficulty']
+        for one_type in self.note_types:
+            note_list = []
+            for note in beatmap_difficulty[one_type]:
+                is_integer, time_after = self.time_map(note['time'])
+                if not( is_integer and time_after >= seek_time_in_quaver and time_after < end_time_in_quaver):
+                    continue
+                note['time'] = note['time'] - seek_time_in_quaver * self.minimum_note
+                if 'tailTime' in note:
+                    tail_is_integer, tail_time_after = self.time_map(note['tailTime'])
+                    if not( tail_is_integer and tail_time_after >= seek_time_in_quaver and tail_time_after < end_time_in_quaver):
+                        continue
+                    note['tailTime'] = note['tailTime'] - seek_time_in_quaver * self.minimum_note
+                if 'duration' in note:
+                    duration = note['duration']
+                    is_continued = self.obstacles_is_continued(bpm, duration) 
+                    if is_continued:
+                        duration_is_integer, duration_time_after = self.time_map(duration)
+                        if not( duration_is_integer and (time_after+duration_time_after) >= seek_time_in_quaver and (time_after+duration_time_after) < end_time_in_quaver):
+                            continue
+                note_list.append(note)
+                
+            beatmap_difficulty[one_type] = note_list
         #清空lightshow，方便后续测试
         beatmap["lightshow"] = self.empty_light
         return beatmap
@@ -185,7 +205,11 @@ class Beatmap:
             return True, int(time_after)
         else:
             return False, time_after
-    
+    def obstacles_is_continued(self, bpm, duration):
+        is_continued = True
+        if abs(bpm / 60 * self.threadhold_duration_obstacles_in_sec - duration) < self.threadhold_duration_obstacles_tolerance:
+            is_continued = False
+        return is_continued
     def tokenize(self, beatmap_origin: json, segment_duration_in_quaver: int, bpm: float) -> torch.Tensor:
         """
         :param beatmap data: JSON
@@ -254,9 +278,7 @@ class Beatmap:
                 is_integer, time_after = self.time_map(obstacle['time'])
                 # 判断是否是单片障碍
                 duration = obstacle['duration']
-                is_continued = False
-                if abs(bpm / 60 * self.threadhold_duration_obstacles_in_sec - duration) < self.threadhold_duration_obstacles_tolerance:
-                    is_continued = True
+                is_continued = self.obstacles_is_continued(bpm, duration) 
                 if is_continued:
                     duration_is_integer, duration_time_after = self.time_map(duration)
                     if not duration_is_integer:
@@ -296,7 +318,7 @@ class Beatmap:
             for item, msg in unsupported_note:
                 print(item, msg)
         return token
-    def detokenize(self, tokens: torch.Tensor):
+    def detokenize(self, tokens: torch.Tensor, bpm: float):
         beatmap_reconstructe = {'difficulty':{}}
         colorNotes = []
         chains = []
@@ -304,7 +326,9 @@ class Beatmap:
         arcs = []
         obstacles = []
         hold_stack = {}
-        
+        obstacles_head_stack = {}
+        obstacles_tail_stack = {}
+
         length = tokens.shape[0]
         for time in range(length):
             for pos in range(self.position_size):
@@ -387,7 +411,59 @@ class Beatmap:
                             hold_stack[color_note['color']] = color_note
                         elif time_after - color_note['time'] > self.minimum_note:
                             break
-                # elif self.use_obstacles and token_id == self.obstacle_head_id:
+                # look for obstacle head
+                elif self.use_obstacles:
+                    if token_id == self.obstacle_head_id:
+                        stack = obstacles_head_stack
+                    elif token_id == self.obstacle_tail_id:
+                        stack = obstacles_tail_stack
+                    else:
+                        continue
+                    stack.setdefault(posX, []).append(posY)
+
+                if pos == 11:
+                    for index, stack in enumerate([obstacles_head_stack, obstacles_tail_stack]):
+                        if len(stack) == 0:
+                            continue
+                        full_height_flag = None
+                        sorted_items = sorted(stack.items())
+                        temp_obstacles = []
+                        for posX, posY_list in sorted_items:
+                            if 0 in posY_list:
+                                posY = 0
+                                height = 5
+                                current_flag = True
+                            else:
+                                posY = 2
+                                height = 3
+                                current_flag = False
+                            duration = round(self.threadhold_duration_obstacles_in_sec * bpm / 60 / self.threadhold_duration_obstacles_tolerance)*self.threadhold_duration_obstacles_tolerance
+                            if full_height_flag is not None and full_height_flag == current_flag:
+                                temp_obstacles[-1]['width'] += 1
+                            else:
+                                temp_obstacles.append({
+                                    "posX": posX,
+                                    "posY": posY,
+                                    "time": time_after,
+                                    "duration":duration,
+                                    "width": 1,
+                                    "height": height,
+                                    "customData": {},
+                                    "laneRotation": 0,
+                                })
+                            full_height_flag = current_flag
+                        if index == 0:
+                            obstacles += temp_obstacles
+                        else:
+                            for one_obstacle in reversed(obstacles):
+                                if len(one_temp) == 0:
+                                    break
+                                for one_temp in temp_obstacles[:]:
+                                    if all(one_obstacle[key] == one_temp[key] for key in ['posX', 'posY', 'width', 'height']):
+                                        one_obstacle['duration'] = one_temp['time']-one_obstacle['time']
+                                        temp_obstacles.remove(one_temp)
+                        stack.clear()
+                        
 
                 
         beatmap_reconstructe['difficulty']['colorNotes'] = colorNotes
@@ -398,20 +474,9 @@ class Beatmap:
         beatmap_reconstructe["lightshow"] = self.empty_light
         return beatmap_reconstructe
 
-    def check_difference(self, origin_data: json, reconstructed_data: json):
-        note_types = []
-        if self.use_colorNotes:
-            note_types.append('colorNotes')
-        if self.use_chains:
-            note_types.append('chains')
-        if self.use_bombNotes:
-            note_types.append('bombNotes')
-        if self.use_arcs:
-            note_types.append('arcs')
-        if self.use_obstacles:
-            note_types.append('obstacles')
+    def check_difference(self, origin_data: json, reconstructed_data: json):        
         output = ""
-        for note_type in note_types:
+        for note_type in self.note_types:
             # with open('beatmap_origin.json', 'w') as json_file:
             #     json.dump(data['difficulty'][note_type], json_file)
             # with open('beatmap_reconstructed.json', 'w') as json_file:
@@ -671,6 +736,7 @@ class AudioDataset:
                  note_type: dict,
                  beatmap_sample_window: int,
                  minimum_note: float,
+                 center: bool = False,
                  segment_duration: tp.Optional[float] = None,
                  shuffle: bool = True,
                  num_samples: int = 10_000,
@@ -724,6 +790,7 @@ class AudioDataset:
         self.note_type = note_type
         self.beatmap_sample_window = beatmap_sample_window
         self.minimum_note = minimum_note
+        self.center = center
         if not load_wav:
             assert segment_duration is not None
         self.permutation_on_files = permutation_on_files
@@ -837,10 +904,13 @@ class AudioDataset:
                 # pad origin
                 n_frames = origin_sample.shape[-1]
                 target_frames = int(hop_length * segment_duration_in_quaver)
-                if self.pad:
-                    origin_sample = F.pad(origin_sample, (0, target_frames - n_frames))
-                audio_token = get_spec(y = origin_sample.numpy(), sr = file_meta.sample_rate, n_fft = hop_length, hop_length = hop_length, center = False)
-                audio_token = audio_token[:,:segment_duration_in_quaver]
+                origin_sample = F.pad(origin_sample, (0, target_frames - n_frames))
+                if self.center == False:
+                    n_fft = hop_length
+                else:
+                    n_fft = hop_length*2
+                audio_token = get_spec(y = origin_sample.numpy(), sr = file_meta.sample_rate, n_fft = n_fft, hop_length = hop_length, center = self.center)
+                audio_token = audio_token[...,:segment_duration_in_quaver]
                 assert audio_token.shape[-1] == segment_duration_in_quaver, f"audio_token.shape[-1] = {audio_token.shape[-1]}, segment_duration_in_quaver = {segment_duration_in_quaver}"
                 audio_token = np.mean(audio_token, axis=0) 
                 audio_token = torch.from_numpy(audio_token).permute(1,0)
@@ -850,7 +920,7 @@ class AudioDataset:
                 # 打开beatmap
                 error_path = file_meta.beatmap_file_path
                 beatmap = Beatmap(minimum_note = self.minimum_note, token_id_size = self.token_id_size, position_size = self.position_size, **self.note_type)
-                beatmap_file = beatmap.sample_beatmap_file(beatmap_file, seek_time_in_quaver,  seek_time_in_quaver + segment_duration_in_quaver)
+                beatmap_file = beatmap.sample_beatmap_file(beatmap_file, seek_time_in_quaver,  seek_time_in_quaver + segment_duration_in_quaver, file_meta.bpm)
                 beatmap_token = beatmap.tokenize(beatmap_file, segment_duration_in_quaver, file_meta.bpm)
                 segment_info = SegmentInfo(file_meta, round(seek_time_in_quaver * self.minimum_note),segment_duration_in_quaver=segment_duration_in_quaver, n_frames=n_frames, total_frames=target_frames,
                                                 sample_rate=self.sample_rate, channels=origin_sample.shape[0], origin_sample=origin_sample, beatmap_file=beatmap_file, beatmap_class=beatmap)
