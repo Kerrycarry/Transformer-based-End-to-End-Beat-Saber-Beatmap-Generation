@@ -14,7 +14,6 @@ import math
 import omegaconf
 import torch
 from torch.nn import functional as F
-import numpy as np
 import torchaudio.transforms as T
 
 from . import base, builders
@@ -209,6 +208,16 @@ class BeatmapGenSolver(base.StandardSolver):
         self.cfg.dataset.note_type = {f"use_{key}":value for key, value in beatmap_kwargs["note_type"].items()}
         self.cfg.dataset.beatmap_sample_window = beatmap_sample_window
         self.cfg.dataset.minimum_note = minimum_note
+
+        audio_kwargs = self.cfg.dataset.pop("audio_kwargs")
+        representation = audio_kwargs.representation
+        center = audio_kwargs.center
+        n_mels = audio_kwargs.n_mels
+        self.cfg.transformer_lm.representation = representation
+        self.cfg.transformer_lm.n_mels = n_mels
+        self.cfg.dataset.representation = representation
+        self.cfg.dataset.center = center
+
         OmegaConf.set_struct(self.cfg, True)
         self.dataloaders = builders.get_audio_datasets(self.cfg, dataset_type=self.DATASET_TYPE)
 
@@ -333,23 +342,6 @@ class BeatmapGenSolver(base.StandardSolver):
                 n_fft = hop_length
             else:
                 n_fft = hop_length*2
-            audio_token = get_spec(y = info.origin_sample.numpy(), sr = info.meta.sample_rate, n_fft = n_fft, hop_length = hop_length, center = center)
-            audio_token = audio_token[...,:info.segment_duration_in_quaver]
-            assert audio_token.shape[-1] == info.segment_duration_in_quaver, f"audio_token.shape[-1] = {audio_token.shape[-1]}, segment_duration_in_quaver = {info.segment_duration_in_quaver}"
-            audio_token = np.mean(audio_token, axis=0) 
-            audio_token = torch.from_numpy(audio_token).permute(1,0)
-            tokens.append(audio_token)
-        return tokens
-    
-    def tokenize_audio_torch(self, segment_infos):
-        tokens = []
-        center = self.cfg.dataset.center
-        for info in segment_infos:
-            hop_length = info.hop_length
-            if center == False:
-                n_fft = hop_length
-            else:
-                n_fft = hop_length*2
             audio_token = self.get_spec_torch(waveform = info.origin_sample, sr = info.meta.sample_rate, n_fft = n_fft, hop_length = hop_length, center = center)
             audio_token = audio_token[...,:info.segment_duration_in_quaver]
             assert audio_token.shape[-1] == info.segment_duration_in_quaver, f"audio_token.shape[-1] = {audio_token.shape[-1]}, segment_duration_in_quaver = {info.segment_duration_in_quaver}"
@@ -397,7 +389,7 @@ class BeatmapGenSolver(base.StandardSolver):
         if self.device == "cuda" and check_synchronization_points:
             torch.cuda.set_sync_debug_mode("warn")
         
-        audio_tokens = self.tokenize_audio_torch(segment_infos)
+        audio_tokens = self.tokenize_audio(segment_infos)
 
         if self.device == "cuda" and check_synchronization_points:
             torch.cuda.set_sync_debug_mode("default")
@@ -525,7 +517,7 @@ class BeatmapGenSolver(base.StandardSolver):
         beatmap_tokens = [tensor.to('cuda') for tensor in beatmap_tokens]
         for info in segment_infos:
             info.origin_sample = info.origin_sample.to('cuda')
-        audio_tokens = self.tokenize_audio_torch(segment_infos)
+        audio_tokens = self.tokenize_audio(segment_infos)
         difficulty = self.tokenize_difficulty(segment_infos)
         with self.autocast:
             gen_beatmap_tokens = self.model.generate(

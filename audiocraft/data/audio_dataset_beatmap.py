@@ -732,6 +732,8 @@ class AudioDataset:
                  note_type: dict,
                  beatmap_sample_window: int,
                  minimum_note: float,
+                 representation: str,
+                 center: bool,
                  segment_duration: tp.Optional[float] = None,
                  shuffle: bool = True,
                  num_samples: int = 10_000,
@@ -785,6 +787,7 @@ class AudioDataset:
         self.note_type = note_type
         self.beatmap_sample_window = beatmap_sample_window
         self.minimum_note = minimum_note
+        self.representation = representation
         if not load_wav:
             assert segment_duration is not None
         self.permutation_on_files = permutation_on_files
@@ -891,13 +894,14 @@ class AudioDataset:
                 # 打开audio，使用encodec需要的sr resample整个audio
                 error_path = file_meta.song_path
                 origin_sample, sr = audio_read(file_meta.song_path, seek_time_in_second, self.segment_duration, pad=False)
-                #求spectrogram
-                quaver_in_sec = 60 / file_meta.bpm * self.minimum_note
-                quaver_in_frames = quaver_in_sec * file_meta.sample_rate
-                hop_length = self.traditional_round(quaver_in_frames)
-                # pad origin
-                n_frames = origin_sample.shape[-1]
-                target_frames = int(hop_length * segment_duration_in_quaver)
+                if self.representation == "spectrogram":
+                    #求spectrogram需要的hop_size并且padding
+                    quaver_in_sec = 60 / file_meta.bpm * self.minimum_note
+                    quaver_in_frames = quaver_in_sec * file_meta.sample_rate
+                    hop_length = self.traditional_round(quaver_in_frames)
+                    # pad origin
+                    n_frames = origin_sample.shape[-1]
+                    target_frames = int(hop_length * segment_duration_in_quaver)
                 origin_sample = F.pad(origin_sample, (0, target_frames - n_frames))
                 # 打开beatmap
                 with open(file_meta.beatmap_file_path, 'r', encoding = 'utf-8') as f:

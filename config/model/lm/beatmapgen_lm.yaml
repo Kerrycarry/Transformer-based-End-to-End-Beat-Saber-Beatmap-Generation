@@ -55,7 +55,11 @@ transformer_lm:
     lora_alpha: 16
 
 dataset:
-  center: False
+  audio_kwargs:
+    representation: spectrogram # spectrogram or musicgen
+    center: False
+    n_mels: 128
+
   beatmap_kwargs:
     difficulty_num: 5
     position_size: 12
