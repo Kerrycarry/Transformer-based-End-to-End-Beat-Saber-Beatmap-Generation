@@ -22,9 +22,6 @@ from pathlib import Path
 import random
 import sys
 import typing as tp
-import math
-import numpy as np
-import librosa
 
 import torch
 import torch.nn.functional as F
@@ -38,7 +35,6 @@ try:
 except ImportError:
     dora = None  # type: ignore
 
-from .audio import get_spec
 
 @dataclass(order=True)
 class BaseInfo:
@@ -290,7 +286,7 @@ class Beatmap:
                     width = obstacle['width']
                     posY = obstacle['posY']
                     posX_list = list(range(posX, posX+width))
-                    posY_list = list(range(posY, 4))
+                    posY_list = list(range(posY, 3))
 
                     found = False
                     for x in posX_list:
@@ -456,7 +452,7 @@ class Beatmap:
                             obstacles += temp_obstacles
                         else:
                             for one_obstacle in reversed(obstacles):
-                                if len(one_temp) == 0:
+                                if len(temp_obstacles) == 0:
                                     break
                                 for one_temp in temp_obstacles[:]:
                                     if all(one_obstacle[key] == one_temp[key] for key in ['posX', 'posY', 'width', 'height']):
@@ -514,7 +510,7 @@ class SegmentInfo(BaseInfo):
     sample_rate: int   # actual sample rate
     channels: int      # number of audio channels.
     segment_duration_in_quaver: int
-
+    hop_length: int
 
     origin_sample: torch.Tensor
     beatmap_file: json
@@ -736,7 +732,6 @@ class AudioDataset:
                  note_type: dict,
                  beatmap_sample_window: int,
                  minimum_note: float,
-                 center: bool = False,
                  segment_duration: tp.Optional[float] = None,
                  shuffle: bool = True,
                  num_samples: int = 10_000,
@@ -790,7 +785,6 @@ class AudioDataset:
         self.note_type = note_type
         self.beatmap_sample_window = beatmap_sample_window
         self.minimum_note = minimum_note
-        self.center = center
         if not load_wav:
             assert segment_duration is not None
         self.permutation_on_files = permutation_on_files
@@ -905,15 +899,6 @@ class AudioDataset:
                 n_frames = origin_sample.shape[-1]
                 target_frames = int(hop_length * segment_duration_in_quaver)
                 origin_sample = F.pad(origin_sample, (0, target_frames - n_frames))
-                if self.center == False:
-                    n_fft = hop_length
-                else:
-                    n_fft = hop_length*2
-                audio_token = get_spec(y = origin_sample.numpy(), sr = file_meta.sample_rate, n_fft = n_fft, hop_length = hop_length, center = self.center)
-                audio_token = audio_token[...,:segment_duration_in_quaver]
-                assert audio_token.shape[-1] == segment_duration_in_quaver, f"audio_token.shape[-1] = {audio_token.shape[-1]}, segment_duration_in_quaver = {segment_duration_in_quaver}"
-                audio_token = np.mean(audio_token, axis=0) 
-                audio_token = torch.from_numpy(audio_token).permute(1,0)
                 # 打开beatmap
                 with open(file_meta.beatmap_file_path, 'r', encoding = 'utf-8') as f:
                     beatmap_file = json.load(f)
@@ -923,7 +908,7 @@ class AudioDataset:
                 beatmap_file = beatmap.sample_beatmap_file(beatmap_file, seek_time_in_quaver,  seek_time_in_quaver + segment_duration_in_quaver, file_meta.bpm)
                 beatmap_token = beatmap.tokenize(beatmap_file, segment_duration_in_quaver, file_meta.bpm)
                 segment_info = SegmentInfo(file_meta, round(seek_time_in_quaver * self.minimum_note),segment_duration_in_quaver=segment_duration_in_quaver, n_frames=n_frames, total_frames=target_frames,
-                                                sample_rate=self.sample_rate, channels=origin_sample.shape[0], origin_sample=origin_sample, beatmap_file=beatmap_file, beatmap_class=beatmap)
+                                                sample_rate=self.sample_rate, channels=origin_sample.shape[0], origin_sample=origin_sample, beatmap_file=beatmap_file, beatmap_class=beatmap, hop_length= hop_length)
             except Exception as exc:
                 logger.warning("Error opening file %s, seek time, %d,  %r", error_path, round(seek_time_in_quaver * self.minimum_note), exc)
                 if retry == self.max_read_retry - 1:
@@ -931,19 +916,18 @@ class AudioDataset:
             else:
                 break
         
-        return segment_info, audio_token, beatmap_token
+        return segment_info, beatmap_token
     def collater(self, samples):
         """The collater function has to be provided to the dataloader
         if AudioDataset has return_info=True in order to properly collate
         the samples of a batch.
         """
-        segment_infos, audio_tokens, beatmap_tokens = zip(*samples)
+        segment_infos, beatmap_tokens = zip(*samples)
 
         segment_infos = list(segment_infos)
-        audio_tokens = list(audio_tokens)
         beatmap_tokens = list(beatmap_tokens)        
 
-        return segment_infos, audio_tokens, beatmap_tokens
+        return segment_infos, beatmap_tokens
 
     def _filter_duration(self, meta: tp.List[AudioMeta]) -> tp.List[AudioMeta]:
         """Filters out_origin audio files with audio durations that will not allow to sample examples from them."""
