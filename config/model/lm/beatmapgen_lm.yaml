@@ -56,7 +56,7 @@ transformer_lm:
 
 dataset:
   audio_kwargs:
-    representation: spectrogram # spectrogram or musicgen
+    representation: musicgen # spectrogram or musicgen
     center: False
     n_mels: 128
 
@@ -64,6 +64,7 @@ dataset:
     difficulty_num: 5
     position_size: 12
     beatmap_sample_window: 32 # it must be divisble by minimum note
+    code_rate: 50
     minimum_note: 0.125
     note_type:  
       colorNotes: True

@@ -196,6 +196,7 @@ class BeatmapGenSolver(base.StandardSolver):
         difficulty_num = beatmap_kwargs.difficulty_num
         beatmap_sample_window = beatmap_kwargs.beatmap_sample_window
         minimum_note = beatmap_kwargs.minimum_note
+        code_rate = beatmap_kwargs.code_rate
         token_id_size = sum(
             size for note, size in beatmap_kwargs.note_size.items()
             if beatmap_kwargs.note_type.get(note, False)
@@ -208,6 +209,7 @@ class BeatmapGenSolver(base.StandardSolver):
         self.cfg.dataset.note_type = {f"use_{key}":value for key, value in beatmap_kwargs["note_type"].items()}
         self.cfg.dataset.beatmap_sample_window = beatmap_sample_window
         self.cfg.dataset.minimum_note = minimum_note
+        self.cfg.dataset.code_rate = code_rate
 
         audio_kwargs = self.cfg.dataset.pop("audio_kwargs")
         representation = audio_kwargs.representation
@@ -333,21 +335,28 @@ class BeatmapGenSolver(base.StandardSolver):
         spectrogram_db = T.AmplitudeToDB(stype="power", top_db=80).to(device)(mel_spectrogram)
         return spectrogram_db
     
-    def tokenize_audio(self, segment_infos):
+    def tokenize_audio(self, segment_infos, resample_samples):
         tokens = []
         center = self.cfg.dataset.center
-        for info in segment_infos:
-            hop_length = info.hop_length
-            if center == False:
-                n_fft = hop_length
-            else:
-                n_fft = hop_length*2
-            audio_token = self.get_spec_torch(waveform = info.origin_sample, sr = info.meta.sample_rate, n_fft = n_fft, hop_length = hop_length, center = center)
-            audio_token = audio_token[...,:info.segment_duration_in_quaver]
-            assert audio_token.shape[-1] == info.segment_duration_in_quaver, f"audio_token.shape[-1] = {audio_token.shape[-1]}, segment_duration_in_quaver = {info.segment_duration_in_quaver}"
-            audio_token = torch.mean(audio_token, axis=0) 
-            audio_token = audio_token.permute(1,0)
-            tokens.append(audio_token)
+        representation = self.cfg.dataset.representation
+        if representation == "spectrogram":
+            for info, sample in zip(segment_infos, resample_samples):
+                hop_length = info.hop_length
+                if center == False:
+                    n_fft = hop_length
+                else:
+                    n_fft = hop_length*2
+                audio_token = self.get_spec_torch(waveform = sample, sr = info.meta.sample_rate, n_fft = n_fft, hop_length = hop_length, center = center)
+                audio_token = audio_token[...,:info.segment_duration_in_quaver]
+                assert audio_token.shape[-1] == info.segment_duration_in_quaver, f"audio_token.shape[-1] = {audio_token.shape[-1]}, segment_duration_in_quaver = {info.segment_duration_in_quaver}"
+                audio_token = torch.mean(audio_token, axis=0) 
+                audio_token = audio_token.permute(1,0)
+                tokens.append(audio_token)
+        elif representation == "musicgen":
+            with torch.no_grad():
+                resample_samples = torch.stack(resample_samples)
+                tokens, scale = self.compression_model.encode(resample_samples)
+                assert scale is None, "Scaled compression model not supported with LM."
         return tokens
     def tokenize_difficulty(self, segment_infos):
         difficulty_map = {'Easy': 0, 'Normal': 1, 'Hard': 2, 'Expert': 3, 'ExpertPlus': 4}
@@ -371,15 +380,14 @@ class BeatmapGenSolver(base.StandardSolver):
                 with B the batch size, K the number of codebooks, T_s the token timesteps.
             Padding mask (torch.Tensor): Mask with valid positions in the tokens tensor, of shape [B, K, T_s].
         """
-        segment_infos, beatmap_tokens = batch
-        assert len(segment_infos) == len(beatmap_tokens), (
-            f"Mismatch between number of items in audio batch",
+        segment_infos, resample_samples, beatmap_tokens = batch
+        assert len(segment_infos) == len(beatmap_tokens)==len(resample_samples), (
+            f"Mismatch between number of items in audio batch({len(resample_samples)})",
             f" and in metadata ({len(segment_infos)})",
             f"and beatmap {len(beatmap_tokens)}"
         )
         beatmap_tokens = [tensor.to('cuda') for tensor in beatmap_tokens]
-        for info in segment_infos:
-            info.origin_sample = info.origin_sample.to('cuda')
+        resample_samples = [tensor.to('cuda') for tensor in resample_samples]
         sample_id_seek_time = [f"{segment_info.meta.id}_{segment_info.seek_time}" for segment_info in segment_infos]
         sample_id = [f"{segment_info.meta.id}" for segment_info in segment_infos]
         self.log_sample_usage("sample_id_seek_time.json", sample_id_seek_time)
@@ -389,14 +397,14 @@ class BeatmapGenSolver(base.StandardSolver):
         if self.device == "cuda" and check_synchronization_points:
             torch.cuda.set_sync_debug_mode("warn")
         
-        audio_tokens = self.tokenize_audio(segment_infos)
+        audio_tokens = self.tokenize_audio(segment_infos, resample_samples)
 
         if self.device == "cuda" and check_synchronization_points:
             torch.cuda.set_sync_debug_mode("default")
         # get difficulty token
         difficulty = self.tokenize_difficulty(segment_infos)
-        
-        return audio_tokens, beatmap_tokens, difficulty
+        note_code_maps = [torch.tensor(segment_info.note_code_map, device='cuda') for segment_info in segment_infos]
+        return audio_tokens, beatmap_tokens, difficulty, note_code_maps
 
     def log_sample_usage(self, filepath, sample_id):
         import json
@@ -420,7 +428,7 @@ class BeatmapGenSolver(base.StandardSolver):
         """Perform one training or valid step on a given batch."""
         check_synchronization_points = idx == 1 and self.device == 'cuda'
 
-        audio_tokens, beatmap_tokens, difficulty = self._prepare_tokens_and_attributes(
+        audio_tokens, beatmap_tokens, difficulty, note_code_maps = self._prepare_tokens_and_attributes(
             batch, check_synchronization_points)
 
         self.deadlock_detect.update('tokens_and_conditions')
@@ -431,7 +439,7 @@ class BeatmapGenSolver(base.StandardSolver):
         # assert (beatmap_tokens >= 0).all(), "beatmap_tokens contains negative values!"
         # assert (beatmap_tokens <= self.model.token_id_size).all(), f"beatmap_tokens contains invalid class indices! Max target: {beatmap_tokens.max()}"
         with self.autocast:
-            logits = self.model.compute_predictions(audio_tokens, beatmap_tokens, difficulty)  # type: ignore # [B, S, P, card]
+            logits = self.model.compute_predictions(audio_tokens, beatmap_tokens, difficulty, note_code_maps)  # type: ignore # [B, S, P, card]
             # ce, rhythm_loss = self._compute_cross_entropy(logits, beatmap_tokens)
             # loss = ce + rhythm_loss
             ce = self._compute_cross_entropy(logits, beatmap_tokens)
@@ -508,20 +516,20 @@ class BeatmapGenSolver(base.StandardSolver):
                 and the prompt along with additional information.
         """
         bench_start = time.time()
-        segment_infos, beatmap_tokens = batch
-        assert len(segment_infos) == len(beatmap_tokens), (
-            f"Mismatch between number of items in audio batch",
+        segment_infos, resample_samples, beatmap_tokens = batch
+        assert len(segment_infos) == len(beatmap_tokens)==len(resample_samples), (
+            f"Mismatch between number of items in audio batch({len(resample_samples)})",
             f" and in metadata ({len(segment_infos)})",
             f"and beatmap {len(beatmap_tokens)}"
         )
         beatmap_tokens = [tensor.to('cuda') for tensor in beatmap_tokens]
-        for info in segment_infos:
-            info.origin_sample = info.origin_sample.to('cuda')
-        audio_tokens = self.tokenize_audio(segment_infos)
+        resample_samples = [tensor.to('cuda') for tensor in resample_samples]
+        audio_tokens = self.tokenize_audio(segment_infos, resample_samples)
         difficulty = self.tokenize_difficulty(segment_infos)
+        note_code_maps = [torch.tensor(segment_info.note_code_map, device='cuda') for segment_info in segment_infos]
         with self.autocast:
             gen_beatmap_tokens = self.model.generate(
-                audio_tokens, difficulty, 
+                audio_tokens, difficulty, note_code_maps,
                 **self.generation_params)
 
         # generate audio from tokens
