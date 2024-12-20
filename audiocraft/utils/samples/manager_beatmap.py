@@ -264,8 +264,6 @@ class SampleManager:
             generated_path_zip = self.base_folder / 'generated_zip' / sample_id
             self.add_sample(reference_path, audio, meta, ground_truth_beatmap, reference_path_zip, sample_id, )
             self.add_sample(generated_path, audio, meta, gen_beatmap, generated_path_zip, sample_id)
-            with open((generated_path / 'beatmap_alignment_result').with_suffix('.txt'), "w", encoding="utf-8") as f:
-                f.write(beatmap_alignment_result)
 
     def get_samples(self, epoch: int = -1, max_epoch: int = -1, exclude_prompted: bool = False,
                     exclude_unprompted: bool = False, exclude_conditioned: bool = False,

@@ -354,20 +354,17 @@ class BeatmapLMModel(StreamingModule):
             out = model(codes, note_code_maps, stage=stage)
             out = [one_out[one_map] for one_out, one_map in zip(out, note_code_maps)]
 
-        logits = []
-        for one_out, one_beatmap, one_difficulty in zip(out, beatmap, difficulty):
-            # use note represenetation
-            cross_attention_input = self.linear_transfer(one_out)
-            if self.block_self_attention:
-                one_beatmap = one_beatmap[:-1].view(-1) # [(S-1)*P]
-                input_ = self.beatmap_emb(one_beatmap) # [(S-1)*P, dim]
-                input_ = torch.cat((self.difficulty_emb(one_difficulty).reshape(self.position_size, -1), input_), dim=0) #[S*P, dim]
-            else:
-                one_beatmap = one_beatmap[:-1] #[(S-1), P]
-                input_ = sum([self.beatmap_emb[p](one_beatmap[:, p]) for p in range(self.position_size)]) # [(S-1), dim]
-                input_ = torch.cat((self.difficulty_emb(one_difficulty).unsqueeze(0), input_), dim=0) #[S, dim]
-            logit = self.transfer_lm_forward(input_ = input_.unsqueeze(0), cross_attention_input = cross_attention_input.unsqueeze(0)) # [1, S*P, card]
-            logits.append(logit)
+        cross_attention_input = self.linear_transfer(out)
+        B, S, D = cross_attention_input.shape
+        if self.block_self_attention:
+            beatmap = beatmap[:,:-1].view(B, -1) # [B, (S-1)*P]
+            input_ = self.beatmap_emb(beatmap) # [B, (S-1)*P, dim]
+            input_ = torch.cat((self.difficulty_emb(difficulty).reshape(B, self.position_size, -1), input_), dim=1) #[B, S*P, dim]
+        else:
+            beatmap = beatmap[:, :-1] # [B, (S-1), P]
+            input_ = sum([self.beatmap_emb[p](beatmap[:, :, p]) for p in range(self.position_size)]) # [B, (S-1), dim]
+            input_ = torch.cat((self.difficulty_emb(difficulty).unsqueeze(1), input_), dim=1) #[B, S, dim]
+        logits = self.transfer_lm_forward(input_ = input_, cross_attention_input = cross_attention_input) # [1, S*P, card]
         return logits
     
     def transfer_lm_forward(self, input_: torch.Tensor, # [B, S*P, card]
@@ -457,65 +454,62 @@ class BeatmapLMModel(StreamingModule):
             model = self if self._fsdp is None else self._fsdp
             out = model(codes, note_code_maps, stage=stage)
             out = [one_out[one_map] for one_out, one_map in zip(out, note_code_maps)]
-
-        out_codes = []
-        for one_out, one_difficulty in zip(out, difficulty):
-             # use note represenetation
-            cross_attention_input = self.linear_transfer(one_out)
-            unknown_token = -1
-            length = cross_attention_input.shape[-2]
-            max_gen_len = (length + 1) * self.position_size
-            gen_sequence = torch.full((max_gen_len,), unknown_token, dtype=torch.long, device=device)
-            gen_sequence[0:self.position_size] = one_difficulty
-            
-
-            start_offset_sequence = self.position_size
-            with self.streaming():
-                unconditional_state = self.get_streaming_state()
-                prev_offset = 0
-                gen_sequence_len = gen_sequence.shape[-1]  # gen_sequence shape is [(S+1) * P]
-                for offset in range(start_offset_sequence, gen_sequence_len, self.position_size):
-                    # get current sequence (note that the streaming API is providing the caching over previous offsets)
-                    curr_sequence = gen_sequence[prev_offset:offset]
-                    # sample next token from the model, next token and curr_sequence shape is [1]
-                    if offset == self.position_size:
-                        if self.block_self_attention:
-                            input = self.difficulty_emb(one_difficulty).reshape(self.position_size, -1)
-                        else:
-                            input = self.difficulty_emb(one_difficulty).unsqueeze(0)
+        
+        cross_attention_input = self.linear_transfer(out)
+        B, S, D = cross_attention_input.shape
+        unknown_token = -1
+        length = S
+        max_gen_len = (length + 1) * self.position_size
+        gen_sequence = torch.full((B, max_gen_len,), unknown_token, dtype=torch.long, device=device)
+        gen_sequence[:, 0:self.position_size] = difficulty.unsqueeze(1)
+        start_offset_sequence = self.position_size
+        with self.streaming():
+            unconditional_state = self.get_streaming_state()
+            prev_offset = 0
+            gen_sequence_len = gen_sequence.shape[-1]  # gen_sequence shape is [B, (S+1) * P]
+            for offset in range(start_offset_sequence, gen_sequence_len, self.position_size):
+                # get current sequence (note that the streaming API is providing the caching over previous offsets)
+                curr_sequence = gen_sequence[:, prev_offset:offset]
+                # sample next token from the model, next token and curr_sequence shape is [1]
+                if offset == self.position_size:
+                    if self.block_self_attention:
+                        input = self.difficulty_emb(difficulty).reshape(B, self.position_size, -1)
                     else:
-                        if self.block_self_attention:
-                            input = self.beatmap_emb(curr_sequence)
-                        else:
-                            input = sum([self.beatmap_emb[p](curr_sequence[p]) for p in range(self.position_size)]).unsqueeze(0)
-                    if self.local_cross_attention:
-                        index = offset // self.position_size - 1
-                        cross_attention_src = cross_attention_input[index].unsqueeze(0).unsqueeze(0)
+                        input = self.difficulty_emb(difficulty).unsqueeze(1)
+                else:
+                    if self.block_self_attention:
+                        input = self.beatmap_emb(curr_sequence)
                     else:
-                        cross_attention_src = cross_attention_input.unsqueeze(0)
-                    next_token = self._sample_next_token(
-                        input.unsqueeze(0), cross_attention_src, unconditional_state, use_sampling, temp, top_k, top_p,
-                        cfg_coef=cfg_coef, two_step_cfg=two_step_cfg)
-                    next_token = next_token.view(-1)
-                    # ensure we don't overwrite prompt tokens, we only write over unknown tokens
-                    # (then mask tokens should be left as is as well, which is correct)
-                    assert (gen_sequence[offset:offset+self.position_size] == unknown_token).any()
-                    gen_sequence[offset:offset+self.position_size] = torch.where(
-                        gen_sequence[offset:offset+self.position_size] == unknown_token,
-                        next_token, gen_sequence[offset:offset+self.position_size]
-                    )
-                    prev_offset = offset
-                    if callback is not None:
-                        callback(1 + offset - start_offset_sequence, gen_sequence_len - start_offset_sequence)
-            unconditional_state.clear()
-            # ensure sequence has been entirely filled
-            assert not (gen_sequence == unknown_token).any()
-            # get back the codes, trimming the prompt if needed and cutting potentially incomplete timesteps
-            out_code = gen_sequence[self.position_size:]
-            # sanity checks over the returned codes and corresponding masks
-            assert (out_code[:max_gen_len] != unknown_token).all()
-            # ensure the returned codes are all valid
-            assert (out_code >= 0).all() and (out_code <= self.token_id_size).all()
-            out_codes.append(out_code.reshape(1, -1, self.position_size))
-        return out_codes
+                        input = sum([self.beatmap_emb[p](curr_sequence[:, p]) for p in range(self.position_size)]).unsqueeze(1)
+                if self.local_cross_attention:
+                    index = offset // self.position_size - 1
+                    cross_attention_src = cross_attention_input[:, index].unsqueeze(1)
+                else:
+                    cross_attention_src = cross_attention_input
+                next_token = self._sample_next_token(
+                    input, cross_attention_src, unconditional_state, use_sampling, temp, top_k, top_p,
+                    cfg_coef=cfg_coef, two_step_cfg=two_step_cfg)
+                next_token = next_token.view(B, -1)
+                # ensure we don't overwrite prompt tokens, we only write over unknown tokens
+                # (then mask tokens should be left as is as well, which is correct)
+                assert (gen_sequence[:, offset:offset+self.position_size] == unknown_token).any()
+                gen_sequence[:, offset:offset+self.position_size] = torch.where(
+                    gen_sequence[:, offset:offset+self.position_size] == unknown_token,
+                    next_token, gen_sequence[:, offset:offset+self.position_size]
+                )
+                prev_offset = offset
+                if callback is not None:
+                    callback(1 + offset - start_offset_sequence, gen_sequence_len - start_offset_sequence)
+        unconditional_state.clear()
+        # ensure sequence has been entirely filled
+        assert not (gen_sequence == unknown_token).any()
+        # get back the codes, trimming the prompt if needed and cutting potentially incomplete timesteps
+        out_code = gen_sequence[:, self.position_size:]
+        # sanity checks over the returned codes and corresponding masks
+        assert (out_code[:, :max_gen_len] != unknown_token).all()
+        # ensure the returned codes are all valid
+        assert (out_code >= 0).all() and (out_code <= self.token_id_size).all()
+        out_code = out_code.view(B, S, self.position_size)
+
+        return out_code
         

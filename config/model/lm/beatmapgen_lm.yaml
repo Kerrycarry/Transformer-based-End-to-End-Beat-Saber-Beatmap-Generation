@@ -56,7 +56,7 @@ transformer_lm:
 
 dataset:
   audio_kwargs:
-    representation: musicgen # spectrogram or musicgen
+    representation: spectrogram # spectrogram or musicgen
     center: False
     n_mels: 128
 

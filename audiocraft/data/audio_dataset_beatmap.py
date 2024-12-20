@@ -114,6 +114,9 @@ class Beatmap:
     # (color, direction) => token id
     color_note_map = {(0, 0): 0, (0, 1): 1, (0, 2): 2, (0, 3): 3, (0, 4): 4, (0, 5): 5, (0, 6): 6, (0, 7): 7, (0, 8): 8, (1, 0): 9, (1, 1): 10, (1, 2): 11, (1, 3): 12, (1, 4): 13, (1, 5): 14, (1, 6): 15, (1, 7): 16, (1, 8): 17}
     color_note_map_reversed = {value:key for key, value in color_note_map.items()}
+
+    equal_threadhold = 5
+
     def __post_init__(self):
         assert self.use_colorNotes, "use color note by default"
         # assign token id to note depending on note toggle
@@ -483,18 +486,23 @@ class Beatmap:
         return beatmap_reconstructe
 
     def check_difference(self, origin_data: json, reconstructed_data: json):        
-        output = ""
+        result = {}
+        origin_data_difficulty= origin_data['difficulty']
+        reconstructed_data_difficulty = reconstructed_data['difficulty']
         for note_type in self.note_types:
             # with open('beatmap_origin.json', 'w') as json_file:
             #     json.dump(data['difficulty'][note_type], json_file)
             # with open('beatmap_reconstructed.json', 'w') as json_file:
             #     json.dump(data2['difficulty'][note_type], json_file)
+            result_note_type = {}
+            output = ""
             output += "*************************************\n"
-            output += f"比较{note_type}, origin_len = {len(origin_data['difficulty'][note_type])}, reconstructed_len = {len(reconstructed_data['difficulty'][note_type])}\n"
-            output += f"直接比较: {origin_data['difficulty'][note_type] == reconstructed_data['difficulty'][note_type]}\n"
+            
+            output += f"比较{note_type}, origin_len = {len(origin_data_difficulty[note_type])}, reconstructed_len = {len(reconstructed_data_difficulty[note_type])}\n"
+            output += f"直接比较: {origin_data_difficulty[note_type] == reconstructed_data_difficulty[note_type]}\n"
 
-            data1 = [tuple((key, float(value) if key == 'time' or key == 'tailTime' else value ) for key, value in sorted(note.items()) if not isinstance(value, dict)) for note in origin_data['difficulty'][note_type]]
-            data2 = [tuple((key, float(value) if key == 'time' or key == 'tailTime' else value ) for key, value in sorted(note.items()) if not isinstance(value, dict)) for note in reconstructed_data['difficulty'][note_type]]
+            data1 = [tuple((key, float(value) if key == 'time' or key == 'tailTime' else value ) for key, value in sorted(note.items()) if not isinstance(value, dict)) for note in origin_data_difficulty[note_type]]
+            data2 = [tuple((key, float(value) if key == 'time' or key == 'tailTime' else value ) for key, value in sorted(note.items()) if not isinstance(value, dict)) for note in reconstructed_data_difficulty[note_type]]
             counter1 = set(data1)
             counter2 = set(data2)
 
@@ -509,8 +517,20 @@ class Beatmap:
                 for item in counter2 - counter1:
                     output += f"{item}\n"
             if counter1 == counter2:
-                output = ""
-        return output
+                result_note_type['same']=True
+            else:
+                result_note_type['same']=False
+            result_note_type['output']=output
+            result_note_type['origin_len']=len(origin_data_difficulty[note_type])
+            result_note_type['reconstructed_len']=len(reconstructed_data_difficulty[note_type])
+            result_note_type['not_equal_num']=len(counter1 - counter2)
+            result[note_type] = result_note_type
+        # deal with special case
+        colorNotes_result = result['colorNotes']
+        # deal with angleoffset usage, multiple notes on same spots
+        if colorNotes_result['origin_len'] == colorNotes_result['reconstructed_len'] or result_note_type['not_equal_num'] < self.equal_threadhold :
+            colorNotes_result['same']=True
+        return result
 
 @dataclass(order=True)
 class SegmentInfo(BaseInfo):
@@ -521,7 +541,6 @@ class SegmentInfo(BaseInfo):
     total_frames: int  # total number of frames, padding included
     sample_rate: int   # actual sample rate
     channels: int      # number of audio channels.
-    segment_duration_in_quaver: int
     hop_length: int
 
     origin_sample: torch.Tensor
@@ -895,7 +914,7 @@ class AudioDataset:
             if file_meta.bpm <65 or file_meta.bpm> 280:
                 continue
             duration_in_quaver = round(file_meta.duration / 60 * file_meta.bpm / self.minimum_note) # 音频长度用八分音符的数量来衡量
-            segment_duration_in_quaver = round(self.segment_duration / 60 * file_meta.bpm /self.minimum_note)
+            segment_duration_in_quaver = self.segment_duration
             #选择抽取的时间点
             window = self.beatmap_sample_window
             duration_in_quaver_window = int(duration_in_quaver / window)
@@ -904,10 +923,11 @@ class AudioDataset:
             seek_time_in_quaver_window = torch.randint(0, max_seek + 1, (1,), generator=rng).item()  # +1 because randint upper bound is exclusive
             seek_time_in_quaver = seek_time_in_quaver_window * window
             seek_time_in_second = seek_time_in_quaver * self.minimum_note / file_meta.bpm * 60
+            segment_duration_in_sec = segment_duration_in_quaver * self.minimum_note / file_meta.bpm * 60
             try:
                 # 打开audio，使用encodec需要的sr resample整个audio
                 error_path = file_meta.song_path
-                origin_sample, sr = audio_read(file_meta.song_path, seek_time_in_second, self.segment_duration, pad=False)
+                origin_sample, sr = audio_read(file_meta.song_path, seek_time_in_second, segment_duration_in_sec, pad=False)
                 if self.representation == "spectrogram":
                     #求spectrogram需要的hop_size并且padding
                     quaver_in_sec = 60 / file_meta.bpm * self.minimum_note
@@ -921,11 +941,11 @@ class AudioDataset:
                     resample_sample = convert_audio(origin_sample, sr, self.sample_rate, self.channels)
                     #pad origin sample
                     n_frames = origin_sample.shape[-1]
-                    target_frames = int(self.segment_duration * sr)
+                    target_frames = int(segment_duration_in_sec * sr)
                     origin_sample = F.pad(origin_sample, (0, target_frames - n_frames))    
                     #pad resample
                     n_frames = resample_sample.shape[-1]
-                    target_frames = int(self.segment_duration * self.sample_rate)
+                    target_frames = int(segment_duration_in_sec * self.sample_rate)
                     hop_length = None
                 resample_sample = F.pad(resample_sample, (0, target_frames - n_frames))
                 # 打开beatmap
@@ -936,8 +956,8 @@ class AudioDataset:
                 beatmap = Beatmap(minimum_note = self.minimum_note, token_id_size = self.token_id_size, position_size = self.position_size, **self.note_type)
                 beatmap_file = beatmap.sample_beatmap_file(beatmap_file, seek_time_in_quaver,  seek_time_in_quaver + segment_duration_in_quaver, file_meta.bpm)
                 beatmap_token = beatmap.tokenize(beatmap_file, segment_duration_in_quaver, file_meta.bpm)
-                note_code_map = beatmap.conver_note_code(self.segment_duration, file_meta.bpm, self.code_rate, segment_duration_in_quaver)
-                segment_info = SegmentInfo(file_meta, round(seek_time_in_quaver * self.minimum_note),segment_duration_in_quaver=segment_duration_in_quaver, n_frames=n_frames, total_frames=target_frames,
+                note_code_map = beatmap.conver_note_code(segment_duration_in_sec, file_meta.bpm, self.code_rate, segment_duration_in_quaver)
+                segment_info = SegmentInfo(file_meta, round(seek_time_in_quaver * self.minimum_note), n_frames=n_frames, total_frames=target_frames,
                                                 sample_rate=self.sample_rate, channels=origin_sample.shape[0], origin_sample=origin_sample, beatmap_file=beatmap_file, beatmap_class=beatmap, hop_length= hop_length, note_code_map = note_code_map)
             except Exception as exc:
                 logger.warning("Error opening file %s, seek time, %d,  %r", error_path, round(seek_time_in_quaver * self.minimum_note), exc)
@@ -956,7 +976,8 @@ class AudioDataset:
 
         segment_infos = list(segment_infos)
         resample_sample = list(resample_sample)
-        beatmap_tokens = list(beatmap_tokens)        
+        beatmap_tokens = list(beatmap_tokens)
+        beatmap_tokens = torch.stack(beatmap_tokens)
 
         return segment_infos, resample_sample, beatmap_tokens
 
