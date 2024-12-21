@@ -210,7 +210,7 @@ class BeatmapGenSolver(base.StandardSolver):
         self.cfg.dataset.beatmap_sample_window = beatmap_sample_window
         self.cfg.dataset.minimum_note = minimum_note
         self.cfg.dataset.code_rate = code_rate
-
+        
         audio_kwargs = self.cfg.dataset.pop("audio_kwargs")
         representation = audio_kwargs.representation
         center = audio_kwargs.center
@@ -220,6 +220,8 @@ class BeatmapGenSolver(base.StandardSolver):
         self.cfg.dataset.representation = representation
         self.cfg.dataset.center = center
 
+        segment_duration = self.cfg.dataset.segment_duration
+        self.cfg.transformer_lm.segment_duration = segment_duration
         OmegaConf.set_struct(self.cfg, True)
         self.dataloaders = builders.get_audio_datasets(self.cfg, dataset_type=self.DATASET_TYPE)
 

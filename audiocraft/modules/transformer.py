@@ -380,66 +380,6 @@ class StreamingMultiheadAttention(StreamingModule):
                 assert query.shape[1] == key.shape[1], "Causal only for same length query / key / value"
                 assert value.shape[1] == key.shape[1], "Causal only for same length query / key / value"
                 attn_mask = self._get_mask(query.shape[1], query.device, query.dtype)
-        else:
-            N = self.position_size
-            query_length = query.shape[1]
-            if self.block_self_attention:
-                assert query_length % self.position_size == 0
-            # beatmapgen inference case
-            if self._is_streaming:
-                attn_bias = None
-            # beatmapgen sa training case
-            elif self.causal:
-                assert query_length == key.shape[1]
-                assert query_length == value.shape[1]
-                if self.block_self_attention:
-                    custom_attn_mask = True
-                    if not self.local_self_attention:
-                        len = query_length // self.position_size
-                        d = torch.arange(len, device=query.device).repeat_interleave(self.position_size)
-                        dT = torch.arange(len, device=query.device).repeat_interleave(self.position_size)
-                        mask_op = ">="
-                    else:
-                        # add full block attention along diagonal line and tringular mask within block size
-                        attn_mask = torch.zeros(1, 1, query_length, query_length, dtype=torch.bool)
-                        for i in range(0, query_length, N):
-                            index = i - N * self.sa_window_size
-                            if index < 0:
-                                index = 0
-                            attn_mask[..., i:i+N, index:i+N] = True
-                else:
-                    if not self.local_self_attention:
-                        custom_attn_mask = False
-                        is_causal = True
-                        if _efficient_attention_backend == 'xformers':
-                            attn_bias = LowerTriangularMask()
-                    else:
-                        custom_attn_mask = True
-                        attn_mask = torch.zeros(1, 1, query_length, query_length, dtype=torch.bool)
-                        for i in range(0, query_length, 1):
-                            index = i - self.sa_window_size
-                            if index < 0:
-                                index = 0
-                            attn_mask[..., i, index:i+1] = True
-            # beatmapgen ca training case
-            else:
-                if not self.local_cross_attention: # full cross attention case
-                    attn_mask = None
-                else:
-                    if self.block_self_attention:
-                        assert (query_length // self.position_size) == key.shape[1]
-                        assert (query_length // self.position_size) == value.shape[1]
-                    else:
-                        assert query_length == key.shape[1]
-                        assert query_length == value.shape[1]
-                    cross_src_length = key.shape[1]
-                    custom_attn_mask = True
-                    if self.block_cross_attention or not self.block_self_attention:
-                        attn_mask = torch.eye(cross_src_length, cross_src_length, dtype=torch.bool).unsqueeze(0).unsqueeze(0)
-                    else:
-                        d = torch.arange(cross_src_length, device=query.device).repeat_interleave(self.position_size)
-                        dT = torch.arange(cross_src_length, device=query.device)
-                        mask_op = "=="
 
         if self.custom:
             # custom implementation
@@ -457,7 +397,7 @@ class StreamingMultiheadAttention(StreamingModule):
                     bias_v = self.in_proj_bias[2 * dim:]
                 if self.block_cross_attention:
                     B, T, D = query.shape
-                    assert T % 12 == 0
+                    assert T % self.position_size == 0
                     query = query.view(B, -1, self.position_size * D)
                 q = nn.functional.linear(query, self.in_proj_weight[:dim], bias_q)
                 # todo: when streaming, we could actually save k, v and check the shape actually match.
@@ -522,33 +462,25 @@ class StreamingMultiheadAttention(StreamingModule):
                 if custom_attn_mask:
                     query_len = query.shape[1]
                     key_len = key.shape[1]
-                    if self.pad_kv:
-                        if _efficient_attention_backend == 'xformers':
-                            padding_number = 8
-                        else:
-                            padding_number = 16
-                        padding_needed = (padding_number - key_len % padding_number) % padding_number
-                        if _efficient_attention_backend == 'xformers':
-                            k = F.pad(k, (0, 0, 0, 0, 0, padding_needed))
-                            v = F.pad(v, (0, 0, 0, 0, 0, padding_needed))
-                        else:
-                            k = F.pad(k, (0, 0, 0, padding_needed))
-                            v = F.pad(v, (0, 0, 0, padding_needed))
-                        dT = torch.cat((dT, torch.full([padding_needed], key_len, device = dT.device)), dim=0)
-                        key_len += padding_needed
+                    # if self.pad_kv:
+                    #     if _efficient_attention_backend == 'xformers':
+                    #         padding_number = 8
+                    #     else:
+                    #         padding_number = 16
+                    #     padding_needed = (padding_number - key_len % padding_number) % padding_number
+                    #     if _efficient_attention_backend == 'xformers':
+                    #         k = F.pad(k, (0, 0, 0, 0, 0, padding_needed))
+                    #         v = F.pad(v, (0, 0, 0, 0, 0, padding_needed))
+                    #     else:
+                    #         k = F.pad(k, (0, 0, 0, padding_needed))
+                    #         v = F.pad(v, (0, 0, 0, padding_needed))
+                    #     dT = torch.cat((dT, torch.full([padding_needed], key_len, device = dT.device)), dim=0)
+                    #     key_len += padding_needed
                     #calculate attn_bias for attention here                    
-                    d = d.view(1, -1, 1)
-                    dT = dT.view(1, -1, 1).transpose(1, 2)
-                    if mask_op == ">=":
-                        mask = d >= dT
-                    elif mask_op == "==":
-                        mask = d == dT
-                    zero_tensor = torch.full((1,), 0.0, dtype=q.dtype, device=q.device)
-                    neg_inf_tensor = torch.full((1,), float('-inf'), dtype=q.dtype, device=q.device)
-                    attn_bias = torch.where(mask, zero_tensor, neg_inf_tensor).reshape(1, 1, query_len, key_len)
+                    
                     if _efficient_attention_backend == 'xformers':
-                        attn_bias = attn_bias.expand((q.shape[0], q.shape[2], query_len, key_len))
-                    attn_bias.requires_grad = False
+                        attn_mask = attn_mask.expand((q.shape[0], q.shape[2], query_len, key_len))
+                    attn_mask = attn_mask.to(q.dtype)
                 p = self.dropout if self.training else 0
                 if _efficient_attention_backend == 'torch':
                     if not self.use_transfer_lm:
@@ -556,9 +488,9 @@ class StreamingMultiheadAttention(StreamingModule):
                             q, k, v, is_causal=attn_mask is not None, dropout_p=p)
                     else:
                         x = torch.nn.functional.scaled_dot_product_attention(
-                            q, k, v, attn_mask=attn_bias, is_causal =is_causal, dropout_p=p)
+                            q, k, v, attn_mask=attn_mask, is_causal =is_causal, dropout_p=p)
                 else:
-                    x = ops.memory_efficient_attention(q, k, v, attn_bias, p=p)
+                    x = ops.memory_efficient_attention(q, k, v, attn_mask, p=p)
             else:
                 # We include the dot product as float32, for consistency
                 # with the other implementations that include that step
@@ -701,14 +633,14 @@ class StreamingTransformerLayer(nn.TransformerEncoderLayer):
         self.norm2 = create_norm_fn(norm, d_model, **factory_kwargs)  # type: ignore
 
     def _cross_attention_block(self, src: torch.Tensor,
-                               cross_attention_src: torch.Tensor) -> torch.Tensor:
+                               cross_attention_src: torch.Tensor, cross_src_mask: torch.Tensor) -> torch.Tensor:
         assert self.cross_attention is not None
         # queries are from src, keys and values from cross_attention_src.
         x = self.cross_attention(
-            src, cross_attention_src, cross_attention_src, need_weights=False)[0]
+            src, cross_attention_src, cross_attention_src, attn_mask=cross_src_mask, need_weights=False)[0]
         return self.dropout_cross(x)  # type: ignore
 
-    def forward(self, src: torch.Tensor, src_mask: tp.Optional[torch.Tensor] = None,  # type: ignore
+    def forward(self, src: torch.Tensor, src_mask: tp.Optional[torch.Tensor] = None, cross_src_mask: tp.Optional[torch.Tensor] = None, # type: ignore
                 src_key_padding_mask: tp.Optional[torch.Tensor] = None,
                 cross_attention_src: tp.Optional[torch.Tensor] = None):
         if self.cross_attention is None:
@@ -722,7 +654,7 @@ class StreamingTransformerLayer(nn.TransformerEncoderLayer):
             if cross_attention_src is not None:
                 x = x + self.layer_scale_cross(
                     self._cross_attention_block(
-                        self.norm_cross(x), cross_attention_src))
+                        self.norm_cross(x), cross_attention_src, cross_src_mask))
             x = x + self.layer_scale_2(self._ff_block(self.norm2(x)))
         else:
             x = self.norm1(x + self.layer_scale_1(
@@ -730,7 +662,7 @@ class StreamingTransformerLayer(nn.TransformerEncoderLayer):
             if cross_attention_src is not None:
                 x = self.norm_cross(
                     x + self.layer_scale_cross(
-                        self._cross_attention_block(src, cross_attention_src)))
+                        self._cross_attention_block(src, cross_attention_src, cross_src_mask)))
             x = self.norm2(x + self.layer_scale_2(self._ff_block(x)))
         return x
 

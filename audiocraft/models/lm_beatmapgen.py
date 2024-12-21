@@ -150,7 +150,7 @@ class BeatmapLMModel(StreamingModule):
                  attribute_dropout: tp.Dict[str, tp.Dict[str, float]] = {}, two_step_cfg: bool = False, difficulty_num: int = 5, 
                  transfer_dim: int = 64, transfer_num_heads: int = 4, transfer_num_layers: int = 1,
                  use_mask: bool = False, lora_kwargs: dict = {}, blockwise_attention_kwargs: dict = {}, transfer_lr: tp.Optional[float] = None,
-                 transfer_efficient_backend: str = 'torch', n_mels: int = 128, representation: str = "spectrogram",
+                 transfer_efficient_backend: str = 'torch', n_mels: int = 128, representation: str = "spectrogram", segment_duration: int = 512,
                  **kwargs):
         super().__init__()
         self.cfg_coef = cfg_coef
@@ -167,12 +167,15 @@ class BeatmapLMModel(StreamingModule):
         self.emb = nn.ModuleList([ScaledEmbedding(embed_dim, dim, lr=emb_lr) for _ in range(n_q)])
         self.difficulty_num = difficulty_num
         self.block_self_attention = blockwise_attention_kwargs['block_self_attention']
+        self.local_self_attention = blockwise_attention_kwargs['local_self_attention']
+        self.block_cross_attention = blockwise_attention_kwargs['block_cross_attention']
         # beatmap token id
         self.token_id_size = token_id_size + 1
         self.position_size = position_size
         self.use_mask = use_mask
         self.transfer_efficient_backend = transfer_efficient_backend
         self.representation = representation
+        self.segment_duration = segment_duration
         if self.block_self_attention:
             self.difficulty_emb = ScaledEmbedding(self.difficulty_num, transfer_dim * position_size, lr=transfer_lr)
             self.beatmap_emb = ScaledEmbedding(self.token_id_size, transfer_dim, lr=transfer_lr)
@@ -208,9 +211,91 @@ class BeatmapLMModel(StreamingModule):
         if self.use_mask:
             self.mask_token_embedding = nn.Parameter(torch.empty((self.dim,)))
             nn.init.uniform_(self.mask_token_embedding, -0.1, 0.1)
-
         self._fsdp: tp.Optional[nn.Module]
         self.__dict__['_fsdp'] = None
+
+        attn_mask_for_sa = self.get_mask_transfer_lm(causal = True)
+        attn_mask_for_ca = self.get_mask_transfer_lm(causal = False)
+        self.register_buffer('attn_mask_for_sa', attn_mask_for_sa.contiguous())
+        self.register_buffer('attn_mask_for_ca', attn_mask_for_ca.contiguous())
+
+    def get_mask_transfer_lm(self, causal):
+        # N = self.position_size
+        # query_length = query.shape[1]
+        # if self.block_self_attention:
+        #     assert query_length % self.position_size == 0
+        # beatmapgen inference case
+        # if self._is_streaming:
+        #     attn_mask = None
+        # beatmapgen sa training case
+        if causal:
+            if self.block_self_attention:
+                # custom_attn_mask = True
+                if not self.local_self_attention:
+                    query_len = self.segment_duration * self.position_size
+                    key_len = self.segment_duration * self.position_size
+                    d = torch.arange(self.segment_duration).repeat_interleave(self.position_size)
+                    dT = torch.arange(self.segment_duration).repeat_interleave(self.position_size)
+                    mask_op = ">="
+                else:
+                    # add full block attention along diagonal line and tringular mask within block size
+                    raise RuntimeError("Not supported at the moment")
+                    # attn_mask = torch.zeros(1, 1, query_length, query_length, dtype=torch.bool)
+                    # for i in range(0, query_length, N):
+                    #     index = i - N * self.sa_window_size
+                    #     if index < 0:
+                    #         index = 0
+                    #     attn_mask[..., i:i+N, index:i+N] = True
+            else:
+                if not self.local_self_attention:
+                    raise RuntimeError("Not supported at the moment")
+                    # custom_attn_mask = False
+                    # is_causal = True
+                    # if _efficient_attention_backend == 'xformers':
+                    #     attn_mask = LowerTriangularMask()
+                else:
+                    raise RuntimeError("Not supported at the moment")
+                    # custom_attn_mask = True
+                    # attn_mask = torch.zeros(1, 1, query_length, query_length, dtype=torch.bool)
+                    # for i in range(0, query_length, 1):
+                    #     index = i - self.sa_window_size
+                    #     if index < 0:
+                    #         index = 0
+                    #     attn_mask[..., i, index:i+1] = True
+        # beatmapgen ca training case
+        else:
+            if not self.local_cross_attention: # full cross attention case
+                raise RuntimeError("Not supported at the moment")
+                # attn_mask = None
+            else:
+                
+                # if self.block_self_attention:
+                #     assert (query_length // self.position_size) == key.shape[1]
+                #     assert (query_length // self.position_size) == value.shape[1]
+                # else:
+                #     assert query_length == key.shape[1]
+                #     assert query_length == value.shape[1]
+                # cross_src_length = key.shape[1]
+                # custom_attn_mask = True
+                if self.block_cross_attention or not self.block_self_attention:
+                    raise RuntimeError("Not supported at the moment")
+                    # attn_mask = torch.eye(cross_src_length, cross_src_length, dtype=torch.bool).unsqueeze(0).unsqueeze(0)
+                else:
+                    query_len = self.segment_duration * self.position_size
+                    key_len = self.segment_duration
+                    d = torch.arange(self.segment_duration).repeat_interleave(self.position_size)
+                    dT = torch.arange(self.segment_duration)
+                    mask_op = "=="
+        d = d.view(1, -1, 1)
+        dT = dT.view(1, -1, 1).transpose(1, 2)
+        if mask_op == ">=":
+            mask = d >= dT
+        elif mask_op == "==":
+            mask = d == dT
+        zero_tensor = torch.full((1,), 0.0)
+        neg_inf_tensor = torch.full((1,), float('-inf'))
+        attn_mask = torch.where(mask, zero_tensor, neg_inf_tensor).reshape(1, 1, query_len, key_len)
+        return attn_mask
 
     def _init_weights(self, weight_init: tp.Optional[str], depthwise_init: tp.Optional[str], zero_bias_init: bool):
         """Initialization of the transformer module weights.
@@ -364,15 +449,17 @@ class BeatmapLMModel(StreamingModule):
             beatmap = beatmap[:, :-1] # [B, (S-1), P]
             input_ = sum([self.beatmap_emb[p](beatmap[:, :, p]) for p in range(self.position_size)]) # [B, (S-1), dim]
             input_ = torch.cat((self.difficulty_emb(difficulty).unsqueeze(1), input_), dim=1) #[B, S, dim]
-        logits = self.transfer_lm_forward(input_ = input_, cross_attention_input = cross_attention_input) # [1, S*P, card]
+        logits = self.transfer_lm_forward(input_ = input_, cross_attention_input = cross_attention_input, src_mask = self.attn_mask_for_sa, cross_src_mask = self.attn_mask_for_ca) # [1, S*P, card]
         return logits
     
     def transfer_lm_forward(self, input_: torch.Tensor, # [B, S*P, card]
                 cross_attention_input: torch.Tensor,
+                src_mask: torch.Tensor = None,
+                cross_src_mask: torch.Tensor = None,
                 stage: int = -1) -> torch.Tensor:
         set_efficient_attention_backend(self.transfer_efficient_backend)
         out = self.transfer_lm(input_, cross_attention_src=cross_attention_input,
-                            src_mask=(self.attn_mask_per_stage[stage] if stage >= 0 else None)) # [B, S*P, dim] / [B, S, dim]
+                            src_mask=src_mask, cross_src_mask=cross_src_mask) # [B, S*P, dim] / [B, S, dim]
         if self.out_norm2:
             out = self.out_norm2(out) 
         if self.block_self_attention:
