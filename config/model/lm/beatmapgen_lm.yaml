@@ -54,17 +54,22 @@ transformer_lm:
     lora_r: 16
     lora_alpha: 16
 
-dataset:
-  audio_kwargs:
-    representation: encodec # spectrogram, encodec or  musicgen
+audio_token:
+  representation: encodec # spectrogram, encodec or  musicgen
+  spectrogram:
     center: False
     n_mels: 128
+  encodec:
+    use_receptive_field: True # use receptive_field to look for representation from encodec
+    representation_dim: 128
+    target_layer: 27
+    code_rate: 50
 
+dataset:
   beatmap_kwargs:
     difficulty_num: 5
     position_size: 12
     beatmap_sample_window: 32 # it must be divisble by minimum note
-    code_rate: 50
     minimum_note: 0.125
     note_type:  
       colorNotes: True

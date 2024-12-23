@@ -171,12 +171,7 @@ class Beatmap:
             "basicEventTypesWithKeywords": {"list": []},
             "useNormalEventsAsCompatibleEvents": True
         }
-    def conver_note_code(self, bpm: float, code_rate: int, segment_duration_in_quaver: int):
-        # [0, segment_duration_in_quaver*self.minimum_note] 范围内的八分音符，segment_duration_in_quaver*minimum_note是exlucsive
-        note = list(range(segment_duration_in_quaver))
-        note = [x * self.minimum_note for x in note]
-        note_code_map = [round(x * 60 / bpm * code_rate) for x in note]
-        return note_code_map
+    
 
     def sample_beatmap_file(self, beatmap: json, seek_time_in_quaver: int, end_time_in_quaver: int, bpm: float):
         beatmap_difficulty = beatmap['difficulty']
@@ -546,7 +541,7 @@ class SegmentInfo(BaseInfo):
     origin_sample: torch.Tensor
     beatmap_file: json
     beatmap_class: Beatmap
-    note_code_map: List[int] = field(default_factory=list)
+
     audio_token: tp.Optional[torch.Tensor] = None
     beatmap_token: tp.Optional[torch.Tensor] = None
     
@@ -764,8 +759,6 @@ class AudioDataset:
                  beatmap_sample_window: int,
                  minimum_note: float,
                  representation: str,
-                 code_rate: int,
-                 center: bool,
                  segment_duration: tp.Optional[float] = None,
                  shuffle: bool = True,
                  num_samples: int = 10_000,
@@ -820,7 +813,6 @@ class AudioDataset:
         self.beatmap_sample_window = beatmap_sample_window
         self.minimum_note = minimum_note
         self.representation = representation
-        self.code_rate = code_rate
         if not load_wav:
             assert segment_duration is not None
         self.permutation_on_files = permutation_on_files
@@ -959,9 +951,8 @@ class AudioDataset:
                     is_same = is_same and result[note_type]['same']
                 if not is_same:
                     continue
-                note_code_map = beatmap.conver_note_code(file_meta.bpm, self.code_rate, segment_duration_in_quaver)
                 segment_info = SegmentInfo(file_meta, round(seek_time_in_quaver * self.minimum_note), n_frames=n_frames, total_frames=target_frames,
-                                                sample_rate=self.sample_rate, channels=origin_sample.shape[0], origin_sample=origin_sample, beatmap_file=beatmap_file, beatmap_class=beatmap, hop_length= hop_length, note_code_map = note_code_map)
+                                                sample_rate=self.sample_rate, channels=origin_sample.shape[0], origin_sample=origin_sample, beatmap_file=beatmap_file, beatmap_class=beatmap, hop_length= hop_length)
             except Exception as exc:
                 logger.warning("Error opening file %s, seek time, %d,  %r", error_path, round(seek_time_in_quaver * self.minimum_note), exc)
                 if retry == self.max_read_retry - 1:

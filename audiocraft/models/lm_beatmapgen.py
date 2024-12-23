@@ -150,7 +150,7 @@ class BeatmapLMModel(StreamingModule):
                  attribute_dropout: tp.Dict[str, tp.Dict[str, float]] = {}, two_step_cfg: bool = False, difficulty_num: int = 5, 
                  transfer_dim: int = 64, transfer_num_heads: int = 4, transfer_num_layers: int = 1,
                  use_mask: bool = False, lora_kwargs: dict = {}, blockwise_attention_kwargs: dict = {}, transfer_lr: tp.Optional[float] = None,
-                 transfer_efficient_backend: str = 'torch', n_mels: int = 128, representation: str = "spectrogram", segment_duration: int = 512,
+                 transfer_efficient_backend: str = 'torch', representation_dim: int = 128, representation: str = "spectrogram", segment_duration: int = 512,
                  **kwargs):
         super().__init__()
         self.cfg_coef = cfg_coef
@@ -205,8 +205,8 @@ class BeatmapLMModel(StreamingModule):
             transfer_dim_num = self.transfer_dim * self.position_size
         else:
             transfer_dim_num = self.transfer_dim
-        linear_transfer_dim = self.dim if self.representation == "musicgen" else n_mels
-        self.linear_transfer = nn.Linear(linear_transfer_dim, transfer_dim_num, bias=bias_proj)
+        representation_dim = self.dim if self.representation == "musicgen" else representation_dim
+        self.linear_transfer = nn.Linear(representation_dim, transfer_dim_num, bias=bias_proj)
         self._init_weights(weight_init, depthwise_init, zero_bias_init)
         if self.use_mask:
             self.mask_token_embedding = nn.Parameter(torch.empty((self.dim,)))
