@@ -171,14 +171,11 @@ class Beatmap:
             "basicEventTypesWithKeywords": {"list": []},
             "useNormalEventsAsCompatibleEvents": True
         }
-    def conver_note_code(self, duration_in_sec: float, bpm: float, code_rate: int, segment_duration_in_quaver: int):
-        code_duration = math.ceil(duration_in_sec * code_rate)
+    def conver_note_code(self, bpm: float, code_rate: int, segment_duration_in_quaver: int):
         # [0, segment_duration_in_quaver*self.minimum_note] 范围内的八分音符，segment_duration_in_quaver*minimum_note是exlucsive
         note = list(range(segment_duration_in_quaver))
         note = [x * self.minimum_note for x in note]
         note_code_map = [round(x * 60 / bpm * code_rate) for x in note]
-        if note_code_map[-1] == code_duration:
-            note_code_map.pop()
         return note_code_map
 
     def sample_beatmap_file(self, beatmap: json, seek_time_in_quaver: int, end_time_in_quaver: int, bpm: float):
@@ -231,9 +228,12 @@ class Beatmap:
             for color_note in beatmap_origin['difficulty']['colorNotes']:
                 is_integer, time_after = self.time_map(color_note['time'])
                 if is_integer:
-                    token_pos = self.position_map[(color_note['posX'], color_note['posY'])]
-                    token_id = self.color_note_map[(color_note['color'], color_note['direction'])]
-                    token[time_after, token_pos] = token_id
+                    if (color_note['posX'], color_note['posY']) in self.position_map:
+                        token_pos = self.position_map[(color_note['posX'], color_note['posY'])]
+                        token_id = self.color_note_map[(color_note['color'], color_note['direction'])]
+                        token[time_after, token_pos] = token_id
+                    else:
+                        unsupported_note.append((color_note, "note position not in range"))
                 else:
                     unsupported_note.append((color_note, "时间不是minimum note的倍数"))
         if self.use_chains:
@@ -323,11 +323,11 @@ class Beatmap:
                 else:
                     unsupported_note.append((obstacle, "时间不是minimum note的倍数"))
    
-        if unsupported_note:
-            print("number of beatmap.unsupported_note:", len(unsupported_note))
-            unsupported_note = [(tuple((key, value) for key, value in sorted(note.items()) if not isinstance(value, dict)),msg) for note, msg in unsupported_note]
-            for item, msg in unsupported_note:
-                print(item, msg)
+        # if unsupported_note:
+        #     print("number of beatmap.unsupported_note:", len(unsupported_note))
+        #     unsupported_note = [(tuple((key, value) for key, value in sorted(note.items()) if not isinstance(value, dict)),msg) for note, msg in unsupported_note]
+        #     for item, msg in unsupported_note:
+        #         print(item, msg)
         return token
     def detokenize(self, tokens: torch.Tensor, bpm: float):
         beatmap_reconstructe = {'difficulty':{}}
@@ -913,7 +913,7 @@ class AudioDataset:
             file_meta = self.sample_file(index, rng)
             if file_meta.bpm <65 or file_meta.bpm> 280:
                 continue
-            duration_in_quaver = round(file_meta.duration / 60 * file_meta.bpm / self.minimum_note) # 音频长度用八分音符的数量来衡量
+            duration_in_quaver = math.ceil(file_meta.duration / 60 * file_meta.bpm / self.minimum_note) # 音频长度用八分音符的数量来衡量
             segment_duration_in_quaver = self.segment_duration
             #选择抽取的时间点
             window = self.beatmap_sample_window
@@ -935,17 +935,13 @@ class AudioDataset:
                     hop_length = self.traditional_round(quaver_in_frames)
                     # pad resample
                     n_frames = origin_sample.shape[-1]
-                    target_frames = int(hop_length * segment_duration_in_quaver)
+                    target_frames = self.traditional_round(hop_length * segment_duration_in_quaver)
                     resample_sample = origin_sample
-                elif self.representation == "musicgen":
-                    resample_sample = convert_audio(origin_sample, sr, self.sample_rate, self.channels)
-                    #pad origin sample
-                    n_frames = origin_sample.shape[-1]
-                    target_frames = int(segment_duration_in_sec * sr)
-                    origin_sample = F.pad(origin_sample, (0, target_frames - n_frames))    
+                elif self.representation in ["musicgen", "encodec"]:
+                    resample_sample = convert_audio(origin_sample, sr, self.sample_rate, self.channels)    
                     #pad resample
                     n_frames = resample_sample.shape[-1]
-                    target_frames = int(segment_duration_in_sec * self.sample_rate)
+                    target_frames = self.traditional_round(segment_duration_in_sec * self.sample_rate)
                     hop_length = None
                 resample_sample = F.pad(resample_sample, (0, target_frames - n_frames))
                 # 打开beatmap
@@ -956,7 +952,14 @@ class AudioDataset:
                 beatmap = Beatmap(minimum_note = self.minimum_note, token_id_size = self.token_id_size, position_size = self.position_size, **self.note_type)
                 beatmap_file = beatmap.sample_beatmap_file(beatmap_file, seek_time_in_quaver,  seek_time_in_quaver + segment_duration_in_quaver, file_meta.bpm)
                 beatmap_token = beatmap.tokenize(beatmap_file, segment_duration_in_quaver, file_meta.bpm)
-                note_code_map = beatmap.conver_note_code(segment_duration_in_sec, file_meta.bpm, self.code_rate, segment_duration_in_quaver)
+                reconstructed_beatmap_file = beatmap.detokenize(beatmap_token, file_meta.bpm)
+                result = beatmap.check_difference(beatmap_file, reconstructed_beatmap_file)
+                is_same = True
+                for note_type in beatmap.note_types:
+                    is_same = is_same and result[note_type]['same']
+                if not is_same:
+                    continue
+                note_code_map = beatmap.conver_note_code(file_meta.bpm, self.code_rate, segment_duration_in_quaver)
                 segment_info = SegmentInfo(file_meta, round(seek_time_in_quaver * self.minimum_note), n_frames=n_frames, total_frames=target_frames,
                                                 sample_rate=self.sample_rate, channels=origin_sample.shape[0], origin_sample=origin_sample, beatmap_file=beatmap_file, beatmap_class=beatmap, hop_length= hop_length, note_code_map = note_code_map)
             except Exception as exc:
@@ -978,6 +981,10 @@ class AudioDataset:
         resample_sample = list(resample_sample)
         beatmap_tokens = list(beatmap_tokens)
         beatmap_tokens = torch.stack(beatmap_tokens)
+        
+        target_frames = max([sample.shape[-1] for sample in resample_sample])
+        resample_sample = [F.pad(sample, (0, target_frames - sample.shape[-1])) for sample in resample_sample]
+        resample_sample = torch.stack(resample_sample)
 
         return segment_infos, resample_sample, beatmap_tokens
 

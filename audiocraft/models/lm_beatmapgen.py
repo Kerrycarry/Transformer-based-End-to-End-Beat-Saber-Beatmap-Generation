@@ -214,10 +214,10 @@ class BeatmapLMModel(StreamingModule):
         self._fsdp: tp.Optional[nn.Module]
         self.__dict__['_fsdp'] = None
 
-        attn_mask_for_sa = self.get_mask_transfer_lm(causal = True)
-        attn_mask_for_ca = self.get_mask_transfer_lm(causal = False)
-        self.register_buffer('attn_mask_for_sa', attn_mask_for_sa.contiguous())
-        self.register_buffer('attn_mask_for_ca', attn_mask_for_ca.contiguous())
+        self.attn_mask_for_sa = self.get_mask_transfer_lm(causal = True)
+        self.attn_mask_for_ca = self.get_mask_transfer_lm(causal = False)
+        # self.register_buffer('attn_mask_for_sa', attn_mask_for_sa.contiguous())
+        # self.register_buffer('attn_mask_for_ca', attn_mask_for_ca.contiguous())
 
     def get_mask_transfer_lm(self, causal):
         # N = self.position_size
@@ -234,8 +234,8 @@ class BeatmapLMModel(StreamingModule):
                 if not self.local_self_attention:
                     query_len = self.segment_duration * self.position_size
                     key_len = self.segment_duration * self.position_size
-                    d = torch.arange(self.segment_duration).repeat_interleave(self.position_size)
-                    dT = torch.arange(self.segment_duration).repeat_interleave(self.position_size)
+                    d = torch.arange(self.segment_duration, device = 'cuda').repeat_interleave(self.position_size)
+                    dT = torch.arange(self.segment_duration, device = 'cuda').repeat_interleave(self.position_size)
                     mask_op = ">="
                 else:
                     # add full block attention along diagonal line and tringular mask within block size
@@ -283,8 +283,8 @@ class BeatmapLMModel(StreamingModule):
                 else:
                     query_len = self.segment_duration * self.position_size
                     key_len = self.segment_duration
-                    d = torch.arange(self.segment_duration).repeat_interleave(self.position_size)
-                    dT = torch.arange(self.segment_duration)
+                    d = torch.arange(self.segment_duration, device = 'cuda').repeat_interleave(self.position_size)
+                    dT = torch.arange(self.segment_duration, device = 'cuda')
                     mask_op = "=="
         d = d.view(1, -1, 1)
         dT = dT.view(1, -1, 1).transpose(1, 2)
@@ -292,8 +292,8 @@ class BeatmapLMModel(StreamingModule):
             mask = d >= dT
         elif mask_op == "==":
             mask = d == dT
-        zero_tensor = torch.full((1,), 0.0)
-        neg_inf_tensor = torch.full((1,), float('-inf'))
+        zero_tensor = torch.full((1,), 0.0, device = 'cuda')
+        neg_inf_tensor = torch.full((1,), float('-inf'), device = 'cuda')
         attn_mask = torch.where(mask, zero_tensor, neg_inf_tensor).reshape(1, 1, query_len, key_len)
         return attn_mask
 
@@ -404,7 +404,7 @@ class BeatmapLMModel(StreamingModule):
             self, codes: torch.Tensor,
             beatmap: torch.Tensor,
             difficulty: torch.Tensor,
-            note_code_maps: list,
+            
             stage: int = -1,
             keep_only_valid_steps: bool = True):
         """Given an input tensor of codes [B, K, T] and list of conditions, runs the model
@@ -432,14 +432,12 @@ class BeatmapLMModel(StreamingModule):
                     Given the specified interleaving strategies, parts of the logits and codes should
                     not be considered as valid predictions because of invalid context.
         """
-        if self.representation == "spectrogram":
-            out=codes
-        elif self.representation == "musicgen":
-            model = self if self._fsdp is None else self._fsdp
-            out = model(codes, note_code_maps, stage=stage)
-            out = [one_out[one_map] for one_out, one_map in zip(out, note_code_maps)]
+        # elif self.representation == "musicgen":
+        #     model = self if self._fsdp is None else self._fsdp
+        #     out = model(codes, stage=stage)
+        #     out = [one_out[one_map] for one_out, one_map in zip(out)]
 
-        cross_attention_input = self.linear_transfer(out)
+        cross_attention_input = self.linear_transfer(codes)
         B, S, D = cross_attention_input.shape
         if self.block_self_attention:
             beatmap = beatmap[:,:-1].view(B, -1) # [B, (S-1)*P]
@@ -518,7 +516,6 @@ class BeatmapLMModel(StreamingModule):
     def generate(
             self, codes: torch.Tensor,
             difficulty: torch.Tensor,
-            note_code_maps: list,
             stage: int = -1,
             prompt: tp.Optional[torch.Tensor] = None,
             num_samples: tp.Optional[int] = None,
@@ -535,14 +532,13 @@ class BeatmapLMModel(StreamingModule):
         assert not self.training, "generation shouldn't be used in training mode."
         first_param = next(iter(self.parameters()))
         device = first_param.device
-        if self.representation == "spectrogram":
-            out=codes
-        elif self.representation == "musicgen":
-            model = self if self._fsdp is None else self._fsdp
-            out = model(codes, note_code_maps, stage=stage)
-            out = [one_out[one_map] for one_out, one_map in zip(out, note_code_maps)]
+
+        # elif self.representation == "musicgen":
+        #     model = self if self._fsdp is None else self._fsdp
+        #     out = model(codes, note_code_maps, stage=stage)
+        #     out = [one_out[one_map] for one_out, one_map in zip(out, note_code_maps)]
         
-        cross_attention_input = self.linear_transfer(out)
+        cross_attention_input = self.linear_transfer(codes)
         B, S, D = cross_attention_input.shape
         unknown_token = -1
         length = S
