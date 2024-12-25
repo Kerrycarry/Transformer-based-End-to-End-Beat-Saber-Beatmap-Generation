@@ -347,7 +347,7 @@ class BeatmapGenSolver(base.StandardSolver):
         spectrogram_db = T.AmplitudeToDB(stype="power", top_db=80).to(device)(mel_spectrogram)
         return spectrogram_db
     
-    def convert_note_code(rf_range, segment_duration_in_quaver, minimum_note, bpm_list, sample_rate, code_rate, total_frames, total_code):
+    def convert_note_code(rf_range, segment_duration_in_quaver, minimum_note, bpm_list, sample_rate, code_rate, total_frames, total_code, ca_window_size):
         # [0, segment_duration_in_quaver*self.minimum_note] 范围内的八分音符，segment_duration_in_quaver*minimum_note是exlucsive
         note_quaver = list(range(segment_duration_in_quaver))
         note_quaver = [x * minimum_note for x in note_quaver]    
@@ -378,8 +378,8 @@ class BeatmapGenSolver(base.StandardSolver):
                 index = length //2-1 if length % 2 ==0 and note <= segment_duration_in_quaver//2 else length//2
                 code = code_list[index]
                 one_map.append(code)
-                assert code-3 >= -2 and code+4 <= one_total_code+2, f"code = {code}, one_total_code = {one_total_code}"
-                one_trim_map.append(list(range(code-3, code+4)))
+                # assert code-3 >= -2 and code+4 <= one_total_code+2, f"code = {code}, one_total_code = {one_total_code}"
+                one_trim_map.append(list(range(code+2-ca_window_size, code+2+ca_window_size+1)))
             note_code_map_receptive_field.append(one_map)
             note_code_list_map.append(one_list_map)
             note_code_trim_list_map.append(one_trim_map)
@@ -410,21 +410,23 @@ class BeatmapGenSolver(base.StandardSolver):
             code_rate = self.cfg.audio_token.encodec.code_rate
             minimum_note = self.cfg.dataset.minimum_note
             sample_rate = self.cfg.sample_rate
+            ca_window_size = self.cfg.transformer_lm.ca_window_size
             bpm_list = [info.meta.bpm for info in segment_infos]
             total_frames = [info.total_frames for info in segment_infos]
             total_code = [math.ceil(info.total_frames/self.cfg.audio_token.encodec.stride_rate) for info in segment_infos]
-            note_code_maps, note_code_map_receptive_field, note_code_list_map, note_code_trim_list_map = BeatmapGenSolver.convert_note_code(self.rf_range, segment_duration_in_quaver, minimum_note, bpm_list, sample_rate, code_rate, total_frames, total_code)
+            note_code_maps, note_code_map_receptive_field, note_code_list_map, note_code_trim_list_map = BeatmapGenSolver.convert_note_code(self.rf_range, segment_duration_in_quaver, minimum_note, bpm_list, sample_rate, code_rate, total_frames, total_code, ca_window_size)
             if not self.cfg.audio_token.encodec.use_receptive_field:
                 note_code_maps = note_code_map_receptive_field
                 note_code_maps = [torch.tensor(one_map, device=self.device) for one_map in note_code_maps]
                 tokens = [one_token[one_map] for one_map, one_token in zip(note_code_maps, tokens)]
                 tokens = torch.stack(tokens)
             else:
-                # add 2 for all elements in note_code_trim_list_map
-                note_code_trim_list_map = [[[x+2 for x in one_list] for one_list in one_trim_list] for one_trim_list in note_code_trim_list_map]
-                tokens = [F.pad(one_token[:one_code], (0,0, 2,2)) for one_token, one_code in zip(tokens,total_code)]
-                note_code_maps = note_code_trim_list_map
-                tokens = torch.stack([torch.stack([one_token[torch.tensor(sequence_indices, device=self.device)]for sequence_indices in one_map]) for one_token, one_map in zip(tokens, note_code_maps)]) # [B, S, index, D]
+                note_code_trim_list_map = torch.tensor(note_code_trim_list_map, device=self.device)
+                tokens = [F.pad(one_token[:one_code], (0, 0, 2, 2)) for one_token, one_code in zip(tokens, total_code)]
+                dim = tokens[0].shape[-1]
+                target_sequence = note_code_trim_list_map.shape[1]
+                window_size = note_code_trim_list_map.shape[2]
+                tokens = torch.stack([torch.gather(one_token.unsqueeze(0).expand(target_sequence, one_token.shape[0], dim), dim=1, index = one_map.unsqueeze(-1).expand(target_sequence, window_size, dim)) for one_token, one_map in zip(tokens, note_code_trim_list_map)])
         return tokens
     def tokenize_difficulty(self, segment_infos):
         difficulty_map = {'Easy': 0, 'Normal': 1, 'Hard': 2, 'Expert': 3, 'ExpertPlus': 4}

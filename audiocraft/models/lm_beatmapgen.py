@@ -150,7 +150,8 @@ class BeatmapLMModel(StreamingModule):
                  attribute_dropout: tp.Dict[str, tp.Dict[str, float]] = {}, two_step_cfg: bool = False, difficulty_num: int = 5, 
                  transfer_dim: int = 64, transfer_num_heads: int = 4, transfer_num_layers: int = 1,
                  use_mask: bool = False, lora_kwargs: dict = {}, blockwise_attention_kwargs: dict = {}, transfer_lr: tp.Optional[float] = None,
-                 transfer_efficient_backend: str = 'torch', representation_dim: int = 128, representation: str = "spectrogram", segment_duration: int = 512, use_receptive_field: bool = False,
+                 transfer_efficient_backend: str = 'torch', representation_dim: int = 128, representation: str = "spectrogram", segment_duration: int = 512, 
+                 use_receptive_field: bool = False, ca_window_size: int = 3,
                  **kwargs):
         super().__init__()
         self.cfg_coef = cfg_coef
@@ -177,6 +178,7 @@ class BeatmapLMModel(StreamingModule):
         self.representation = representation
         self.segment_duration = segment_duration
         self.use_receptive_field = use_receptive_field
+        self.ca_window_size = ca_window_size
         if self.block_self_attention:
             self.difficulty_emb = ScaledEmbedding(self.difficulty_num, transfer_dim * position_size, lr=transfer_lr)
             self.beatmap_emb = ScaledEmbedding(self.token_id_size, transfer_dim, lr=transfer_lr)
@@ -283,8 +285,9 @@ class BeatmapLMModel(StreamingModule):
                     query_len = self.segment_duration * self.position_size
                     d = torch.arange(self.segment_duration, device = 'cuda').repeat_interleave(self.position_size)
                     if self.use_receptive_field:
-                        dT = torch.arange(self.segment_duration, device = 'cuda').repeat_interleave(7)
-                        key_len = self.segment_duration * 7
+                        windows = self.ca_window_size*2 +1
+                        dT = torch.arange(self.segment_duration, device = 'cuda').repeat_interleave(windows)
+                        key_len = self.segment_duration * windows
                     else:
                         dT = torch.arange(self.segment_duration, device = 'cuda')
                         key_len = self.segment_duration
@@ -295,8 +298,8 @@ class BeatmapLMModel(StreamingModule):
             mask = d >= dT
         elif mask_op == "==":
             mask = d == dT
-        zero_tensor = torch.full((1,), 0.0, device = 'cuda')
-        neg_inf_tensor = torch.full((1,), float('-inf'), device = 'cuda')
+        zero_tensor = torch.full((1,), 0.0, device = 'cuda', dtype = torch.float16)
+        neg_inf_tensor = torch.full((1,), float('-inf'), device = 'cuda', dtype = torch.float16)
         attn_mask = torch.where(mask, zero_tensor, neg_inf_tensor).reshape(1, 1, query_len, key_len)
         return attn_mask
 

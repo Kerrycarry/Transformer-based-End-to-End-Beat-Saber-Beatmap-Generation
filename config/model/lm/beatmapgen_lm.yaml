@@ -46,6 +46,7 @@ transformer_lm:
     local_cross_attention: True
     sa_head_num: 8 # overide transfer_lm.transfer_num_heads
     ca_head_num: 8  # overide transfer_lm.transfer_num_heads
+  ca_window_size: 3
 
   pad_kv: True
   use_mask: False

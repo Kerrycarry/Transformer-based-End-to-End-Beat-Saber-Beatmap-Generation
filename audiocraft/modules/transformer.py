@@ -480,7 +480,7 @@ class StreamingMultiheadAttention(StreamingModule):
                     
                     if _efficient_attention_backend == 'xformers':
                         attn_mask = attn_mask.expand((q.shape[0], q.shape[2], query_len, key_len))
-                    attn_mask = attn_mask.to(q.dtype)
+                    
                 p = self.dropout if self.training else 0
                 if _efficient_attention_backend == 'torch':
                     if not self.use_transfer_lm:
