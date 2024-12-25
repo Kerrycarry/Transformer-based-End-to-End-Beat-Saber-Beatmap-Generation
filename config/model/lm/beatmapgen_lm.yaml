@@ -64,6 +64,7 @@ audio_token:
     representation_dim: 128
     target_layer: 27
     code_rate: 50
+    stride_rate: 640
 
 dataset:
   beatmap_kwargs:

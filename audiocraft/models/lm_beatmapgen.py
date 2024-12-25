@@ -150,7 +150,7 @@ class BeatmapLMModel(StreamingModule):
                  attribute_dropout: tp.Dict[str, tp.Dict[str, float]] = {}, two_step_cfg: bool = False, difficulty_num: int = 5, 
                  transfer_dim: int = 64, transfer_num_heads: int = 4, transfer_num_layers: int = 1,
                  use_mask: bool = False, lora_kwargs: dict = {}, blockwise_attention_kwargs: dict = {}, transfer_lr: tp.Optional[float] = None,
-                 transfer_efficient_backend: str = 'torch', representation_dim: int = 128, representation: str = "spectrogram", segment_duration: int = 512,
+                 transfer_efficient_backend: str = 'torch', representation_dim: int = 128, representation: str = "spectrogram", segment_duration: int = 512, use_receptive_field: bool = False,
                  **kwargs):
         super().__init__()
         self.cfg_coef = cfg_coef
@@ -176,6 +176,7 @@ class BeatmapLMModel(StreamingModule):
         self.transfer_efficient_backend = transfer_efficient_backend
         self.representation = representation
         self.segment_duration = segment_duration
+        self.use_receptive_field = use_receptive_field
         if self.block_self_attention:
             self.difficulty_emb = ScaledEmbedding(self.difficulty_num, transfer_dim * position_size, lr=transfer_lr)
             self.beatmap_emb = ScaledEmbedding(self.token_id_size, transfer_dim, lr=transfer_lr)
@@ -216,8 +217,6 @@ class BeatmapLMModel(StreamingModule):
 
         self.attn_mask_for_sa = self.get_mask_transfer_lm(causal = True)
         self.attn_mask_for_ca = self.get_mask_transfer_lm(causal = False)
-        # self.register_buffer('attn_mask_for_sa', attn_mask_for_sa.contiguous())
-        # self.register_buffer('attn_mask_for_ca', attn_mask_for_ca.contiguous())
 
     def get_mask_transfer_lm(self, causal):
         # N = self.position_size
@@ -282,9 +281,13 @@ class BeatmapLMModel(StreamingModule):
                     # attn_mask = torch.eye(cross_src_length, cross_src_length, dtype=torch.bool).unsqueeze(0).unsqueeze(0)
                 else:
                     query_len = self.segment_duration * self.position_size
-                    key_len = self.segment_duration
                     d = torch.arange(self.segment_duration, device = 'cuda').repeat_interleave(self.position_size)
-                    dT = torch.arange(self.segment_duration, device = 'cuda')
+                    if self.use_receptive_field:
+                        dT = torch.arange(self.segment_duration, device = 'cuda').repeat_interleave(7)
+                        key_len = self.segment_duration * 7
+                    else:
+                        dT = torch.arange(self.segment_duration, device = 'cuda')
+                        key_len = self.segment_duration
                     mask_op = "=="
         d = d.view(1, -1, 1)
         dT = dT.view(1, -1, 1).transpose(1, 2)
@@ -438,7 +441,11 @@ class BeatmapLMModel(StreamingModule):
         #     out = [one_out[one_map] for one_out, one_map in zip(out)]
 
         cross_attention_input = self.linear_transfer(codes)
-        B, S, D = cross_attention_input.shape
+        B = cross_attention_input.shape[0]
+        if self.use_receptive_field:
+            B, S, index, D = cross_attention_input.shape
+            assert S == self.segment_duration, "segment duration should be the same as the input"
+            cross_attention_input = cross_attention_input.view(cross_attention_input.shape[0], -1, self.transfer_dim)
         if self.block_self_attention:
             beatmap = beatmap[:,:-1].view(B, -1) # [B, (S-1)*P]
             input_ = self.beatmap_emb(beatmap) # [B, (S-1)*P, dim]
@@ -539,10 +546,9 @@ class BeatmapLMModel(StreamingModule):
         #     out = [one_out[one_map] for one_out, one_map in zip(out, note_code_maps)]
         
         cross_attention_input = self.linear_transfer(codes)
-        B, S, D = cross_attention_input.shape
         unknown_token = -1
-        length = S
-        max_gen_len = (length + 1) * self.position_size
+        max_gen_len = (self.segment_duration + 1) * self.position_size
+        B = cross_attention_input.shape[0]
         gen_sequence = torch.full((B, max_gen_len,), unknown_token, dtype=torch.long, device=device)
         gen_sequence[:, 0:self.position_size] = difficulty.unsqueeze(1)
         start_offset_sequence = self.position_size
@@ -566,7 +572,9 @@ class BeatmapLMModel(StreamingModule):
                         input = sum([self.beatmap_emb[p](curr_sequence[:, p]) for p in range(self.position_size)]).unsqueeze(1)
                 if self.local_cross_attention:
                     index = offset // self.position_size - 1
-                    cross_attention_src = cross_attention_input[:, index].unsqueeze(1)
+                    cross_attention_src = cross_attention_input[:, index]
+                    if not self.use_receptive_field:
+                        cross_attention_src = cross_attention_src.unsqueeze(1)
                 else:
                     cross_attention_src = cross_attention_input
                 next_token = self._sample_next_token(
@@ -592,7 +600,7 @@ class BeatmapLMModel(StreamingModule):
         assert (out_code[:, :max_gen_len] != unknown_token).all()
         # ensure the returned codes are all valid
         assert (out_code >= 0).all() and (out_code <= self.token_id_size).all()
-        out_code = out_code.view(B, S, self.position_size)
+        out_code = out_code.view(B, self.segment_duration, self.position_size)
 
         return out_code
         
