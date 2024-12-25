@@ -71,6 +71,8 @@ dataset:
     position_size: 12
     beatmap_sample_window: 32 # it must be divisble by minimum note
     minimum_note: 0.125
+    minimum_bpm: 65
+    maximum_bpm: 280
     note_type:  
       colorNotes: True
       chains: False 

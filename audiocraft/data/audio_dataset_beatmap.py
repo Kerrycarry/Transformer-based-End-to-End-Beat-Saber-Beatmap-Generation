@@ -758,6 +758,8 @@ class AudioDataset:
                  note_type: dict,
                  beatmap_sample_window: int,
                  minimum_note: float,
+                 minimum_bpm: float,
+                 maximum_bpm: float,
                  representation: str,
                  segment_duration: tp.Optional[float] = None,
                  shuffle: bool = True,
@@ -812,6 +814,8 @@ class AudioDataset:
         self.note_type = note_type
         self.beatmap_sample_window = beatmap_sample_window
         self.minimum_note = minimum_note
+        self.minimum_bpm = minimum_bpm
+        self.maximum_bpm = maximum_bpm
         self.representation = representation
         if not load_wav:
             assert segment_duration is not None
@@ -903,7 +907,7 @@ class AudioDataset:
         for retry in range(self.max_read_retry):
             # 随机抽取一个beatmap_file      
             file_meta = self.sample_file(index, rng)
-            if file_meta.bpm <65 or file_meta.bpm> 280:
+            if file_meta.bpm < self.minimum_bpm or file_meta.bpm> self.maximum_bpm:
                 continue
             duration_in_quaver = math.ceil(file_meta.duration / 60 * file_meta.bpm / self.minimum_note) # 音频长度用八分音符的数量来衡量
             segment_duration_in_quaver = self.segment_duration

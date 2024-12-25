@@ -39,7 +39,8 @@ def receptive_field(model, input_size, batch_size=-1, device="cuda"):
 
         def hook(module, input, output):
             class_name = str(module.__class__).split(".")[-1].split("'")[0]
-            skip_modules = ["Identity", "EncodecResnetBlock", "EncodecLSTM", "LSTM", "Conv1d"]
+            #ParametrizedConv1d is equvalent to Conv1d
+            skip_modules = ["Identity", "EncodecResnetBlock", "EncodecLSTM", "LSTM", "Conv1d", "_WeightNorm", "ParametrizedConv1d"]
             if class_name in skip_modules:
                 return
             elif class_name == "EncodecConv1d":
@@ -63,7 +64,7 @@ def receptive_field(model, input_size, batch_size=-1, device="cuda"):
                 p_r = receptive_field[p_key]["r"]
                 p_start = receptive_field[p_key]["start"]
 
-                if class_name == "Conv1d":
+                if class_name in ["Conv1d", "ParametrizedConv1d"]:
                     kernel_size = module.kernel_size[0]
                     stride = module.stride[0]
                     padding = padding_left
