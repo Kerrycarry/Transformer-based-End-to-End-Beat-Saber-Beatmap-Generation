@@ -459,14 +459,12 @@ class StreamingMultiheadAttention(StreamingModule):
             if self.attention_as_float32:
                 q, k, v = [x.float() for x in [q, k, v]]
             if self.memory_efficient:
-                if custom_attn_mask:
+                if custom_attn_mask and isinstance(attn_mask, torch.Tensor):
                     query_len = query.shape[1]
-                    key_len = key.shape[1]
+                    key_len = key.shape[1]                    
                     # if self.pad_kv:
-                    #     if _efficient_attention_backend == 'xformers':
-                    #         padding_number = 8
-                    #     else:
-                    #         padding_number = 16
+                    #     key_len = key.shape[1]
+                    #     padding_number = 16 if _efficient_attention_backend == 'xformers' else 16
                     #     padding_needed = (padding_number - key_len % padding_number) % padding_number
                     #     if _efficient_attention_backend == 'xformers':
                     #         k = F.pad(k, (0, 0, 0, 0, 0, padding_needed))
@@ -474,10 +472,6 @@ class StreamingMultiheadAttention(StreamingModule):
                     #     else:
                     #         k = F.pad(k, (0, 0, 0, padding_needed))
                     #         v = F.pad(v, (0, 0, 0, padding_needed))
-                    #     dT = torch.cat((dT, torch.full([padding_needed], key_len, device = dT.device)), dim=0)
-                    #     key_len += padding_needed
-                    #calculate attn_bias for attention here                    
-                    
                     if _efficient_attention_backend == 'xformers':
                         attn_mask = attn_mask.expand((q.shape[0], q.shape[2], query_len, key_len))
                     
@@ -490,6 +484,14 @@ class StreamingMultiheadAttention(StreamingModule):
                         x = torch.nn.functional.scaled_dot_product_attention(
                             q, k, v, attn_mask=attn_mask, is_causal =is_causal, dropout_p=p)
                 else:
+                    # if custom_attn_mask and isinstance(attn_mask, ops.fmha.attn_bias.BlockDiagonalMask):
+                    #     B, T, H, D = q.shape
+                    #     q = q.reshape(1, -1, H, D)
+                    #     k = k.reshape(1, -1, H, D)
+                    #     v = v.reshape(1, -1, H, D)
+                    #     x = ops.memory_efficient_attention(q, k, v, attn_mask, p=p)
+                    #     x = x.reshape(B, T, H, D)
+                    # else:
                     x = ops.memory_efficient_attention(q, k, v, attn_mask, p=p)
             else:
                 # We include the dot product as float32, for consistency

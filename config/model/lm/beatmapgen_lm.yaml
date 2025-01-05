@@ -56,16 +56,18 @@ transformer_lm:
     lora_alpha: 16
 
 audio_token:
-  representation: encodec # spectrogram, encodec or  musicgen
+  representation: musicgen # spectrogram, encodec or  musicgen
   spectrogram:
     center: False
     n_mels: 128
   encodec:
-    use_receptive_field: True # use receptive_field to look for representation from encodec
+    use_receptive_field: False # use receptive_field to look for representation from encodec
     representation_dim: 128
     target_layer: 27
     code_rate: 50
     stride_rate: 640
+  musicgen: # musicgen rely on encodec param
+    training_sequence_length: 1501
 
 dataset:
   beatmap_kwargs:

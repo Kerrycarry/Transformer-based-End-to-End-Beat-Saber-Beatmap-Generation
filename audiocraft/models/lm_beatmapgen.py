@@ -12,6 +12,7 @@ import typing as tp
 
 import torch
 from torch import nn
+from xformers.ops import fmha
 
 from ..utils import utils
 from ..modules.streaming import StreamingModule, State
@@ -285,7 +286,7 @@ class BeatmapLMModel(StreamingModule):
                     query_len = self.segment_duration * self.position_size
                     d = torch.arange(self.segment_duration, device = 'cuda').repeat_interleave(self.position_size)
                     if self.use_receptive_field:
-                        windows = self.ca_window_size*2 +1
+                        windows = self.ca_window_size*1 + 1
                         dT = torch.arange(self.segment_duration, device = 'cuda').repeat_interleave(windows)
                         key_len = self.segment_duration * windows
                     else:
@@ -360,8 +361,9 @@ class BeatmapLMModel(StreamingModule):
     def num_codebooks(self) -> int:
         return self.n_q
 
-    def forward(self, codes: torch.Tensor,
-                note_code_maps: list,
+    def forward(self, sequence: torch.Tensor,
+                src_mask: tp.Optional[torch.Tensor] = None,
+                # note_code_maps: list,
                 # conditions: tp.List[ConditioningAttributes],
                 # condition_tensors: tp.Optional[ConditionTensors] = None,
                 stage: int = -1) -> torch.Tensor:
@@ -384,7 +386,22 @@ class BeatmapLMModel(StreamingModule):
         Returns:
             torch.Tensor: Logits.
         """
-        set_efficient_attention_backend("torch")
+        set_efficient_attention_backend("xformers")
+        B, K, T = sequence.shape
+        assert K == self.num_codebooks, "Sequence shape must match the specified number of codebooks"
+        input_ = sum([self.emb[k](sequence[:, k]) for k in range(K)]) # batch, sequence, dim
+        # if self.use_mask:
+        #     mask_positions = [[pos + 4 for pos in positions] for positions in note_code_maps]
+        #     for i, positions in enumerate(mask_positions):
+        #         input_[i, positions, :] += self.mask_token_embedding
+        out = self.transformer(input_, cross_attention_src=None,
+                               src_mask = src_mask)
+        if self.out_norm:
+            out = self.out_norm(out)
+
+        return out  #[B, S, dim]
+
+    def compute_representation(self, codes: torch.Tensor) -> torch.Tensor:
         B, K, T = codes.shape
         codes = codes.contiguous()
         # map codes [B, K, T] into pattern sequence [B, K, S] using special_token_id for masked tokens
@@ -392,19 +409,38 @@ class BeatmapLMModel(StreamingModule):
         sequence, sequence_indexes, sequence_mask = pattern.build_pattern_sequence(
             codes, self.special_token_id
         )
-        assert K == self.num_codebooks, "Sequence shape must match the specified number of codebooks"
-        input_ = sum([self.emb[k](sequence[:, k]) for k in range(K)]) # batch, sequence, dim
-        if self.use_mask:
-            mask_positions = [[pos + 4 for pos in positions] for positions in note_code_maps]
-            for i, positions in enumerate(mask_positions):
-                input_[i, positions, :] += self.mask_token_embedding
-        out = self.transformer(input_, cross_attention_src=None,
-                               src_mask=(self.attn_mask_per_stage[stage] if stage >= 0 else None))
-        if self.out_norm:
-            out = self.out_norm(out)
-        out = out[:,4:,:]
-
-        return out  #[B, S, dim]
+        
+        # apply model on pattern sequence
+        model = self if self._fsdp is None else self._fsdp
+        max_gen_len = sequence.shape[-1]
+        gen_representation = model(sequence, None)
+        # with self.streaming():
+        #     gen_representation = model(sequence[:,:,:window_size], None)
+        #     if max_gen_len > window_size:
+        #         half_window_size = window_size // 2
+        #         for offset in list(range(window_size, max_gen_len, half_window_size)):
+        #             if offset + half_window_size > max_gen_len:
+        #                 q_length = max_gen_len - offset
+        #             else:
+        #                 q_length = half_window_size
+        #             state = self.get_streaming_state()
+        #             for key, value in state.items():
+        #                 if len(value.shape) == 4:
+        #                     assert value.shape[1] == window_size
+        #                     state[key] = value[:, half_window_size:]
+        #             self.set_streaming_state(state)
+        #             q_length_list = [q_length]*B
+        #             q_seqinfo = fmha.attn_bias._SeqLenInfo.from_seqlens(q_length_list)
+        #             batch_sizes = [1]*B
+        #             k_length_list = [half_window_size+q_length]*B
+        #             k_seqinfo = fmha.attn_bias._SeqLenInfo.from_seqlens(k_length_list)
+        #             attn_mask = fmha.attn_bias.BlockDiagonalCausalFromBottomRightMask(
+        #                 q_seqinfo=q_seqinfo, k_seqinfo=k_seqinfo, _batch_sizes=batch_sizes
+        #             )
+        #             gen_representation = torch.cat((gen_representation, model(sequence[:,:,offset:offset+q_length], attn_mask)), dim=1)
+        # self.reset_streaming()
+        assert gen_representation.shape[1] == max_gen_len
+        return gen_representation
 
     def compute_predictions(
             self, codes: torch.Tensor,
@@ -438,10 +474,6 @@ class BeatmapLMModel(StreamingModule):
                     Given the specified interleaving strategies, parts of the logits and codes should
                     not be considered as valid predictions because of invalid context.
         """
-        # elif self.representation == "musicgen":
-        #     model = self if self._fsdp is None else self._fsdp
-        #     out = model(codes, stage=stage)
-        #     out = [one_out[one_map] for one_out, one_map in zip(out)]
 
         cross_attention_input = self.linear_transfer(codes)
         B = cross_attention_input.shape[0]
@@ -542,11 +574,6 @@ class BeatmapLMModel(StreamingModule):
         assert not self.training, "generation shouldn't be used in training mode."
         first_param = next(iter(self.parameters()))
         device = first_param.device
-
-        # elif self.representation == "musicgen":
-        #     model = self if self._fsdp is None else self._fsdp
-        #     out = model(codes, note_code_maps, stage=stage)
-        #     out = [one_out[one_map] for one_out, one_map in zip(out, note_code_maps)]
         
         cross_attention_input = self.linear_transfer(codes)
         unknown_token = -1

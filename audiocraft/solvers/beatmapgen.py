@@ -226,7 +226,7 @@ class BeatmapGenSolver(base.StandardSolver):
         if representation == "spectrogram":
             n_mels = audio_token.spectrogram.n_mels
             self.cfg.transformer_lm.representation_dim = n_mels
-        elif representation == "encodec":
+        elif representation in ["musicgen", "encodec"]:
             representation_dim = audio_token.encodec.representation_dim
             use_receptive_field = audio_token.encodec.use_receptive_field
             self.cfg.transformer_lm.representation_dim = representation_dim
@@ -351,11 +351,9 @@ class BeatmapGenSolver(base.StandardSolver):
         # [0, segment_duration_in_quaver*self.minimum_note] 范围内的八分音符，segment_duration_in_quaver*minimum_note是exlucsive
         note_quaver = list(range(segment_duration_in_quaver))
         note_quaver = [x * minimum_note for x in note_quaver]    
-        note_code_map = [[round(x * 60 / bpm * code_rate) for x in note_quaver] for bpm in bpm_list]
+        # note_code_map = [[round(x * 60 / bpm * code_rate) for x in note_quaver] for bpm in bpm_list]
 
-        note_code_map_receptive_field = []
-        note_code_list_map = []
-        note_code_trim_list_map = []
+        note_code_list_closest_map = []
         for bpm, one_total_frame, one_total_code in zip(bpm_list, total_frames, total_code):
             note_frame = [round(x * 60 / bpm * sample_rate) for x in note_quaver]
             note_frame_map = []
@@ -363,27 +361,37 @@ class BeatmapGenSolver(base.StandardSolver):
                 frame = (note_frame[i], note_frame[i+1]-1) if i in range(len(note_frame) - 1) else (note_frame[i], one_total_frame)
                 note_frame_map.append(frame)
             assert note_frame_map[-1][0]<note_frame_map[-1][1]
-            one_list_map = {}
-            for i, (start,end) in enumerate(note_frame_map):
-                for j, rf in enumerate(rf_range[:one_total_code]):
-                    rf1, rf2 = rf[0]
-                    if rf1 <= start:
-                        if end <= rf2 :
-                            one_list_map.setdefault(i, []).append(j)
-                            
-            one_map = []
-            one_trim_map = []
-            for note, code_list in one_list_map.items():
-                length = len(code_list)
-                index = length //2-1 if length % 2 ==0 and note <= segment_duration_in_quaver//2 else length//2
-                code = code_list[index]
-                one_map.append(code)
-                # assert code-3 >= -2 and code+4 <= one_total_code+2, f"code = {code}, one_total_code = {one_total_code}"
-                one_trim_map.append(list(range(code+2-ca_window_size, code+2+ca_window_size+1)))
-            note_code_map_receptive_field.append(one_map)
-            note_code_list_map.append(one_list_map)
-            note_code_trim_list_map.append(one_trim_map)
-        return note_code_map, note_code_map_receptive_field, note_code_list_map, note_code_trim_list_map
+            note_code_closest_map = []
+            one_rf_range = rf_range[:one_total_code]
+            j = 0
+            for i, (start, end) in enumerate(note_frame_map):
+                min_distance = float('inf')  # 初始化最小距离为无穷大
+                closest_j = None  # 初始化最接近的区间索引
+                x1, y1 = 65, 0.6
+                x2, y2 = 260, 1
+                ratio = (bpm - x1) / (x2 - x1) * (y2 - y1) + y1
+                start_end_mid = (start + end) / 2  # 计算 (start, end) 的中点
+                distance = start_end_mid - start
+                start_end_mid = start + distance*ratio
+
+                while j < len(one_rf_range):
+                    rf1, rf2 = one_rf_range[j][0]
+                    rf_mid = (rf1 + rf2) / 2  # 计算 (rf1, rf2) 的中点
+                    
+                    # 计算中点的绝对差值并更新最接近的区间
+                    distance = abs(start_end_mid - rf_mid)
+                    if distance < min_distance:
+                        min_distance = distance
+                        closest_j = j
+                    else:
+                        #提前结束
+                        break
+                    j += 1
+                note_code_closest_map.append(closest_j)
+                #下一轮从本轮结果继续
+                j = closest_j
+            note_code_list_closest_map.append(note_code_closest_map)
+        return  note_code_list_closest_map
 
     def tokenize_audio(self, segment_infos, resample_samples):
         tokens = []
@@ -404,9 +412,18 @@ class BeatmapGenSolver(base.StandardSolver):
                 audio_token = audio_token.permute(1,0)
                 tokens.append(audio_token)
             tokens = torch.stack(tokens)
-        elif representation == "encodec":
+        elif representation in ["musicgen", "encodec"]:
             with torch.no_grad():
-                tokens = self.compression_model.model.encoder(resample_samples).permute(0, 2, 1)
+                if representation == "encodec":
+                    tokens = self.compression_model.model.encoder(resample_samples).permute(0, 2, 1)
+                else:
+                    tokens, scale = self.compression_model.encode(resample_samples)
+                    assert scale is None, "Scaled compression model not supported with LM."
+            if representation == "musicgen":
+                with self.autocast:
+                    with torch.no_grad():
+                        window_size = self.cfg.audio_token.musicgen.training_sequence_length
+                        tokens = self.model.compute_representation(tokens)
             code_rate = self.cfg.audio_token.encodec.code_rate
             minimum_note = self.cfg.dataset.minimum_note
             sample_rate = self.cfg.sample_rate
@@ -414,19 +431,20 @@ class BeatmapGenSolver(base.StandardSolver):
             bpm_list = [info.meta.bpm for info in segment_infos]
             total_frames = [info.total_frames for info in segment_infos]
             total_code = [math.ceil(info.total_frames/self.cfg.audio_token.encodec.stride_rate) for info in segment_infos]
-            note_code_maps, note_code_map_receptive_field, note_code_list_map, note_code_trim_list_map = BeatmapGenSolver.convert_note_code(self.rf_range, segment_duration_in_quaver, minimum_note, bpm_list, sample_rate, code_rate, total_frames, total_code, ca_window_size)
+            note_code_maps = BeatmapGenSolver.convert_note_code(self.rf_range, segment_duration_in_quaver, minimum_note, bpm_list, sample_rate, code_rate, total_frames, total_code, ca_window_size)
+            
+            dim = tokens.shape[-1]
+            B = tokens.shape[0]
             if not self.cfg.audio_token.encodec.use_receptive_field:
-                note_code_maps = note_code_map_receptive_field
-                note_code_maps = [torch.tensor(one_map, device=self.device) for one_map in note_code_maps]
-                tokens = [one_token[one_map] for one_map, one_token in zip(note_code_maps, tokens)]
-                tokens = torch.stack(tokens)
+                if representation == "musicgen":
+                    tokens = tokens[:,4:]
+                note_code_maps = torch.tensor(note_code_maps, device=self.device)
+                tokens = torch.gather(tokens, dim=1, index=note_code_maps.unsqueeze(-1).expand(B, segment_duration_in_quaver, dim))
             else:
                 note_code_trim_list_map = torch.tensor(note_code_trim_list_map, device=self.device)
                 tokens = [F.pad(one_token[:one_code], (0, 0, 2, 2)) for one_token, one_code in zip(tokens, total_code)]
-                dim = tokens[0].shape[-1]
-                target_sequence = note_code_trim_list_map.shape[1]
                 window_size = note_code_trim_list_map.shape[2]
-                tokens = torch.stack([torch.gather(one_token.unsqueeze(0).expand(target_sequence, one_token.shape[0], dim), dim=1, index = one_map.unsqueeze(-1).expand(target_sequence, window_size, dim)) for one_token, one_map in zip(tokens, note_code_trim_list_map)])
+                tokens = torch.stack([torch.gather(one_token.unsqueeze(0).expand(segment_duration_in_quaver, one_token.shape[0], dim), dim=1, index = one_map.unsqueeze(-1).expand(target_sequence, window_size, dim)) for one_token, one_map in zip(tokens, note_code_trim_list_map)])
         return tokens
     def tokenize_difficulty(self, segment_infos):
         difficulty_map = {'Easy': 0, 'Normal': 1, 'Hard': 2, 'Expert': 3, 'ExpertPlus': 4}
@@ -459,10 +477,10 @@ class BeatmapGenSolver(base.StandardSolver):
         beatmap_tokens = beatmap_tokens.to(self.device)
         resample_samples = resample_samples.to(self.device)
         difficulty = self.tokenize_difficulty(segment_infos)
-        sample_id_seek_time = [f"{segment_info.meta.id}_{segment_info.seek_time}" for segment_info in segment_infos]
-        sample_id = [f"{segment_info.meta.id}" for segment_info in segment_infos]
-        self.log_sample_usage("sample_id_seek_time.json", sample_id_seek_time)
-        self.log_sample_usage("sample_id.json", sample_id)
+        # sample_id_seek_time = [f"{segment_info.meta.id}_{segment_info.seek_time}" for segment_info in segment_infos]
+        # sample_id = [f"{segment_info.meta.id}" for segment_info in segment_infos]
+        # self.log_sample_usage("sample_id_seek_time.json", sample_id_seek_time)
+        # self.log_sample_usage("sample_id.json", sample_id)
 
         # Now we should be synchronization free.
         if self.device == "cuda" and check_synchronization_points:
