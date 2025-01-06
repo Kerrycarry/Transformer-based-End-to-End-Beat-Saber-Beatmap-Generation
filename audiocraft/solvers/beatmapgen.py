@@ -630,12 +630,6 @@ class BeatmapGenSolver(base.StandardSolver):
         sample_id = [f"{segment_info.meta.id}_{segment_info.seek_time}" for segment_info in segment_infos]
         meta = [segment_info.meta for segment_info in segment_infos]
         bench_end = time.time()
-        # 测试对齐
-        beatmap_alignment_result = []
-        for segment_info, beatmap_token in zip(segment_infos, beatmap_tokens):
-            reconstructed_beatmap_file = segment_info.beatmap_class.detokenize(beatmap_token, segment_info.meta.bpm)
-            result = segment_info.beatmap_class.check_difference(reconstructed_beatmap_file, segment_info.beatmap_file)
-            beatmap_alignment_result.append(result)
 
         gen_outputs = {
             'rtf': (bench_end - bench_start) / gen_duration,
@@ -643,8 +637,7 @@ class BeatmapGenSolver(base.StandardSolver):
             'ground_truth_beatmaps': ref_beatmap_file,
             'gen_beatmaps': gen_beatmap_file,
             'sample_ids': sample_id,
-            'metas': meta,
-            'beatmap_alignment_results': beatmap_alignment_result,
+            'metas': meta
         }   
         return gen_outputs
 

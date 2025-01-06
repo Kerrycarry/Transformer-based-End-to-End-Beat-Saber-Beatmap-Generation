@@ -58,27 +58,30 @@ class RotaryEmbedding(nn.Module):
         dtype (torch.dtype): dtype to use to generate the embedding.
     """
     def __init__(self, dim: int, max_period: float = 10000.0, xpos: bool = False,
-                 scale: float = 1.0, device=None, dtype: torch.dtype = torch.float32):
+                 scale: float = 1.0, shared_steps: int = 1, device=None, dtype: torch.dtype = torch.float32):
         super().__init__()
         assert dim % 2 == 0
         self.scale = scale
+        self.shared_steps = shared_steps  # 每多少时间步共享一次旋转矩阵
         assert dtype in [torch.float64, torch.float32]
         self.dtype = dtype
 
         adim = torch.arange(0, dim, 2, device=device, dtype=dtype)[: (dim // 2)]
-        frequencies = 1.0 / (max_period ** (adim / dim))
-        self.register_buffer("frequencies", frequencies)
+        self.frequencies = 1.0 / (max_period ** (adim / dim))
         self.rotation: tp.Optional[torch.Tensor] = None
 
         self.xpos = XPos(dim, device=device, dtype=dtype) if xpos else None
 
     def get_rotation(self, start: int, end: int):
         """Create complex rotation tensor, cache values for fast computation."""
+        assert start % self.shared_steps == 0
+        assert end % self.shared_steps == 0
+        end_shared = end // self.shared_steps
         if self.rotation is None or end > self.rotation.shape[0]:
             assert isinstance(self.frequencies, torch.Tensor)  # Satisfy type checker.
-            idx = torch.arange(end, device=self.frequencies.device, dtype=self.dtype)
+            idx = torch.arange(end_shared, device=self.frequencies.device, dtype=self.dtype)
             angles = torch.outer(idx, self.frequencies)
-            self.rotation = torch.polar(torch.ones_like(angles), angles)
+            self.rotation = torch.polar(torch.ones_like(angles), angles).repeat_interleave(self.shared_steps, dim=0)
         return self.rotation[start:end]
 
     def rotate(self, x: torch.Tensor, start: int = 0, time_dim: int = 1, invert_decay: bool = False):

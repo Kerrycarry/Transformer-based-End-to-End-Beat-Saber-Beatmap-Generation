@@ -237,7 +237,7 @@ class SampleManager:
 
     def add_samples(self, sample_ids: list, audios: list, metas: list, epoch: int,
                     ground_truth_beatmaps: list,
-                    gen_beatmaps: list, beatmap_alignment_results: list,
+                    gen_beatmaps: list,
                     conditioning: tp.Optional[tp.List[tp.Dict[str, tp.Any]]] = None,
                     generation_args: tp.Optional[tp.Dict[str, tp.Any]] = None) -> tp.List[Sample]:
         """Adds a batch of samples.
@@ -256,7 +256,7 @@ class SampleManager:
             generation_args (dict[str, Any], optional): Dictionary of other arguments used during generation.
         """
         
-        for index, (sample_id, audio, meta, ground_truth_beatmap, gen_beatmap, beatmap_alignment_result) in enumerate(zip(sample_ids, audios, metas, ground_truth_beatmaps, gen_beatmaps, beatmap_alignment_results)):
+        for index, (sample_id, audio, meta, ground_truth_beatmap, gen_beatmap) in enumerate(zip(sample_ids, audios, metas, ground_truth_beatmaps, gen_beatmaps)):
             sample_id = f"{epoch}-{index}_{sample_id}"
             reference_path = self.base_folder / 'reference' / sample_id
             generated_path = self.base_folder / 'generated' / sample_id

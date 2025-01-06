@@ -724,12 +724,17 @@ class StreamingTransformer(StreamingModule):
         self.weight_decay = weight_decay
         self.lr = lr
 
+        self.position_size = position_size
+        self.block_self_attention = block_self_attention
+        if block_self_attention:
+            self.local_pos_embedding = nn.Embedding(position_size, d_model)
         assert positional_embedding in ['sin', 'rope', 'sin_rope']
         self.rope: tp.Optional[RotaryEmbedding] = None
         if self.positional_embedding in ['rope', 'sin_rope']:
             assert _is_custom(custom, memory_efficient)
+            shared_steps = self.position_size if self.block_self_attention else 1
             self.rope = RotaryEmbedding(d_model // num_heads, max_period=max_period,
-                                        xpos=xpos, scale=positional_scale, device=device)
+                                        xpos=xpos, scale=positional_scale, shared_steps=shared_steps, device=device)
 
         self.checkpointing = checkpointing
 
@@ -760,10 +765,7 @@ class StreamingTransformer(StreamingModule):
                 # backward hook inside of FSDP...
                 layer._magma_checkpointed = True  # type: ignore
         
-        self.position_size = position_size
-        self.block_self_attention = block_self_attention
-        if block_self_attention:
-            self.local_pos_embedding = nn.Embedding(position_size, d_model)
+        
     def _apply_layer(self, layer, *args, **kwargs):
         method = self.checkpointing
         if method == 'none':
@@ -802,21 +804,22 @@ class StreamingTransformer(StreamingModule):
             offsets = self._streaming_state['offsets']
         else:
             offsets = torch.zeros(B, dtype=torch.long, device=x.device)
-
+        if self.block_self_attention:
+            assert T % self.position_size == 0
+            T = T // self.position_size
         if self.positional_embedding in ['sin', 'sin_rope']:
-            if self.block_self_attention:
-                assert T % self.position_size == 0
-                T = T // self.position_size
             positions = torch.arange(T, device=x.device).view(1, -1, 1)
             positions = positions + offsets.view(-1, 1, 1)
             pos_emb = create_sin_embedding(positions, C, max_period=self.max_period, dtype=x.dtype)
             if self.block_self_attention:
                 pos_emb = pos_emb.repeat_interleave(self.position_size, dim=1)
-                indices = torch.arange(self.position_size, device=x.device).unsqueeze(0).repeat(B, 1)
-                local_pos_emb = self.local_pos_embedding(indices)
-                local_pos_emb = local_pos_emb.repeat(1, T, 1)
-                pos_emb += local_pos_emb
             x = x + self.positional_scale * pos_emb
+        
+        if self.block_self_attention:
+            indices = torch.arange(self.position_size, device=x.device).unsqueeze(0).repeat(B, 1)
+            local_pos_emb = self.local_pos_embedding(indices)
+            local_pos_emb = local_pos_emb.repeat(1, T, 1)
+            x = x + local_pos_emb
 
         for layer in self.layers:
             x = self._apply_layer(layer, x, *args, **kwargs)
