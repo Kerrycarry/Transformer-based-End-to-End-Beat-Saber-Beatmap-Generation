@@ -169,8 +169,6 @@ class BeatmapLMModel(StreamingModule):
         self.emb = nn.ModuleList([ScaledEmbedding(embed_dim, dim, lr=emb_lr) for _ in range(n_q)])
         self.difficulty_num = difficulty_num
         self.block_self_attention = blockwise_attention_kwargs['block_self_attention']
-        self.local_self_attention = blockwise_attention_kwargs['local_self_attention']
-        self.block_cross_attention = blockwise_attention_kwargs['block_cross_attention']
         # beatmap token id
         self.token_id_size = token_id_size + 1
         self.position_size = position_size
@@ -190,8 +188,6 @@ class BeatmapLMModel(StreamingModule):
             self.linear_out = nn.ModuleList([nn.Linear(transfer_dim, self.token_id_size, bias=bias_proj) for _ in range(self.position_size)])
         self.transfer_dim = transfer_dim
         self.local_cross_attention = blockwise_attention_kwargs['local_cross_attention']
-        if blockwise_attention_kwargs['block_cross_attention']:
-            assert blockwise_attention_kwargs['block_self_attention'], "block_cross_attention need block_self_attention"
         if 'activation' in kwargs:
             kwargs['activation'] = get_activation_fn(kwargs['activation'])
         self.transformer = StreamingTransformer(
@@ -205,12 +201,8 @@ class BeatmapLMModel(StreamingModule):
         self.transfer_lm = StreamingTransformer(
             d_model=transfer_dim, num_heads=transfer_num_heads, dim_feedforward=int(hidden_scale * transfer_dim), num_layers = transfer_num_layers,
             norm=norm, norm_first=norm_first, position_size = position_size, blockwise_attention_kwargs = blockwise_attention_kwargs, block_self_attention = self.block_self_attention, lr = transfer_lr, **kwargs)
-        if blockwise_attention_kwargs['block_cross_attention']:
-            transfer_dim_num = self.transfer_dim * self.position_size
-        else:
-            transfer_dim_num = self.transfer_dim
         representation_dim = self.dim if self.representation == "musicgen" else representation_dim
-        self.linear_transfer = nn.Linear(representation_dim, transfer_dim_num, bias=bias_proj)
+        self.linear_transfer = nn.Linear(representation_dim, self.transfer_dim, bias=bias_proj)
         self._init_weights(weight_init, depthwise_init, zero_bias_init)
         if self.use_mask:
             self.mask_token_embedding = nn.Parameter(torch.empty((self.dim,)))
@@ -233,30 +225,30 @@ class BeatmapLMModel(StreamingModule):
         if causal:
             if self.block_self_attention:
                 # custom_attn_mask = True
-                if not self.local_self_attention:
-                    query_len = self.segment_duration * self.position_size
-                    key_len = self.segment_duration * self.position_size
-                    d = torch.arange(self.segment_duration, device = 'cuda').repeat_interleave(self.position_size)
-                    dT = torch.arange(self.segment_duration, device = 'cuda').repeat_interleave(self.position_size)
-                    mask_op = ">="
-                else:
+                # if not self.local_self_attention:
+                query_len = self.segment_duration * self.position_size
+                key_len = self.segment_duration * self.position_size
+                d = torch.arange(self.segment_duration, device = 'cuda').repeat_interleave(self.position_size)
+                dT = torch.arange(self.segment_duration, device = 'cuda').repeat_interleave(self.position_size)
+                mask_op = ">="
+                # else:
                     # add full block attention along diagonal line and tringular mask within block size
-                    raise RuntimeError("Not supported at the moment")
+                    # raise RuntimeError("Not supported at the moment")
                     # attn_mask = torch.zeros(1, 1, query_length, query_length, dtype=torch.bool)
                     # for i in range(0, query_length, N):
                     #     index = i - N * self.sa_window_size
                     #     if index < 0:
                     #         index = 0
                     #     attn_mask[..., i:i+N, index:i+N] = True
-            else:
-                if not self.local_self_attention:
-                    raise RuntimeError("Not supported at the moment")
+            # else:
+            #     if not self.local_self_attention:
+                    # raise RuntimeError("Not supported at the moment")
                     # custom_attn_mask = False
                     # is_causal = True
                     # if _efficient_attention_backend == 'xformers':
                     #     attn_mask = LowerTriangularMask()
-                else:
-                    raise RuntimeError("Not supported at the moment")
+                # else:
+                #     raise RuntimeError("Not supported at the moment")
                     # custom_attn_mask = True
                     # attn_mask = torch.zeros(1, 1, query_length, query_length, dtype=torch.bool)
                     # for i in range(0, query_length, 1):
@@ -279,20 +271,20 @@ class BeatmapLMModel(StreamingModule):
                 #     assert query_length == value.shape[1]
                 # cross_src_length = key.shape[1]
                 # custom_attn_mask = True
-                if self.block_cross_attention or not self.block_self_attention:
-                    raise RuntimeError("Not supported at the moment")
-                    # attn_mask = torch.eye(cross_src_length, cross_src_length, dtype=torch.bool).unsqueeze(0).unsqueeze(0)
+                # if self.block_cross_attention or not self.block_self_attention:
+                #     raise RuntimeError("Not supported at the moment")
+                #     # attn_mask = torch.eye(cross_src_length, cross_src_length, dtype=torch.bool).unsqueeze(0).unsqueeze(0)
+                # else:
+                query_len = self.segment_duration * self.position_size
+                d = torch.arange(self.segment_duration, device = 'cuda').repeat_interleave(self.position_size)
+                if self.use_receptive_field:
+                    windows = self.ca_window_size*1 + 1
+                    dT = torch.arange(self.segment_duration, device = 'cuda').repeat_interleave(windows)
+                    key_len = self.segment_duration * windows
                 else:
-                    query_len = self.segment_duration * self.position_size
-                    d = torch.arange(self.segment_duration, device = 'cuda').repeat_interleave(self.position_size)
-                    if self.use_receptive_field:
-                        windows = self.ca_window_size*1 + 1
-                        dT = torch.arange(self.segment_duration, device = 'cuda').repeat_interleave(windows)
-                        key_len = self.segment_duration * windows
-                    else:
-                        dT = torch.arange(self.segment_duration, device = 'cuda')
-                        key_len = self.segment_duration
-                    mask_op = "=="
+                    dT = torch.arange(self.segment_duration, device = 'cuda')
+                    key_len = self.segment_duration
+                mask_op = "=="
         d = d.view(1, -1, 1)
         dT = dT.view(1, -1, 1).transpose(1, 2)
         if mask_op == ">=":

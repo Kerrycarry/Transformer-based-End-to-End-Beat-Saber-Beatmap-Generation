@@ -182,14 +182,12 @@ class StreamingMultiheadAttention(StreamingModule):
                  safe_streaming: bool = True, qk_layer_norm: bool = False, kv_repeat: int = 1,
                  use_lora: bool = False, lora_r: int = 8, lora_alpha: int = 16, 
                  position_size: int = 12, pad_kv: bool = False,
-                 use_transfer_lm: bool = False, block_self_attention: bool = False, local_self_attention: bool = False, sa_window_size: int = 32, block_cross_attention: bool = False, local_cross_attention: bool = False, 
+                 use_transfer_lm: bool = False, block_self_attention: bool = False, local_cross_attention: bool = False, 
                  device=None, dtype=None):
         super().__init__()
         factory_kwargs = {'device': device, 'dtype': dtype}
         if past_context is not None:
             assert causal
-        if cross_attention and block_cross_attention:
-            embed_dim = embed_dim * position_size
         self.embed_dim = embed_dim
         self.causal = causal
         self.past_context = past_context
@@ -206,10 +204,7 @@ class StreamingMultiheadAttention(StreamingModule):
         self.lora_alpha = lora_alpha
         self.position_size = position_size
         self.block_self_attention = block_self_attention
-        self.block_cross_attention = block_cross_attention
         self.local_cross_attention = local_cross_attention
-        self.local_self_attention = local_self_attention
-        self.sa_window_size = sa_window_size
         self.pad_kv = pad_kv
         self.use_transfer_lm = use_transfer_lm
         if cross_attention:
@@ -324,15 +319,9 @@ class StreamingMultiheadAttention(StreamingModule):
         if self.past_context is not None:
             offset = max(0, nk.shape[time_dim] - self.past_context)
         if self._is_streaming:
-            index = 0
-            if self.local_self_attention:
-                if self.block_self_attention:
-                    index = - self.sa_window_size * self.position_size
-                else:
-                    index = - self.sa_window_size
-            self._streaming_state['past_keys'] = nk[:, offset:, index:]
+            self._streaming_state['past_keys'] = nk[:, offset:]
             if v is not k:
-                self._streaming_state['past_values'] = nv[:, offset:, index:]
+                self._streaming_state['past_values'] = nv[:, offset:]
             if 'offset' in self._streaming_state:
                 self._streaming_state['offset'] += offset
             else:
@@ -395,10 +384,6 @@ class StreamingMultiheadAttention(StreamingModule):
                     bias_q = self.in_proj_bias[:dim]
                     bias_k = self.in_proj_bias[dim: 2 * dim]
                     bias_v = self.in_proj_bias[2 * dim:]
-                if self.block_cross_attention:
-                    B, T, D = query.shape
-                    assert T % self.position_size == 0
-                    query = query.view(B, -1, self.position_size * D)
                 q = nn.functional.linear(query, self.in_proj_weight[:dim], bias_q)
                 # todo: when streaming, we could actually save k, v and check the shape actually match.
                 k = nn.functional.linear(key, self.in_proj_weight[dim: 2 * dim], bias_k)
@@ -460,21 +445,28 @@ class StreamingMultiheadAttention(StreamingModule):
                 q, k, v = [x.float() for x in [q, k, v]]
             if self.memory_efficient:
                 if custom_attn_mask and isinstance(attn_mask, torch.Tensor):
-                    query_len = query.shape[1]
-                    key_len = key.shape[1]                    
-                    # if self.pad_kv:
-                    #     key_len = key.shape[1]
-                    #     padding_number = 16 if _efficient_attention_backend == 'xformers' else 16
-                    #     padding_needed = (padding_number - key_len % padding_number) % padding_number
-                    #     if _efficient_attention_backend == 'xformers':
-                    #         k = F.pad(k, (0, 0, 0, 0, 0, padding_needed))
-                    #         v = F.pad(v, (0, 0, 0, 0, 0, padding_needed))
-                    #     else:
-                    #         k = F.pad(k, (0, 0, 0, padding_needed))
-                    #         v = F.pad(v, (0, 0, 0, padding_needed))
-                    if _efficient_attention_backend == 'xformers':
-                        attn_mask = attn_mask.expand((q.shape[0], q.shape[2], query_len, key_len))
-                    
+                    if not self.use_transfer_lm:
+                        # When using a custom attn mask:
+                        # Move to query's device, repeat for each sample, remove align8 padding
+                        seq_len = query.shape[1]
+                        attn_mask = attn_mask.to(q.dtype)
+                        attn_mask = attn_mask.repeat((q.shape[0], 1, 1, 1))
+                        attn_mask = attn_mask[..., :seq_len, :seq_len]
+                    else:
+                        query_len = query.shape[1]
+                        key_len = key.shape[1]
+                        # if self.pad_kv:
+                        #     key_len = key.shape[1]
+                        #     padding_number = 16 if _efficient_attention_backend == 'xformers' else 16
+                        #     padding_needed = (padding_number - key_len % padding_number) % padding_number
+                        #     if _efficient_attention_backend == 'xformers':
+                        #         k = F.pad(k, (0, 0, 0, 0, 0, padding_needed))
+                        #         v = F.pad(v, (0, 0, 0, 0, 0, padding_needed))
+                        #     else:
+                        #         k = F.pad(k, (0, 0, 0, padding_needed))
+                        #         v = F.pad(v, (0, 0, 0, padding_needed))
+                        if _efficient_attention_backend == 'xformers':
+                            attn_mask = attn_mask.expand((q.shape[0], q.shape[2], query_len, key_len))
                 p = self.dropout if self.training else 0
                 if _efficient_attention_backend == 'torch':
                     if not self.use_transfer_lm:
@@ -521,9 +513,6 @@ class StreamingMultiheadAttention(StreamingModule):
                 x = self.out_proj(x) + self.lora_out_proj(x)
             else:
                 x = self.out_proj(x)
-            if self.cross_attention and self.block_cross_attention:
-                B, T, D = x.shape
-                x = x.view(B, T * self.position_size, -1)
 
         else:
             key, value = self._complete_kv(key, value)
@@ -578,7 +567,7 @@ class StreamingTransformerLayer(nn.TransformerEncoderLayer):
                  qk_layer_norm: bool = False, qk_layer_norm_cross: bool = False,
                  cross_attention: bool = False, layer_scale: tp.Optional[float] = None,
                  rope: tp.Optional[RotaryEmbedding] = None, attention_dropout: tp.Optional[float] = None,
-                 kv_repeat: int = 1, norm: str = 'layer_norm', position_size: int = 12, sa_head_num: tp.Optional[int] = None, ca_head_num: tp.Optional[int] = None,
+                 kv_repeat: int = 1, norm: str = 'layer_norm', position_size: int = 12,
                  device=None, dtype=None, pad_kv: bool = False, **kwargs):
         super().__init__(d_model, num_heads, dim_feedforward, dropout,
                          device=device, dtype=dtype, batch_first=True, **kwargs)
@@ -595,8 +584,6 @@ class StreamingTransformerLayer(nn.TransformerEncoderLayer):
             'pad_kv': pad_kv,
         }
 
-        if sa_head_num: 
-            attn_kwargs['num_heads'] = sa_head_num
         self.self_attn: StreamingMultiheadAttention = StreamingMultiheadAttention(
             causal=causal, past_context=past_context, rope=rope, qk_layer_norm=qk_layer_norm,
             kv_repeat=kv_repeat, position_size = position_size, **blockwise_attention_kwargs, **lora_kwargs, **attn_kwargs, **factory_kwargs)  # type: ignore
@@ -614,11 +601,10 @@ class StreamingTransformerLayer(nn.TransformerEncoderLayer):
             self.layer_scale_2 = LayerScale(d_model, layer_scale, **factory_kwargs)
 
         self.cross_attention: tp.Optional[nn.Module] = None
+        # musicgen case cross_attention = False, manually set it true for beatmapgen
         if 'use_transfer_lm' in blockwise_attention_kwargs:
             cross_attention = True
         if cross_attention:
-            if ca_head_num: 
-                attn_kwargs['num_heads'] = ca_head_num
             self.cross_attention = StreamingMultiheadAttention(
                 cross_attention=True, qk_layer_norm=qk_layer_norm_cross, **blockwise_attention_kwargs,
                 **attn_kwargs, **factory_kwargs)
@@ -743,12 +729,7 @@ class StreamingTransformer(StreamingModule):
             _verify_xformers_internal_compat()
 
         self.layers = nn.ModuleList()
-        sa_head_num = None
-        ca_head_num = None
-        key = 'blockwise_attention_kwargs'
-        if key in kwargs:
-            sa_head_num = kwargs[key].pop('sa_head_num', None)
-            ca_head_num = kwargs[key].pop('ca_head_num', None)
+
         for idx in range(num_layers):
             self.layers.append(
                 layer_class(
@@ -757,7 +738,7 @@ class StreamingTransformer(StreamingModule):
                     causal=causal, past_context=past_context, custom=custom,
                     memory_efficient=memory_efficient, attention_as_float32=attention_as_float32,
                     cross_attention=cross_attention, layer_scale=layer_scale, rope=self.rope,
-                    device=device, dtype=dtype, position_size = position_size, sa_head_num = sa_head_num, ca_head_num = ca_head_num, **kwargs))
+                    device=device, dtype=dtype, position_size = position_size, **kwargs))
 
         if self.checkpointing != 'none':
             for layer in self.layers:
