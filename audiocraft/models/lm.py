@@ -545,3 +545,25 @@ class LMModel(StreamingModule):
         # ensure the returned codes are all valid
         assert (out_codes >= 0).all() and (out_codes <= self.card).all()
         return out_codes
+
+
+    @torch.no_grad()
+    def compute_representation(self, codes: torch.Tensor) -> torch.Tensor:
+        B, K, T = codes.shape
+        codes = codes.contiguous()
+        # map codes [B, K, T] into pattern sequence [B, K, S] using special_token_id for masked tokens
+        pattern = self.pattern_provider.get_pattern(T)
+        sequence, sequence_indexes, sequence_mask = pattern.build_pattern_sequence(
+            codes, self.special_token_id
+        )
+        
+        # apply model on pattern sequence
+        
+        max_gen_len = sequence.shape[-1]
+        input_ = sum([self.emb[k](sequence[:, k]) for k in range(K)]) # batch, sequence, dim
+        out = self.transformer(input_, cross_attention_src=None,
+                               src_mask = None)
+        if self.out_norm:
+            gen_representation = self.out_norm(out)
+        assert gen_representation.shape[1] == max_gen_len
+        return gen_representation

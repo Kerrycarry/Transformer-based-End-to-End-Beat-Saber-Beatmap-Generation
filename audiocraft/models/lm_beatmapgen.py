@@ -166,7 +166,7 @@ class BeatmapLMModel(StreamingModule):
         self.dim = dim
         self.pattern_provider = pattern_provider
         # self.two_step_cfg = two_step_cfg
-        self.emb = nn.ModuleList([ScaledEmbedding(embed_dim, dim, lr=emb_lr) for _ in range(n_q)])
+        # self.emb = nn.ModuleList([ScaledEmbedding(embed_dim, dim, lr=emb_lr) for _ in range(n_q)])
         self.difficulty_num = difficulty_num
         self.block_self_attention = blockwise_attention_kwargs['block_self_attention']
         # beatmap token id
@@ -190,13 +190,13 @@ class BeatmapLMModel(StreamingModule):
         self.local_cross_attention = blockwise_attention_kwargs['local_cross_attention']
         if 'activation' in kwargs:
             kwargs['activation'] = get_activation_fn(kwargs['activation'])
-        self.transformer = StreamingTransformer(
-            lora_kwargs = lora_kwargs, d_model=dim, num_heads=num_heads, dim_feedforward=int(hidden_scale * dim), num_layers = num_layers,
-            norm=norm, norm_first=norm_first, **kwargs)
-        self.out_norm: tp.Optional[nn.Module] = None
+        # self.transformer = StreamingTransformer(
+        #     lora_kwargs = lora_kwargs, d_model=dim, num_heads=num_heads, dim_feedforward=int(hidden_scale * dim), num_layers = num_layers,
+        #     norm=norm, norm_first=norm_first, **kwargs)
+        # self.out_norm: tp.Optional[nn.Module] = None
         self.out_norm2: tp.Optional[nn.Module] = None
         if norm_first: 
-            self.out_norm = create_norm_fn(norm, dim)
+            # self.out_norm = create_norm_fn(norm, dim)
             self.out_norm2 = create_norm_fn(norm, transfer_dim)
         self.transfer_lm = StreamingTransformer(
             d_model=transfer_dim, num_heads=transfer_num_heads, dim_feedforward=int(hidden_scale * transfer_dim), num_layers = transfer_num_layers,
@@ -315,8 +315,8 @@ class BeatmapLMModel(StreamingModule):
         if weight_init is None:
             return
 
-        for emb_layer in self.emb:
-            init_layer(emb_layer, method=weight_init, init_depth=None, zero_bias_init=zero_bias_init)
+        # for emb_layer in self.emb:
+        #     init_layer(emb_layer, method=weight_init, init_depth=None, zero_bias_init=zero_bias_init)
         init_layer(self.difficulty_emb, method=weight_init, init_depth=None, zero_bias_init=zero_bias_init)
         if self.block_self_attention:
             init_layer(self.beatmap_emb, method=weight_init, init_depth=None, zero_bias_init=zero_bias_init)
@@ -327,14 +327,15 @@ class BeatmapLMModel(StreamingModule):
         if self.block_self_attention:
             init_layer(self.transfer_lm.local_pos_embedding, method=weight_init, init_depth=None, zero_bias_init=zero_bias_init)
 
-        transformer_to_initialize = [self.transformer.layers, self.transfer_lm.layers]
+        # transformer_to_initialize = [self.transformer.layers, self.transfer_lm.layers]
+        transformer_to_initialize = [self.transfer_lm.layers]
         for module in transformer_to_initialize:
             for layer_idx, tr_layer in enumerate(module):
                 depth = None
                 if depthwise_init == 'current':
                     depth = layer_idx + 1
                 elif depthwise_init == 'global':
-                    depth = len(self.transformer.layers)
+                    depth = len(module)
                 init_fn = partial(init_layer, method=weight_init, init_depth=depth, zero_bias_init=zero_bias_init)
                 tr_layer.apply(init_fn)
 

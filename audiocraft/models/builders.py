@@ -158,7 +158,8 @@ def get_beatmapgen_lm_model(cfg: omegaconf.DictConfig) -> LMModel:
 
         pattern_provider = get_codebooks_pattern_provider(n_q, codebooks_pattern_cfg)
         
-        transfer_lm_kwargs = dict_from_config(getattr(cfg, "transfer_lm"))
+        beatmapgen_lm_kwargs = dict_from_config(getattr(cfg, "beatmapgen_lm"))
+        kwargs.update(beatmapgen_lm_kwargs)
         return BeatmapLMModel(
             pattern_provider=pattern_provider,
             condition_provider=condition_provider,
@@ -168,7 +169,6 @@ def get_beatmapgen_lm_model(cfg: omegaconf.DictConfig) -> LMModel:
             attribute_dropout=attribute_dropout,
             dtype=getattr(torch, cfg.dtype),
             device=cfg.device,
-            **transfer_lm_kwargs,
             **kwargs,
         ).to(cfg.device)
     else:

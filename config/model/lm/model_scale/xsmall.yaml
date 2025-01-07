@@ -7,7 +7,7 @@ transformer_lm:
   num_heads: 2
   num_layers: 2
 
-transfer_lm:
+beatmapgen_lm:
   transfer_dim: 64
   transfer_num_heads: 4
   transfer_num_layers: 1

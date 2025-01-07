@@ -136,6 +136,11 @@ class BeatmapGenSolver(base.StandardSolver):
                          self.compression_model.num_codebooks, self.compression_model.cardinality,
                          self.compression_model.frame_rate)
         # instantiate LM model
+        self.representation_model: models.LMModel = models.builders.get_lm_model(self.cfg).to(self.device)
+        delattr(self.representation_model, 'linears')
+        if 'representation_model' in self.cfg:
+            state_dict = torch.load(self.cfg.representation_model)
+            self.representation_model.load_state_dict(state_dict['best_state']['model'])
         self.model: models.BeatmapLMModel = models.builders.get_beatmapgen_lm_model(self.cfg).to(self.device)
         if self.cfg.fsdp.use:
             assert not self.cfg.autocast, "Cannot use autocast with fsdp"
@@ -169,9 +174,9 @@ class BeatmapGenSolver(base.StandardSolver):
                 f.write(f'{n}: {type(m).__name__}\n')
         #transfer learning
         trainable = []
-        if self.cfg.transformer_lm.lora_kwargs.use_lora:
+        if self.cfg.beatmapgen_lm.lora_kwargs.use_lora:
             trainable.extend(['lora_in_proj_a','lora_in_proj_b', 'lora_a', 'lora_b'])
-        if self.cfg.transformer_lm.use_mask:
+        if self.cfg.beatmapgen_lm.use_mask:
             trainable.append('mask_token_embedding')
         # 冻结模型中的所有参数
         for name,param in self.model.named_parameters():
@@ -210,9 +215,9 @@ class BeatmapGenSolver(base.StandardSolver):
             size for note, size in beatmap_kwargs.note_size.items()
             if beatmap_kwargs.note_type.get(note, False)
         )
-        self.cfg.transformer_lm.difficulty_num = difficulty_num
-        self.cfg.transformer_lm.position_size = position_size
-        self.cfg.transformer_lm.token_id_size = token_id_size
+        self.cfg.beatmapgen_lm.difficulty_num = difficulty_num
+        self.cfg.beatmapgen_lm.position_size = position_size
+        self.cfg.beatmapgen_lm.token_id_size = token_id_size
         self.cfg.dataset.position_size = position_size
         self.cfg.dataset.token_id_size = token_id_size
         self.cfg.dataset.note_type = {f"use_{key}":value for key, value in beatmap_kwargs["note_type"].items()}
@@ -225,17 +230,17 @@ class BeatmapGenSolver(base.StandardSolver):
         representation = audio_token.representation
         if representation == "spectrogram":
             n_mels = audio_token.spectrogram.n_mels
-            self.cfg.transformer_lm.representation_dim = n_mels
+            self.cfg.beatmapgen_lm.representation_dim = n_mels
         elif representation in ["musicgen", "encodec"]:
             representation_dim = audio_token.encodec.representation_dim
             use_receptive_field = audio_token.encodec.use_receptive_field
-            self.cfg.transformer_lm.representation_dim = representation_dim
-            self.cfg.transformer_lm.use_receptive_field = use_receptive_field
+            self.cfg.beatmapgen_lm.representation_dim = representation_dim
+            self.cfg.beatmapgen_lm.use_receptive_field = use_receptive_field
 
-        self.cfg.transformer_lm.representation = representation
+        self.cfg.beatmapgen_lm.representation = representation
         self.cfg.dataset.representation = representation
         segment_duration = self.cfg.dataset.segment_duration
-        self.cfg.transformer_lm.segment_duration = segment_duration
+        self.cfg.beatmapgen_lm.segment_duration = segment_duration
         OmegaConf.set_struct(self.cfg, True)
         self.dataloaders = builders.get_audio_datasets(self.cfg, dataset_type=self.DATASET_TYPE)
 
@@ -421,13 +426,12 @@ class BeatmapGenSolver(base.StandardSolver):
                     assert scale is None, "Scaled compression model not supported with LM."
             if representation == "musicgen":
                 with self.autocast:
-                    with torch.no_grad():
-                        window_size = self.cfg.audio_token.musicgen.training_sequence_length
-                        tokens = self.model.compute_representation(tokens)
+                    window_size = self.cfg.audio_token.musicgen.training_sequence_length
+                    tokens = self.representation_model.compute_representation(tokens)
             code_rate = self.cfg.audio_token.encodec.code_rate
             minimum_note = self.cfg.dataset.minimum_note
             sample_rate = self.cfg.sample_rate
-            ca_window_size = self.cfg.transformer_lm.ca_window_size
+            ca_window_size = self.cfg.beatmapgen_lm.ca_window_size
             bpm_list = [info.meta.bpm for info in segment_infos]
             total_frames = [info.total_frames for info in segment_infos]
             total_code = [math.ceil(info.total_frames/self.cfg.audio_token.encodec.stride_rate) for info in segment_infos]

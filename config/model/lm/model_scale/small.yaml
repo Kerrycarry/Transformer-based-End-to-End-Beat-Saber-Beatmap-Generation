@@ -7,7 +7,9 @@ transformer_lm:
   num_heads: 16
   num_layers: 24
 
-transfer_lm:
+beatmapgen_lm:
   transfer_dim: 64
   transfer_num_heads: 8
   transfer_num_layers: 2
+
+representation_model: /root/autodl-tmp/audiocraft_download/beatmapgen_finetune_musicgen-small.th
