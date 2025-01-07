@@ -46,6 +46,21 @@
             ],
         },
         {
+            "name": "magnet_debug.sh",
+            "type": "python",
+            "request": "launch",
+            //"program": "dora",
+            "module": "dora",
+            "justMyCode": false,
+            "args": [
+                "run",
+                "solver=magnet/magnet_32khz_test",
+                "model/lm/model_scale=xsmall",
+                "conditioner=text2music",
+                "--clear"
+            ],
+        },
+        {
             "name": "beatmapgen_debug.sh",
             "type": "python",
             "request": "launch",
