@@ -16,7 +16,6 @@ run_dora_process() {
         solver=beatmapgen/beatmapgen_base_32khz \
         model/lm/model_scale=small \
         conditioner=none \
-        continue_from=/root/autodl-tmp/audiocraft_download/beatmapgen_finetune_musicgen-small.th \
         ${MORE_CONFIG[@]} > "$LOG_FILE" 2>&1 &
     DORA_PID=$!
     wait $DORA_PID

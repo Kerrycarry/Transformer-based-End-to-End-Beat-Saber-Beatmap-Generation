@@ -86,7 +86,7 @@ optim:
   lr: 0.1
   ema:
     use: true
-    updates: 10
+    updates: 100
     device: cuda
 
 logging:

@@ -467,6 +467,16 @@ class StreamingMultiheadAttention(StreamingModule):
                         #         v = F.pad(v, (0, 0, 0, padding_needed))
                         if _efficient_attention_backend == 'xformers':
                             attn_mask = attn_mask.expand((q.shape[0], q.shape[2], query_len, key_len))
+                if self.pad_kv and not self._is_streaming:
+                    key_len = key.shape[1]
+                    padding_number = 16 if _efficient_attention_backend == 'xformers' else 16
+                    padding_needed = (padding_number - key_len % padding_number) % padding_number
+                    if _efficient_attention_backend == 'xformers':
+                        k = F.pad(k, (0, 0, 0, 0, 0, padding_needed))
+                        v = F.pad(v, (0, 0, 0, 0, 0, padding_needed))
+                    else:
+                        k = F.pad(k, (0, 0, 0, padding_needed))
+                        v = F.pad(v, (0, 0, 0, padding_needed))
                 p = self.dropout if self.training else 0
                 if _efficient_attention_backend == 'torch':
                     if not self.use_transfer_lm:

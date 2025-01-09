@@ -173,23 +173,23 @@ class BeatmapGenSolver(base.StandardSolver):
             for n, m in self.model.named_modules():
                 f.write(f'{n}: {type(m).__name__}\n')
         #transfer learning
-        trainable = []
-        if self.cfg.beatmapgen_lm.lora_kwargs.use_lora:
-            trainable.extend(['lora_in_proj_a','lora_in_proj_b', 'lora_a', 'lora_b'])
-        if self.cfg.beatmapgen_lm.use_mask:
-            trainable.append('mask_token_embedding')
-        # 冻结模型中的所有参数
-        for name,param in self.model.named_parameters():
-            if name.split('.')[-1] not in trainable:  # 非LOra部分不计算梯度
-                param.requires_grad=False
-            else:
-                param.requires_grad=True
+        # trainable = []
+        # if self.cfg.beatmapgen_lm.lora_kwargs.use_lora:
+        #     trainable.extend(['lora_in_proj_a','lora_in_proj_b', 'lora_a', 'lora_b'])
+        # if self.cfg.beatmapgen_lm.use_mask:
+        #     trainable.append('mask_token_embedding')
+        # # 冻结模型中的所有参数
+        # for name,param in self.model.named_parameters():
+        #     if name.split('.')[-1] not in trainable:  # 非LOra部分不计算梯度
+        #         param.requires_grad=False
+        #     else:
+        #         param.requires_grad=True
         
-        # Iterate over each module and unfreeze its parameters
-        modules_to_unfreeze = [self.model.difficulty_emb, self.model.linear_transfer, self.model.transfer_lm, self.model.linear_out, self.model.out_norm2, self.model.beatmap_emb]
-        for module in modules_to_unfreeze:
-            for param in module.parameters():
-                param.requires_grad = True
+        # # Iterate over each module and unfreeze its parameters
+        # modules_to_unfreeze = [self.model.difficulty_emb, self.model.linear_transfer, self.model.transfer_lm, self.model.linear_out, self.model.out_norm2, self.model.beatmap_emb]
+        # for module in modules_to_unfreeze:
+        #     for param in module.parameters():
+        #         param.requires_grad = True
 
         # calculate receptive field in advanced
         maximum_duration = math.ceil(self.cfg.dataset.segment_duration * self.cfg.dataset.minimum_note * 60 / self.cfg.dataset.minimum_bpm * self.cfg.sample_rate) 
