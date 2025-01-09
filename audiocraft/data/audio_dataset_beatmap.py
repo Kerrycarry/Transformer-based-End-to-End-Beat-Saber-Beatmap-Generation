@@ -25,6 +25,7 @@ import typing as tp
 import math
 from dataclasses import field
 from typing import List
+import itertools
 
 import torch
 import torch.nn.functional as F
@@ -230,6 +231,9 @@ class Beatmap:
             if token_pos is None:
                 unsupported_note.append((color_note, "note position not in range"))
                 return
+            if not token[time_after, token_pos] == self.token_id_size:
+                unsupported_note.append((color_note, "colornote添加的位置已经有note了"))
+                return
             token_id = self.color_note_map[(color_note['color'], color_note['direction'])]
             token[time_after, token_pos] = token_id
 
@@ -313,24 +317,28 @@ class Beatmap:
                 if not duration_is_integer:
                     unsupported_note.append((obstacle, "duration时间不是minimum note的倍数"))
                     return
-            if not token[time_after, token_pos] == self.token_id_size:
-                unsupported_note.append((obstacle, "obstacle添加的位置已经有note了"))
-                return
+                if duration_time_after == 0:
+                    unsupported_note.append((obstacle, "duration时间等于0"))
+                    return
+            # tokenize_obstacle does not need check this
+            # if not token[time_after, token_pos] == self.token_id_size:
+            #     unsupported_note.append((obstacle, "obstacle添加的位置已经有note了"))
+            #     return
             posX = obstacle['posX']
             width = obstacle['width']
             posY = obstacle['posY']
             posX_list = list(range(posX, posX+width))
             posY_list = list(range(posY, 3))
 
-            for x in range(posX_list):
-                for y in range(posY_list):
-                    token_pos = self.position_map.get((obstacle['posX']+x, obstacle['posY']+y), None)
+            for x in posX_list:
+                for y in posY_list:
+                    token_pos = self.position_map.get((x, y), None)
                     if token_pos is None:
                         unsupported_note.append((obstacle, "note position not in range"))
                         return
-                    if token[time_after, token_pos] != self.token_id_size:
-                        unsupported_note.append((obstacle, "obstacle添加的位置已经有note了"))
-                        return
+                    # if token[time_after, token_pos] != self.token_id_size:
+                    #     unsupported_note.append((obstacle, "obstacle添加的位置已经有note了"))
+                    #     return
                     token[time_after, token_pos] = self.obstacle_head_id
                     if is_continued:
                         token[time_after + duration_time_after, token_pos] = self.obstacle_tail_id
@@ -463,19 +471,20 @@ class Beatmap:
                 elif self.use_obstacles:
                     if token_id == self.obstacle_head_id:
                         stack = obstacles_head_stack
+                        stack.setdefault(posX, []).append(posY)
                     elif token_id == self.obstacle_tail_id:
                         stack = obstacles_tail_stack
-                    else:
-                        continue
-                    stack.setdefault(posX, []).append(posY)
+                        stack.setdefault(posX, []).append(posY)
 
                 if pos == 11:
                     for index, stack in enumerate([obstacles_head_stack, obstacles_tail_stack]):
                         if len(stack) == 0:
                             continue
                         full_height_flag = None
+                        last_posX = None
                         sorted_items = sorted(stack.items())
                         temp_obstacles = []
+                        # handle one column of obstacle , if find multiple column with same height next to each other, combine them into one obstacle
                         for posX, posY_list in sorted_items:
                             if 0 in posY_list:
                                 posY = 0
@@ -485,8 +494,8 @@ class Beatmap:
                                 posY = 2
                                 height = 3
                                 current_flag = False
-                            duration = round(self.threadhold_duration_obstacles_in_sec * bpm / 60 / self.threadhold_duration_obstacles_tolerance)*self.threadhold_duration_obstacles_tolerance
-                            if full_height_flag is not None and full_height_flag == current_flag:
+                            duration = round(self.threadhold_duration_obstacles_in_sec * bpm / 60, 3)
+                            if full_height_flag is not None and full_height_flag == current_flag and posX-1 == last_posX:
                                 temp_obstacles[-1]['width'] += 1
                             else:
                                 temp_obstacles.append({
@@ -500,16 +509,30 @@ class Beatmap:
                                     "laneRotation": 0,
                                 })
                             full_height_flag = current_flag
+                            last_posX = posX
                         if index == 0:
                             obstacles += temp_obstacles
                         else:
+                            # tail case
                             for one_obstacle in reversed(obstacles):
                                 if len(temp_obstacles) == 0:
                                     break
                                 for one_temp in temp_obstacles[:]:
-                                    if all(one_obstacle[key] == one_temp[key] for key in ['posX', 'posY', 'width', 'height']):
-                                        one_obstacle['duration'] = one_temp['time']-one_obstacle['time']
-                                        temp_obstacles.remove(one_temp)
+                                    if all(one_obstacle[key] == one_temp[key] for key in ['posX', 'posY', 'width', 'height', 'duration']):
+                                        #check if any other notes are between them
+                                        posX = one_temp['posX']
+                                        width = one_temp['width']
+                                        posY = one_temp['posY']
+                                        posX_list = list(range(posX, posX+width))
+                                        posY_list = list(range(posY, 3))
+                                        x_y_list = list(itertools.product(posX_list, posY_list))
+                                        pos_list = [self.position_map.get(element) for element in x_y_list]
+                                        _, start_time = self.time_map(one_obstacle['time'])
+                                        _, end_time = self.time_map(one_temp['time'])
+                                        subset = tokens[start_time+1:end_time, pos_list]
+                                        if torch.all(subset == self.token_id_size):
+                                            one_obstacle['duration'] = one_temp['time']-one_obstacle['time']
+                                            temp_obstacles.remove(one_temp)
                         stack.clear()
                         
 
@@ -539,32 +562,29 @@ class Beatmap:
             output += "".join(f"{item}\n" for item in diff2)
 
             return output, diff1, diff2
+        def process_note_data(note_data, ignored):
+            return [
+                tuple(
+                    (key, float(value) if key in {'time', 'tailTime'} else value)
+                    for key, value in sorted(note.items())
+                    if key not in ignored and not isinstance(value, dict)
+                )
+                for note in note_data
+            ]
+            
         result = {}
         origin_data_difficulty = origin_data['difficulty']
         reconstructed_data_difficulty = reconstructed_data['difficulty']
+        ignored_keys = {'colorNotes':['angleOffset'], 'chains':['sliceCount', 'squish'], 'arcs':['lengthMultiplier','tailLengthMultiplier', 'midAnchor'],'obstacles': ['duration']}
         for note_type in self.note_types:
             result_note_type = {}
             output = f"*************************************\n"
             output += f"比较{note_type}, origin_len = {len(origin_data_difficulty[note_type])}, reconstructed_len = {len(reconstructed_data_difficulty[note_type])}\n"
             output += f"直接比较: {origin_data_difficulty[note_type] == reconstructed_data_difficulty[note_type]}\n"
 
-            ignored_keys = {'laneRotation', 'sliceCount', 'squish', 'tailLaneRotation', 'lengthMultiplier', 'midAnchor', 'tailLengthMultiplier'}  
-            data1 = [
-                tuple(
-                    (key, float(value) if key in {'time', 'tailTime'} else value)
-                    for key, value in sorted(note.items())
-                    if key not in ignored_keys and not isinstance(value, dict)
-                )
-                for note in origin_data_difficulty[note_type]
-            ]
-            data2 = [
-                tuple(
-                    (key, float(value) if key in {'time', 'tailTime'} else value)
-                    for key, value in sorted(note.items())
-                    if key not in ignored_keys and not isinstance(value, dict)
-                )
-                for note in reconstructed_data_difficulty[note_type]
-            ]
+            
+            data1 = process_note_data(origin_data_difficulty[note_type], ignored_keys[note_type])
+            data2 = process_note_data(reconstructed_data_difficulty[note_type], ignored_keys[note_type])
             
             counter1 = set(data1)
             counter2 = set(data2)
@@ -584,23 +604,16 @@ class Beatmap:
             result[note_type] = result_note_type
         # deal with special case
         unsupported_note = [note for note, msg in unsupported_note]
-        unsupported_data = [
-                tuple(
-                    (key, float(value) if key in {'time', 'tailTime'} else value)
-                    for key, value in sorted(note.items())
-                    if key not in ignored_keys and not isinstance(value, dict)
-                )
-                for note in unsupported_note
-            ]
-        # deal with angleoffset usage, multiple notes on same spots
-        colorNotes_result = result['colorNotes']
-        if colorNotes_result['origin_len'] == colorNotes_result['reconstructed_len'] or result_note_type['not_equal_num'] < self.equal_threadhold :
-            colorNotes_result['same']=True
+        unsupported_data = process_note_data(unsupported_note, list(ignored_keys.values()))
 
-        # it is ok if bombNote and chain are not added as long as they are identified as unsupported note during tokenization
+        # it is ok if notes not added as long as they are identified as unsupported note during tokenization
         for note_type in self.note_types:
-            if note_type != "colorNotes" and set(result[note_type]['diff1']).issubset(unsupported_data) and len(result[note_type]['diff2']) == 0:
+            if set(result[note_type]['diff1']).issubset(unsupported_data) and len(result[note_type]['diff2']) == 0:
                 result[note_type]['same']=True
+        
+        colorNotes_result = result['colorNotes']
+        if result_note_type['not_equal_num'] >= self.equal_threadhold :
+            colorNotes_result['same']=False
         return result
 
 @dataclass(order=True)
