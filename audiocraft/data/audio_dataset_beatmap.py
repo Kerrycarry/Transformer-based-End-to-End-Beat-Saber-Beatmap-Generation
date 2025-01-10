@@ -906,6 +906,7 @@ class AudioDataset:
         self.minimum_bpm = minimum_bpm
         self.maximum_bpm = maximum_bpm
         self.representation = representation
+        self.segment_duration_padded = self.segment_duration * self.minimum_note / self.minimum_bpm * 60
         if not load_wav:
             assert segment_duration is not None
         self.permutation_on_files = permutation_on_files
@@ -1028,7 +1029,8 @@ class AudioDataset:
                     n_frames = resample_sample.shape[-1]
                     target_frames = self.traditional_round(segment_duration_in_sec * self.sample_rate)
                     hop_length = None
-                resample_sample = F.pad(resample_sample, (0, target_frames - n_frames))
+                target_frames_padded = self.traditional_round(self.segment_duration_padded * self.sample_rate)
+                resample_sample = F.pad(resample_sample, (0, target_frames_padded - n_frames))
                 # 打开beatmap
                 with open(file_meta.beatmap_file_path, 'r', encoding = 'utf-8') as f:
                     beatmap_file = json.load(f)
@@ -1062,9 +1064,6 @@ class AudioDataset:
         resample_sample = list(resample_sample)
         beatmap_tokens = list(beatmap_tokens)
         beatmap_tokens = torch.stack(beatmap_tokens)
-        
-        target_frames = max([sample.shape[-1] for sample in resample_sample])
-        resample_sample = [F.pad(sample, (0, target_frames - sample.shape[-1])) for sample in resample_sample]
         resample_sample = torch.stack(resample_sample)
 
         return segment_infos, resample_sample, beatmap_tokens
