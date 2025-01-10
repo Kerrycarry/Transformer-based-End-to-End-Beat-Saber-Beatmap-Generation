@@ -215,6 +215,16 @@ class Beatmap:
         if abs(bpm / 60 * self.threadhold_duration_obstacles_in_sec - duration) < self.threadhold_duration_obstacles_tolerance:
             is_continued = False
         return is_continued
+    def get_obstacles_pos(self, obstacles):
+        posX = obstacles['posX']
+        width = obstacles['width']
+        posY = obstacles['posY']
+        posX_list = list(range(posX, posX+width))
+        posY_list = list(range(posY, 3))
+        x_y_list = list(itertools.product(posX_list, posY_list))
+        pos_list = [self.position_map.get(element, None) for element in x_y_list]
+        return pos_list
+
     def tokenize(self, beatmap_origin: json, segment_duration_in_quaver: int, bpm: float) -> torch.Tensor:
         """
         :param beatmap data: JSON
@@ -320,29 +330,18 @@ class Beatmap:
                 if duration_time_after == 0:
                     unsupported_note.append((obstacle, "duration时间等于0"))
                     return
-            # tokenize_obstacle does not need check this
-            # if not token[time_after, token_pos] == self.token_id_size:
-            #     unsupported_note.append((obstacle, "obstacle添加的位置已经有note了"))
-            #     return
-            posX = obstacle['posX']
-            width = obstacle['width']
-            posY = obstacle['posY']
-            posX_list = list(range(posX, posX+width))
-            posY_list = list(range(posY, 3))
-
-            for x in posX_list:
-                for y in posY_list:
-                    token_pos = self.position_map.get((x, y), None)
-                    if token_pos is None:
-                        unsupported_note.append((obstacle, "note position not in range"))
-                        return
-                    # if token[time_after, token_pos] != self.token_id_size:
-                    #     unsupported_note.append((obstacle, "obstacle添加的位置已经有note了"))
-                    #     return
-                    token[time_after, token_pos] = self.obstacle_head_id
-                    if is_continued:
-                        token[time_after + duration_time_after, token_pos] = self.obstacle_tail_id
-        
+            pos_list = self.get_obstacles_pos(obstacle)
+            if None in pos_list:
+                unsupported_note.append((obstacle, "note position not in range"))
+                return
+            start_subset = token[time_after, pos_list]
+            if not torch.all(start_subset == self.token_id_size):
+                unsupported_note.append((obstacle, "obstacle添加的位置已经有note了"))
+                return
+            token[time_after, pos_list] = self.obstacle_head_id
+            if is_continued:
+                token[time_after+duration_time_after, pos_list] = self.obstacle_tail_id
+                
         if self.use_colorNotes:
             for color_note in beatmap_origin['difficulty']['colorNotes']:
                 tokenize_colorNotes(color_note)
@@ -495,6 +494,7 @@ class Beatmap:
                                 height = 3
                                 current_flag = False
                             duration = round(self.threadhold_duration_obstacles_in_sec * bpm / 60, 3)
+                            # find if multiple column with same height next to each other
                             if full_height_flag is not None and full_height_flag == current_flag and posX-1 == last_posX:
                                 temp_obstacles[-1]['width'] += 1
                             else:
@@ -520,13 +520,7 @@ class Beatmap:
                                 for one_temp in temp_obstacles[:]:
                                     if all(one_obstacle[key] == one_temp[key] for key in ['posX', 'posY', 'width', 'height', 'duration']):
                                         #check if any other notes are between them
-                                        posX = one_temp['posX']
-                                        width = one_temp['width']
-                                        posY = one_temp['posY']
-                                        posX_list = list(range(posX, posX+width))
-                                        posY_list = list(range(posY, 3))
-                                        x_y_list = list(itertools.product(posX_list, posY_list))
-                                        pos_list = [self.position_map.get(element) for element in x_y_list]
+                                        pos_list = self.get_obstacles_pos(one_temp)
                                         _, start_time = self.time_map(one_obstacle['time'])
                                         _, end_time = self.time_map(one_temp['time'])
                                         subset = tokens[start_time+1:end_time, pos_list]
@@ -562,12 +556,12 @@ class Beatmap:
             output += "".join(f"{item}\n" for item in diff2)
 
             return output, diff1, diff2
-        def process_note_data(note_data, ignored):
+        def process_note_data(note_data):
             return [
                 tuple(
                     (key, float(value) if key in {'time', 'tailTime'} else value)
                     for key, value in sorted(note.items())
-                    if key not in ignored and not isinstance(value, dict)
+                    if key not in ignored_keys and not isinstance(value, dict)
                 )
                 for note in note_data
             ]
@@ -575,7 +569,7 @@ class Beatmap:
         result = {}
         origin_data_difficulty = origin_data['difficulty']
         reconstructed_data_difficulty = reconstructed_data['difficulty']
-        ignored_keys = {'colorNotes':['angleOffset'], 'chains':['sliceCount', 'squish'], 'arcs':['lengthMultiplier','tailLengthMultiplier', 'midAnchor'],'obstacles': ['duration']}
+        ignored_keys = ['angleOffset', 'sliceCount', 'squish', 'lengthMultiplier', 'tailLengthMultiplier', 'midAnchor', 'duration']
         for note_type in self.note_types:
             result_note_type = {}
             output = f"*************************************\n"
@@ -583,8 +577,8 @@ class Beatmap:
             output += f"直接比较: {origin_data_difficulty[note_type] == reconstructed_data_difficulty[note_type]}\n"
 
             
-            data1 = process_note_data(origin_data_difficulty[note_type], ignored_keys[note_type])
-            data2 = process_note_data(reconstructed_data_difficulty[note_type], ignored_keys[note_type])
+            data1 = process_note_data(origin_data_difficulty[note_type])
+            data2 = process_note_data(reconstructed_data_difficulty[note_type])
             
             counter1 = set(data1)
             counter2 = set(data2)
@@ -604,7 +598,7 @@ class Beatmap:
             result[note_type] = result_note_type
         # deal with special case
         unsupported_note = [note for note, msg in unsupported_note]
-        unsupported_data = process_note_data(unsupported_note, list(ignored_keys.values()))
+        unsupported_data = process_note_data(unsupported_note)
 
         # it is ok if notes not added as long as they are identified as unsupported note during tokenization
         for note_type in self.note_types:
@@ -614,6 +608,28 @@ class Beatmap:
         colorNotes_result = result['colorNotes']
         if result_note_type['not_equal_num'] >= self.equal_threadhold :
             colorNotes_result['same']=False
+
+        
+        obstacles_result = result['obstacles']
+        if obstacles_result['same'] == False:
+            flag = True
+            origin_data_dict = {}
+            for origin_data in obstacles_result['diff1']:
+                obstacles = dict(origin_data)
+                origin_data_dict.setdefault(obstacles['time'], []).append(obstacles)
+            for obstacles_data in obstacles_result['diff2']:
+                obstacles = dict(obstacles_data)
+                pos_list = self.get_obstacles_pos(obstacles)
+                origin_pos_list = [] 
+                for origin_obstacles in origin_data_dict[obstacles['time']]:
+                    origin_pos_list += self.get_obstacles_pos(origin_obstacles)
+                if not set(pos_list).issubset(origin_pos_list):
+                    flag = False
+                    break
+            obstacles_result['same'] = flag
+
+            
+
         return result
 
 @dataclass(order=True)
@@ -1127,7 +1143,7 @@ class AudioDataset:
             meta = find_audio_files(root, exts, minimal=minimal_meta, resolve=True)
         return cls(meta, **kwargs)
 
-url = "http://localhost:8001/read"
+url = "http://localhost:8000/read"
 def main():
     logging.basicConfig(stream=sys.stderr, level=logging.INFO)
     parser = argparse.ArgumentParser(
