@@ -62,7 +62,7 @@ def _soundfile_info(filepath: tp.Union[str, Path]) -> AudioFileInfo:
 def audio_info(filepath: tp.Union[str, Path]) -> AudioFileInfo:
     # torchaudio no longer returns useful duration informations for some formats like mp3s.
     filepath = Path(filepath)
-    if filepath.suffix in ['.flac', '.ogg', '.egg']:  # TODO: Validate .ogg can be safely read with av_info
+    if filepath.suffix in ['.flac', '.ogg']:  # TODO: Validate .ogg can be safely read with av_info
         # ffmpeg has some weird issue with flac.
         return _soundfile_info(filepath)
     else:
@@ -126,7 +126,7 @@ def audio_read(filepath: tp.Union[str, Path], seek_time: float = 0.,
         tuple of torch.Tensor, int: Tuple containing audio data and sample rate.
     """
     fp = Path(filepath)
-    if fp.suffix in ['.flac', '.ogg', '.egg']:  # TODO: check if we can safely use av_read for .ogg
+    if fp.suffix in ['.flac', '.ogg']:  # TODO: check if we can safely use av_read for .ogg
         # There is some bug with ffmpeg and reading flac
         info = _soundfile_info(filepath)
         frames = -1 if duration <= 0 else int(duration * info.sample_rate)

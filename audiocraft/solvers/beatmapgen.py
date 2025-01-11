@@ -194,7 +194,8 @@ class BeatmapGenSolver(base.StandardSolver):
         # calculate receptive field in advanced
         maximum_duration = math.ceil(self.cfg.dataset.segment_duration * self.cfg.dataset.minimum_note * 60 / self.cfg.dataset.minimum_bpm * self.cfg.sample_rate) 
         input_size = [1, maximum_duration]
-        receptive_field_dict = receptive_field(self.compression_model.model.encoder, input_size)
+        with torch.no_grad():
+            receptive_field_dict = receptive_field(self.compression_model.model.encoder, input_size)
         target_layer = str(self.cfg.audio_token.encodec.target_layer)       
         unit_positions = [(i,) for i in range(receptive_field_dict[target_layer]['output_shape'][2])]
         rf_range = receptive_field_for_unit(receptive_field_dict, target_layer, unit_positions)
