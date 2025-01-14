@@ -39,6 +39,7 @@ dataset:
     num_samples: 0
   num_workers: 2
 
+  audio_duration_threshold: 1000
   beatmap_kwargs:
     difficulty_num: 5
     position_size: 12

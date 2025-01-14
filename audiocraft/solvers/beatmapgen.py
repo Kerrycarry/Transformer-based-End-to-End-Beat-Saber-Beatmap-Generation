@@ -310,12 +310,17 @@ class BeatmapGenSolver(base.StandardSolver):
         logits_k = logits.contiguous().view(-1,logits.size(-1))
         targets_k = targets.view(-1)
         ce = F.cross_entropy(logits_k, targets_k)
+        
+        # padding_id = self.model.token_id_size - 1
+        # note_mask = (targets == padding_id) # 0 for notes, 1 for padding
+        # logits = logits.view(B, S, P, -1)
+        # padding_logits = logits[..., padding_id]
+        # padding_logits_sum = padding_logits.sum(dim=-1)  # [B, S]
+        # padding_logits_mean = padding_logits_sum / P
+        # note_mask_all = torch.all(note_mask, dim=-1).float()
+        # rhythm_loss = F.binary_cross_entropy_with_logits(padding_logits_mean.view(-1), note_mask_all.view(-1))
+        
         return ce
-        # note_mask = (targets == self.model.outputLM.token_id_size).float()  # 0 for notes, 1 for rests
-        # rest_logits = logits[..., self.model.outputLM.token_id_size] 
-        # rhythm_loss = F.binary_cross_entropy_with_logits(rest_logits.view(-1), note_mask.view(-1))
-
-        # return ce, rhythm_loss
     
 
     def get_spec_torch(self,
@@ -377,8 +382,8 @@ class BeatmapGenSolver(base.StandardSolver):
                 x2, y2 = 260, 1
                 ratio = (bpm - x1) / (x2 - x1) * (y2 - y1) + y1
                 start_end_mid = (start + end) / 2  # 计算 (start, end) 的中点
-                distance = start_end_mid - start
-                start_end_mid = start + distance*ratio
+                # distance = start_end_mid - start
+                # start_end_mid = start + distance*ratio
 
                 while j < len(one_rf_range):
                     rf1, rf2 = one_rf_range[j][0]
@@ -535,8 +540,9 @@ class BeatmapGenSolver(base.StandardSolver):
         with self.autocast:
             logits = self.model.compute_predictions(audio_tokens, beatmap_tokens, difficulty)  # type: ignore # [B, S, P, card]
             # ce, rhythm_loss = self._compute_cross_entropy(logits, beatmap_tokens)
-            # loss = ce + rhythm_loss
             ce = self._compute_cross_entropy(logits, beatmap_tokens)
+            # loss = ce + rhythm_loss
+            # ce = self._compute_cross_entropy(logits, beatmap_tokens)
             loss = ce
         self.deadlock_detect.update('loss')
 
