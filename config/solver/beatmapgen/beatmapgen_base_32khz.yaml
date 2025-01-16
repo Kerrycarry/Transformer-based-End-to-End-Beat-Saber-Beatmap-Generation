@@ -132,3 +132,9 @@ audio_token:
     stride_rate: 640
   musicgen: # musicgen rely on encodec param
     training_sequence_length: 1501
+
+parser_pipeline:
+  read_url: http://localhost:8000/read
+  generate_url: http://localhost:8000/generate_difficulty
+  generate_difficulty_version: 3  # 1,2,3,4
+  generate_info_version: 2 # 2,4

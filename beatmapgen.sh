@@ -26,7 +26,7 @@ run_dora_process() {
 run_python_process() {
     echo "Running manifest pipeline..."
     nohup python -m audiocraft.data.audio_dataset_beatmap \
-        dataset/$SOURCE_DIR egs/$MANIFEST_DIR/data.jsonl 0.125 \
+        dataset/$SOURCE_DIR egs/$MANIFEST_DIR/data.jsonl $SOLVER_DIR $PIPELINE \
         --write_parse_switch > "$LOG_FILE" 2>&1 &
         # > "$LOG_FILE" 2>&1 &
 
@@ -63,6 +63,8 @@ TAG=$2
 if [[ "$FIRST_ARG" == "-2" ]]; then
     SOURCE_DIR=$2
     MANIFEST_DIR=$3
+    SOLVER_DIR=$4
+    PIPELINE=$5
 fi
 shift  # 移除第一个参数
 shift  # 移除第二个参数
@@ -103,7 +105,8 @@ fi
 # nohup ./beatmapgen.sh -1 default > log/beatmapgen_log.txt 2>&1 &
 # nohup ./beatmapgen.sh -1 default --clear > log/beatmapgen_log.txt 2>&1 &
 # 启动manifest制作流程
-# nohup ./beatmapgen.sh -2 CustomLevels2 bs_curated > log/beatmapgen_log.txt 2>&1 &
+# nohup ./beatmapgen.sh -2 CustomLevels2 bs_curated config/solver/beatmapgen/beatmapgen_base_32khz.yaml create_manifest > log/beatmapgen_log.txt 2>&1 &
+# nohup ./beatmapgen.sh -2 CustomLevels3 bs_curated2 config/solver/beatmapgen/beatmapgen_base_32khz.yaml create_manifest > log/beatmapgen_log.txt 2>&1 &
 # 启动 api
 # ./beatmapgen.sh -3
 # kill 掉api和dora

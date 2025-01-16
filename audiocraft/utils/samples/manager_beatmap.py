@@ -220,17 +220,17 @@ class SampleManager:
         with open((save_directory / meta.difficulty).with_suffix('.json'), 'w', encoding='utf-8') as f:
             json.dump(beatmap, f, ensure_ascii=False, indent=2)
         
-        url = "http://localhost:8000/generate_difficulty"
+        
         request_data = {
             "beatmap_file_path": (save_directory / meta.difficulty).with_suffix('.json'),
             "difficulty": meta.difficulty,
             "save_directory": save_directory,
             "beatmap_info_path": meta.beatmap_info_path,
             "beatmap_name": sample_id,
-            "difficulty_version": 3, # 1,2,3,4
-            'info_version': 2 # 2,4
+            "difficulty_version": self.xp.cfg.parser_pipeline.generate_difficulty_version,
+            'info_version': self.xp.cfg.parser_pipeline.generate_info_version 
         }
-        response = requests.get(url, params=request_data)
+        response = requests.get(self.xp.cfg.parser_pipeline.generate_url, params=request_data)
         if response.status_code != 200:
             print(f"Error: {response.status_code}, {response.text}")
         self.zip_folder(save_directory, save_directory_zip.with_suffix('.zip'))

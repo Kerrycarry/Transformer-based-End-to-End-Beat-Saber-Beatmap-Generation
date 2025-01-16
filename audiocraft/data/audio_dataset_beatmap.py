@@ -26,6 +26,7 @@ import math
 from dataclasses import field
 from typing import List
 import itertools
+from omegaconf import OmegaConf
 
 import torch
 import torch.nn.functional as F
@@ -109,13 +110,7 @@ class Beatmap:
     minimum_note: float # 最小的beat eg 0.125 =>八分音符
     token_id_size: int # 以后记得更改！
     position_size: int
-    #note toggle
-    use_colorNotes: bool
-    use_chains: bool 
-    use_bombNotes: bool
-    use_obstacles: bool
-    use_arcs: bool
-    
+
     # (posX, posY) => token pos
     position_map = {(0, 0): 0, (1, 0): 1, (2, 0): 2, (3, 0): 3, (0, 1): 4, (1, 1): 5, (2, 1): 6, (3, 1): 7, (0, 2): 8, (1, 2): 9, (2, 2): 10, (3, 2): 11}
     position_map_reversed = {value:key for key, value in position_map.items()}
@@ -124,25 +119,14 @@ class Beatmap:
     color_note_map_reversed = {value:key for key, value in color_note_map.items()}
 
     equal_threadhold = 5
+    note_types: list = field(default_factory=list)
 
     def __post_init__(self):
-        assert self.use_colorNotes, "use color note by default"
+        assert COLORNOTE in self.note_types, "use color note by default"
         # assign token id to note depending on note toggle
-        # chain, color => tokenid
-        self.note_types = []
-        if self.use_colorNotes:
-            self.note_types.append(COLORNOTE)
-        if self.use_chains:
-            self.note_types.append(CHAIN)
-        if self.use_bombNotes:
-            self.note_types.append(BOMBNOTE)
-        if self.use_arcs:
-            self.note_types.append(ARC)
-        if self.use_obstacles:
-            self.note_types.append(OBSTACLE)
-        
+        # chain, color => tokenid        
         padding_id = 18
-        if self.use_chains:
+        if CHAIN in self.note_types:
             self.chain_red_id = padding_id
             self.chain_blue_id = padding_id + 1
             padding_id = padding_id + 2
@@ -150,17 +134,17 @@ class Beatmap:
             self.chain_color_map_reversed = {value:key for key, value in self.chain_color_map.items()}
             self.threadhold_duration_chain = self.minimum_note
         # bomb    
-        if self.use_bombNotes:
+        if BOMBNOTE in self.note_types:
             self.bomb_note_id = padding_id
             padding_id += 1
         # arc
-        if self.use_arcs:
+        if ARC in self.note_types:
             self.arc_head_id = padding_id
             self.arc_tail_id = padding_id + 1
             padding_id = padding_id + 2
             self.threadhold_duration_arc = self.minimum_note * 3
         # obstacles
-        if self.use_obstacles:
+        if OBSTACLE in self.note_types:
             self.obstacle_head_id = padding_id
             self.obstacle_tail_id = padding_id + 1  # if no tail follows, assume obstacle occupies only one time spot
             padding_id = padding_id + 2
@@ -437,7 +421,7 @@ class Beatmap:
                 time_after = time * self.minimum_note
                 posX, posY = self.position_map_reversed[pos]
                 # look for color note
-                if self.use_colorNotes and token_id in self.color_note_map_reversed:
+                if COLORNOTE in self.note_types and token_id in self.color_note_map_reversed:
                     color, direction = self.color_note_map_reversed[token_id]
                     colorNotes.append({
                         "color": color,
@@ -477,7 +461,7 @@ class Beatmap:
                             "customData": {}
                             })
                 # look for chain note
-                elif self.use_chains and token_id in self.chain_color_map_reversed:
+                elif CHAIN in self.note_types and token_id in self.chain_color_map_reversed:
                     color = self.chain_color_map_reversed[token_id]
                     temp = {
                             "color": color,
@@ -506,7 +490,7 @@ class Beatmap:
                             break
                     chain_stack[color] = temp
                 # look for bomb note
-                elif self.use_bombNotes and token_id == self.bomb_note_id:
+                elif BOMBNOTE in self.note_types and token_id == self.bomb_note_id:
                     bombNotes.append({
                         "posX": posX,
                         "posY": posY,
@@ -517,7 +501,7 @@ class Beatmap:
                         "direction": 0
                         })
                 # look for arc 
-                elif self.use_arcs and token_id == self.arc_head_id:
+                elif ARC in self.note_types and token_id == self.arc_head_id:
                     # 遇到arc head token，找上一个时间同一位置的token
                     for color_note in reversed(colorNotes):
                         if time_after - color_note['time'] == self.minimum_note and posX == color_note['posX'] and posY == color_note['posY']:
@@ -526,7 +510,7 @@ class Beatmap:
                         elif time_after - color_note['time'] > self.minimum_note:
                             break
                 # look for obstacle head
-                elif self.use_obstacles:
+                elif OBSTACLE in self.note_types:
                     if token_id == self.obstacle_head_id:
                         stack = obstacles_head_stack
                         stack.setdefault(posX, []).append(posY)
@@ -771,7 +755,8 @@ def find_audio_files(input_meta: tp.List[dict],
                      resolve: bool = True,
                      minimal: bool = True,
                      progress: bool = False,
-                     workers: int = 0) -> tp.List[AudioMeta]:
+                     workers: int = 0,
+                     audio_duration_threshold: float = 1000) -> tp.List[AudioMeta]:
     """Build a list of AudioMeta from a given path,
     collecting relevant audio files and fetching meta info.
 
@@ -787,6 +772,7 @@ def find_audio_files(input_meta: tp.List[dict],
     audio_files = []
     futures: tp.List[Future] = []
     pool: tp.Optional[ThreadPoolExecutor] = None
+    fail_meta = []
     with ExitStack() as stack:
         if workers > 0:
             pool = ThreadPoolExecutor(workers)
@@ -818,11 +804,14 @@ def find_audio_files(input_meta: tp.List[dict],
             except Exception as err:
                 print("Error with", str(item), err, file=sys.stderr)
                 continue
+            if m.duration > audio_duration_threshold:
+                fail_meta.append(m)
+                continue
             meta.append(m)
             if progress:
                 print(format((1 + idx) / len(audio_files), " 3.1%"), end='\r', file=sys.stderr)
     meta.sort()
-    return meta
+    return meta, fail_meta
 
 
 def load_audio_meta(path: tp.Union[str, Path],
@@ -920,7 +909,7 @@ class AudioDataset:
                  meta: tp.List[AudioMeta],
                  token_id_size: int,
                  position_size: int,
-                 note_type: dict,
+                 note_type: list,
                  beatmap_sample_window: int,
                  minimum_note: float,
                  minimum_bpm: float,
@@ -1093,7 +1082,7 @@ class AudioDataset:
                 with open(file_meta.beatmap_file_path, 'r', encoding = 'utf-8') as f:
                     beatmap_file = json.load(f)
                 error_path = file_meta.beatmap_file_path
-                beatmap = Beatmap(minimum_note = self.minimum_note, token_id_size = self.token_id_size, position_size = self.position_size, **self.note_type)
+                beatmap = Beatmap(minimum_note = self.minimum_note, token_id_size = self.token_id_size, position_size = self.position_size, note_types = self.note_type)
                 beatmap_token, unsupported_note, beatmap_file = beatmap.tokenize(beatmap_file, seek_time_in_quaver,  seek_time_in_quaver + segment_duration_in_quaver, segment_duration_in_quaver, file_meta.bpm)
                 if len(unsupported_note[COLORNOTE]) >= Beatmap.equal_threadhold:
                     continue
@@ -1201,7 +1190,6 @@ class AudioDataset:
             meta = find_audio_files(root, exts, minimal=minimal_meta, resolve=True)
         return cls(meta, **kwargs)
 
-url = "http://localhost:8000/read"
 def main():
     logging.basicConfig(stream=sys.stderr, level=logging.INFO)
     parser = argparse.ArgumentParser(
@@ -1210,6 +1198,9 @@ def main():
     parser.add_argument('root', help='Root folder with all the audio files')
     parser.add_argument('out_originput_meta_file',
                         help='out_originput file to store the metadata, ')
+    parser.add_argument('beatmapgen_solver',
+                        help='beatmapgen configuration file')
+    parser.add_argument('pipeline', help='create_manifest, remove_unsupported_note')
     parser.add_argument('--complete',
                         action='store_false', dest='minimal', default=True,
                         help='Retrieve all metadata, even the one that are expansive '
@@ -1220,31 +1211,33 @@ def main():
     parser.add_argument('--workers',
                         default=10, type=int,
                         help='Number of workers.')
-    parser.add_argument('complex_beat_number', default=0.125, type=float,
-                        help='out_originput file to store the metadata, ')
     parser.add_argument('--write_parse_switch', default=False, action=argparse.BooleanOptionalAction)
     args = parser.parse_args()
     # use deno api to parse beatmap
-    request_data = {
-        "directory": args.root, 
-        "complex_beat_number": args.complex_beat_number,
-        "write_parse_switch": args.write_parse_switch
-    }
-    response = requests.get(url, params=request_data)
-    if response.status_code == 200:
-        data = response.json()
-        out_originput_meta = data.pop('output_meta')  # 提取并删除 out_originput_meta
+    cfg = OmegaConf.load(args.beatmapgen_solver)
+    assert args.pipeline in ["create_manifest", "remove_unsupported_note"]
+    if args.pipeline == "create_manifest":
+        request_data = {
+            "directory": args.root, 
+            "complex_beat_number": cfg.dataset.beatmap_kwargs.minimum_note,
+            "write_parse_switch": args.write_parse_switch
+        }
+        response = requests.get(cfg.parser_pipeline.read_url, params=request_data)
+        if response.status_code == 200:
+            data = response.json()
+            out_originput_meta = data.pop('output_meta')  # 提取并删除 out_originput_meta
+        else:
+            print(f"Error: {response.status_code}, {response.text}")
+            return
+        
+        meta, fail_meta = find_audio_files(out_originput_meta, DEFAULT_EXTS, progress=True,
+                                resolve=args.resolve, minimal=args.minimal, workers=args.workers, audio_duration_threshold=cfg.dataset.audio_duration_threshold)
+        save_audio_meta(args.out_originput_meta_file, meta)
         print("request finished, summary:")
+        data['load'] -= len(fail_meta)
+        data['fail_audio'] = [meta.id for meta in fail_meta]
         print(data)
-
-    else:
-        print(f"Error: {response.status_code}, {response.text}")
-        return
-    
-    meta = find_audio_files(out_originput_meta, DEFAULT_EXTS, progress=True,
-                            resolve=args.resolve, minimal=args.minimal, workers=args.workers)
-    save_audio_meta(args.out_originput_meta_file, meta)
-
-
+    elif args.pipeline == "remove_unsupported_note":
+        print("")
 if __name__ == '__main__':
     main()

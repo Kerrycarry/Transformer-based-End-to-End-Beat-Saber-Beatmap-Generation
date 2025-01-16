@@ -221,7 +221,7 @@ class BeatmapGenSolver(base.StandardSolver):
         self.cfg.beatmapgen_lm.token_id_size = token_id_size
         self.cfg.dataset.position_size = position_size
         self.cfg.dataset.token_id_size = token_id_size
-        self.cfg.dataset.note_type = {f"use_{key}":value for key, value in beatmap_kwargs["note_type"].items()}
+        self.cfg.dataset.note_type = [key for key, value in beatmap_kwargs["note_type"].items() if value]
         self.cfg.dataset.beatmap_sample_window = beatmap_sample_window
         self.cfg.dataset.minimum_note = minimum_note
         self.cfg.dataset.minimum_bpm = minimum_bpm
