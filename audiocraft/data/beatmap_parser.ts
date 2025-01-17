@@ -121,11 +121,13 @@ export const read = async (
           bpm: info.audio.bpm,
           njs: difficultyTuple[2],
           njsoffset: difficultyTuple[3],
-          colorNotes_num: difficultyFile.colorNotes.length,
-          bombNotes_num: difficultyFile.bombNotes.length,
-          obstacles_num: difficultyFile.obstacles.length,
-          arcs_num: difficultyFile.arcs.length,
-          chains_num: difficultyFile.chains.length,
+          note_num: {
+            colorNotes: difficultyFile.colorNotes.length,
+            bombNotes: difficultyFile.bombNotes.length,
+            obstacles: difficultyFile.obstacles.length,
+            arcs: difficultyFile.arcs.length,
+            chains: difficultyFile.chains.length,
+          },
         });
         load++;
       }
