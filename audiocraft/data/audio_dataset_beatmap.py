@@ -10,7 +10,7 @@ without_origin having to scan again the folders, we precompute some metadata
 import argparse
 import copy
 import requests
-from concurrent.futures import ThreadPoolExecutor, Future, ProcessPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, Future
 from dataclasses import dataclass, fields
 from contextlib import ExitStack
 from functools import lru_cache
@@ -118,7 +118,6 @@ class Beatmap:
     color_note_map_reversed = {value:key for key, value in color_note_map.items()}
 
     equal_threadhold = 10
-    note_num_threadhold = 10
     note_types: list
 
     def __post_init__(self):
@@ -388,6 +387,8 @@ class Beatmap:
                 is_integer, time_after = self.time_map(note['time'])
                 if not is_integer:
                     continue
+                if time_after >= end_time_in_quaver:
+                    break
                 note['time'] = note['time'] - seek_time_in_quaver * self.minimum_note
                 if 'tailTime' in note:
                     tail_is_integer, tail_time_after = self.time_map(note['tailTime'])
@@ -864,7 +865,7 @@ def find_audio_files(input_meta: tp.List[dict],
                      minimal: bool = True,
                      progress: bool = False,
                      workers: int = 0,
-                     audio_duration_threshold: float = 1000) -> tp.List[AudioMeta]:
+                     audio_duration_threshold: float = 1000, nps_threshold: float = 1) -> tp.List[AudioMeta]:
     """Build a list of AudioMeta from a given path,
     collecting relevant audio files and fetching meta info.
 
@@ -912,7 +913,7 @@ def find_audio_files(input_meta: tp.List[dict],
             except Exception as err:
                 print("Error with", str(item), err, file=sys.stderr)
                 continue
-            if m.duration > audio_duration_threshold:
+            if m.duration > audio_duration_threshold or m.note_num['colorNotes'] / m.duration < nps_threshold:
                 fail_meta.append(m)
                 continue
             meta.append(m)
@@ -1337,11 +1338,11 @@ def main():
             return
         
         meta, fail_meta = find_audio_files(out_originput_meta, DEFAULT_EXTS, progress=True,
-                                resolve=args.resolve, minimal=args.minimal, workers=args.workers, audio_duration_threshold=cfg.dataset.audio_duration_threshold)
+                                resolve=args.resolve, minimal=args.minimal, workers=args.workers, audio_duration_threshold=cfg.dataset.audio_duration_threshold, nps_threshold=cfg.dataset.nps_threshold)
         save_audio_meta(args.out_originput_meta_file, meta)
         print("request finished, summary:")
         data['load'] -= len(fail_meta)
-        data['fail_audio'] = [meta.id for meta in fail_meta]
+        data['fail_audio_nps'] = [meta.id for meta in fail_meta]
         print(data)
     elif args.pipeline == "remove_unsupported_note":
         beatmap_kwargs = cfg.dataset.beatmap_kwargs
@@ -1365,7 +1366,7 @@ def main():
             reconstructed_beatmap_file = beatmap.detokenize(beatmap_token, item.bpm)
             result = beatmap.check_difference(beatmap_file, reconstructed_beatmap_file, unsupported_note)
 
-            if all([result[note]['same'] for note in beatmap.note_types]) and beatmap_file['difficulty'][COLORNOTE] > beatmap.note_num_threadhold:
+            if all([result[note]['same'] for note in beatmap.note_types]):
                 file_path = item.beatmap_file_path
                 full_path = Path(file_path)
                 path = full_path.parent
@@ -1378,7 +1379,7 @@ def main():
                 item.supported_file_path = str(supported_file_path)
                 supported_meta.append(item)
             else:
-                fail_meta.append((item.id, result[COLORNOTE]['not_equal_num'], beatmap_file['difficulty'][COLORNOTE]))
+                fail_meta.append((item.id, result[COLORNOTE]['not_equal_num']))
         supported_meta.sort()
         save_audio_meta(args.out_originput_meta_file, supported_meta)
         print("request finished, summary:")
