@@ -39,8 +39,7 @@ dataset:
     num_samples: 0
   num_workers: 2
 
-  audio_duration_threshold: 1000
-  nps_threshold: 1
+
   beatmap_kwargs:
     difficulty_num: 5
     position_size: 12
@@ -139,3 +138,5 @@ parser_pipeline:
   generate_url: http://localhost:8000/generate_difficulty
   generate_difficulty_version: 3  # 1,2,3,4
   generate_info_version: 2 # 2,4
+  audio_duration_threshold: 1000
+  nps_threshold: 1

@@ -78,6 +78,7 @@ class AudioMeta(BaseInfo):
     njsoffset: float
     note_num: Dict[str, int]
     supported_file_path: tp.Optional[str] = None # path to supported beatmap_file
+    beatmap_token_path: tp.Optional[str] = None
     duration: tp.Optional[float] = None
     amplitude: tp.Optional[float] = None
     weight: tp.Optional[float] = None
@@ -165,7 +166,7 @@ class Beatmap:
         }
     
 
-    def sample_beatmap_file(self, beatmap: json, seek_time_in_quaver: int, end_time_in_quaver: int, bpm: float):
+    def sample_beatmap_file(self, beatmap: dict, seek_time_in_quaver: int, end_time_in_quaver: int, bpm: float) -> dict:
         def binary_search(note_list, target):
             """
             二分搜索：如果目标值在列表中，返回其索引；否则返回第一个比目标值大的元素的索引。
@@ -182,35 +183,35 @@ class Beatmap:
         beatmap_difficulty = beatmap['difficulty']
         for one_type in self.note_types:
             note_list = beatmap_difficulty[one_type]
+            # if there is no note, continue
             if len(note_list) == 0:
                 continue
             _, last_index_time = self.time_map(note_list[-1]['time'])
             _, first_index_time = self.time_map(note_list[0]['time'])
+            # if target range has no note, continue
             if seek_time_in_quaver > last_index_time or end_time_in_quaver <= first_index_time:
                 beatmap_difficulty[one_type] = []
                 continue
             seek_time_index = binary_search(note_list, seek_time_in_quaver)
             end_time_index = binary_search(note_list, end_time_in_quaver)
             note_list_sample = []
+            # check if time is multiple of minimum note, if not, continue
             for note in note_list[seek_time_index:end_time_index]:
-                is_integer, time_after = self.time_map(note['time'])
-                # if not( is_integer and time_after >= seek_time_in_quaver and time_after < end_time_in_quaver):
-                #     continue
+                _, time_after = self.time_map(note['time'])
                 note['time'] = note['time'] - seek_time_in_quaver * self.minimum_note
                 if 'tailTime' in note:
-                    tail_is_integer, tail_time_after = self.time_map(note['tailTime'])
-                    if not( tail_is_integer and tail_time_after >= seek_time_in_quaver and tail_time_after < end_time_in_quaver):
+                    _, tail_time_after = self.time_map(note['tailTime'])
+                    if not(tail_time_after < end_time_in_quaver):
                         continue
                     note['tailTime'] = note['tailTime'] - seek_time_in_quaver * self.minimum_note
                 if 'duration' in note:
                     duration = note['duration']
                     is_continued = self.obstacles_is_continued(bpm, duration) 
                     if is_continued:
-                        duration_is_integer, duration_time_after = self.time_map(duration)
-                        if not( duration_is_integer and (time_after+duration_time_after) >= seek_time_in_quaver and (time_after+duration_time_after) < end_time_in_quaver):
+                        _, duration_time_after = self.time_map(duration)
+                        if not((time_after+duration_time_after) < end_time_in_quaver):
                             continue
                 note_list_sample.append(note)
-                
             beatmap_difficulty[one_type] = note_list_sample
         #清空lightshow，方便后续测试
         beatmap["lightshow"] = self.empty_light
@@ -238,20 +239,7 @@ class Beatmap:
         pos_list = [self.position_map.get(element, None) for element in x_y_list]
         return pos_list
 
-    def tokenize(self, beatmap_origin: json, seek_time_in_quaver: int, end_time_in_quaver: int, segment_duration_in_quaver: int, bpm: float, debug: bool = False) -> torch.Tensor:
-        # def binary_search(note_list, target):
-        #     """
-        #     二分搜索：如果目标值在列表中，返回其索引；否则返回第一个比目标值大的元素的索引。
-        #     """
-        #     left, right = 0, len(note_list)
-        #     while left < right:
-        #         mid = (left + right) // 2
-        #         _, current_time = self.time_map(note_list[mid]['time'])
-        #         if current_time < target:
-        #             left = mid + 1
-        #         else:
-        #             right = mid
-        #     return left
+    def tokenize(self, beatmap_origin: json, segment_duration_in_quaver: int, bpm: float, debug: bool = False) -> torch.Tensor:
         unsupported_note = {}
         unsupported_note[COLORNOTE] = []
         unsupported_note[CHAIN] = []
@@ -371,14 +359,6 @@ class Beatmap:
             # if there is no note, continue
             if len(note_list) == 0:
                 continue
-            # _, last_index_time = self.time_map(note_list[-1]['time'])
-            # _, first_index_time = self.time_map(note_list[0]['time'])
-            # if target range has no note, continue
-            # if seek_time_in_quaver > last_index_time or end_time_in_quaver <= first_index_time:
-            #     beatmap_difficulty[one_type] = []
-            #     continue
-            # seek_time_index = binary_search(note_list, seek_time_in_quaver)
-            # end_time_index = binary_search(note_list, end_time_in_quaver)
             note_list_sample = []
             note_list_sample_supported = []
             # check if time is multiple of minimum note, if not, continue
@@ -387,20 +367,18 @@ class Beatmap:
                 is_integer, time_after = self.time_map(note['time'])
                 if not is_integer:
                     continue
-                if time_after >= end_time_in_quaver:
+                if time_after >= segment_duration_in_quaver:
                     break
-                note['time'] = note['time'] - seek_time_in_quaver * self.minimum_note
                 if 'tailTime' in note:
                     tail_is_integer, tail_time_after = self.time_map(note['tailTime'])
-                    if not( tail_is_integer and tail_time_after < end_time_in_quaver):
+                    if not( tail_is_integer and tail_time_after < segment_duration_in_quaver):
                         continue
-                    note['tailTime'] = note['tailTime'] - seek_time_in_quaver * self.minimum_note
                 if 'duration' in note:
                     duration = note['duration']
                     is_continued = self.obstacles_is_continued(bpm, duration) 
                     if is_continued:
                         duration_is_integer, duration_time_after = self.time_map(duration)
-                        if not(duration_is_integer and (time_after+duration_time_after) < end_time_in_quaver and duration_time_after != 0):
+                        if not(duration_is_integer and (time_after+duration_time_after) < segment_duration_in_quaver and duration_time_after != 0):
                             continue
                 is_supported = process_mapping[one_type](note)
                 note_list_sample.append(note)
@@ -415,100 +393,7 @@ class Beatmap:
         beatmap_origin["lightshow"] = self.empty_light
         beatmap_supported['lightshow'] = self.empty_light
         return token, unsupported_note, beatmap_origin, beatmap_supported
-    def tokenize_supported(self, beatmap_origin: json, seek_time_in_quaver: int, end_time_in_quaver: int, segment_duration_in_quaver: int, bpm: float, debug: bool = False) -> torch.Tensor:
-        def binary_search(note_list, target):
-            """
-            二分搜索：如果目标值在列表中，返回其索引；否则返回第一个比目标值大的元素的索引。
-            """
-            left, right = 0, len(note_list)
-            while left < right:
-                mid = (left + right) // 2
-                _, current_time = self.time_map(note_list[mid]['time'])
-                if current_time < target:
-                    left = mid + 1
-                else:
-                    right = mid
-            return left
-        token = torch.full((segment_duration_in_quaver, self.position_size), self.token_id_size, dtype=torch.int64)
-        def tokenize_colorNotes(color_note):
-            _, time_after = self.time_map(color_note['time'])
-            token_pos = self.position_map.get((color_note['posX'], color_note['posY']), None)
-            token_id = self.color_note_map[(color_note['color'], color_note['direction'])]
-            token[time_after, token_pos] = token_id
-        def tokenize_chain(chain):
-            _, tail_time_after = self.time_map(chain['tailTime'])
-            token_pos = self.position_map.get((chain['posX'], chain['posY']), None)
-            token_pos = self.position_map.get((chain['tailPosX'], chain['tailPosY']), None)
-            token[tail_time_after, token_pos] = self.chain_color_map[chain['color']]
-        def tokenize_bomb(bomb):
-            _, time_after = self.time_map(bomb['time'])
-            token_pos = self.position_map.get((bomb['posX'], bomb['posY']), None)
-            token[time_after, token_pos] = self.bomb_note_id
-        def tokenize_arc(arc):
-            _, head_time_after = self.time_map(arc['time'])
-            _, tail_time_after = self.time_map(arc['tailTime'])
-            head_token_pos = self.position_map.get((arc['posX'], arc['posY']), None)
-            tail_token_pos = self.position_map.get((arc['tailPosX'], arc['tailPosY']), None)
-            token[head_time_after+1, head_token_pos] = self.arc_head_id
-            token[tail_time_after-1, tail_token_pos] = self.arc_tail_id
-        def tokenize_obstacle(obstacle):
-            _, time_after = self.time_map(obstacle['time'])
-            duration = obstacle['duration']
-            is_continued = self.obstacles_is_continued(bpm, duration)                 
-            pos_list = self.get_obstacles_pos(obstacle)
-            token[time_after, pos_list] = self.obstacle_head_id
-            if is_continued:
-                _, duration_time_after = self.time_map(duration)
-                token[time_after+duration_time_after, pos_list] = self.obstacle_tail_id
-        beatmap_difficulty = beatmap_origin['difficulty']
-        process_mapping = {
-            COLORNOTE: tokenize_colorNotes,
-            CHAIN: tokenize_chain,
-            BOMBNOTE: tokenize_bomb,
-            ARC: tokenize_arc,
-            OBSTACLE: tokenize_obstacle,
-        }
-        
-        for one_type in self.note_types:
-            note_list = beatmap_difficulty[one_type]
-            # if there is no note, continue
-            if len(note_list) == 0:
-                continue
-            _, last_index_time = self.time_map(note_list[-1]['time'])
-            _, first_index_time = self.time_map(note_list[0]['time'])
-            # if target range has no note, continue
-            if seek_time_in_quaver > last_index_time or end_time_in_quaver <= first_index_time:
-                beatmap_difficulty[one_type] = []
-                continue
-            seek_time_index = binary_search(note_list, seek_time_in_quaver)
-            end_time_index = binary_search(note_list, end_time_in_quaver)
-            note_list_sample = []
-            # check if time is multiple of minimum note, if not, continue
-            for note in note_list[seek_time_index:end_time_index]:
-                is_integer, time_after = self.time_map(note['time'])
-                if not is_integer:
-                    continue
-                note['time'] = note['time'] - seek_time_in_quaver * self.minimum_note
-                if 'tailTime' in note:
-                    tail_is_integer, tail_time_after = self.time_map(note['tailTime'])
-                    if not( tail_is_integer and tail_time_after < end_time_in_quaver):
-                        continue
-                    note['tailTime'] = note['tailTime'] - seek_time_in_quaver * self.minimum_note
-                if 'duration' in note:
-                    duration = note['duration']
-                    is_continued = self.obstacles_is_continued(bpm, duration) 
-                    if is_continued:
-                        duration_is_integer, duration_time_after = self.time_map(duration)
-                        if not(duration_is_integer and (time_after+duration_time_after) < end_time_in_quaver and duration_time_after != 0):
-                            continue
-                process_mapping[one_type](note)
-                note_list_sample.append(note)
-                
-            beatmap_difficulty[one_type] = note_list_sample
-        #清空lightshow，方便后续测试
-        beatmap_origin["lightshow"] = self.empty_light
-        
-        return token, beatmap_origin
+    
     def detokenize(self, tokens: torch.Tensor, bpm: float):
         beatmap_reconstructe = {'difficulty':{}}
         colorNotes = []
@@ -795,11 +680,7 @@ class SegmentInfo(BaseInfo):
     hop_length: int
 
     origin_sample: torch.Tensor
-    beatmap_file: json
-    beatmap_class: Beatmap
-
-    audio_token: tp.Optional[torch.Tensor] = None
-    beatmap_token: tp.Optional[torch.Tensor] = None
+    beatmap_file: dict
     
 DEFAULT_EXTS = ['.wav', '.mp3', '.flac', '.ogg', '.m4a', '.egg']
 
@@ -854,6 +735,8 @@ def _resolve_audio_meta(m: AudioMeta, fast: bool = True) -> AudioMeta:
         m.beatmap_info_path = dora.git_save.to_absolute_path(m.beatmap_info_path)
     if m.supported_file_path is not None and not is_abs(m.supported_file_path):
         m.supported_file_path = dora.git_save.to_absolute_path(m.supported_file_path)
+    if m.beatmap_token_path is not None and not is_abs(m.beatmap_token_path):
+        m.beatmap_token_path = dora.git_save.to_absolute_path(m.beatmap_token_path)
     if m.info_path is not None and not is_abs(m.info_path.zip_path):
         m.info_path.zip_path = dora.git_save.to_absolute_path(m.song_path)
     return m
@@ -1017,14 +900,12 @@ class AudioDataset:
     def __init__(self,
                  meta: tp.List[AudioMeta],
                  token_id_size: int,
-                 position_size: int,
-                 note_type: list,
                  beatmap_sample_window: int,
                  minimum_note: float,
                  minimum_bpm: float,
                  maximum_bpm: float,
                  representation: str,
-                 audio_duration_threshold: float,
+                 maximum_duration: float,
                  segment_duration: tp.Optional[float] = None,
                  shuffle: bool = True,
                  num_samples: int = 10_000,
@@ -1074,15 +955,12 @@ class AudioDataset:
         self.current_epoch: tp.Optional[int] = None
         self.load_wav = load_wav
         self.token_id_size = token_id_size
-        self.position_size = position_size
-        self.note_type = note_type
         self.beatmap_sample_window = beatmap_sample_window
         self.minimum_note = minimum_note
         self.minimum_bpm = minimum_bpm
         self.maximum_bpm = maximum_bpm
         self.representation = representation
-        self.target_frames_padded = self.traditional_round(self.segment_duration * self.minimum_note / self.minimum_bpm * 60 * self.sample_rate)
-        self.audio_duration_threshold = audio_duration_threshold
+        self.target_frames_padded = maximum_duration
         if not load_wav:
             assert segment_duration is not None
         self.permutation_on_files = permutation_on_files
@@ -1173,7 +1051,7 @@ class AudioDataset:
         for retry in range(self.max_read_retry):
             # 随机抽取一个beatmap_file      
             file_meta = self.sample_file(index, rng)
-            if file_meta.bpm < self.minimum_bpm or file_meta.bpm> self.maximum_bpm or file_meta.duration > self.audio_duration_threshold:
+            if file_meta.bpm < self.minimum_bpm or file_meta.bpm> self.maximum_bpm:
                 continue
             duration_in_quaver = math.ceil(file_meta.duration / 60 * file_meta.bpm / self.minimum_note) # 音频长度用八分音符的数量来衡量
             segment_duration_in_quaver = self.segment_duration
@@ -1187,12 +1065,17 @@ class AudioDataset:
             seek_time_in_second = seek_time_in_quaver * self.minimum_note / file_meta.bpm * 60
             segment_duration_in_sec = segment_duration_in_quaver * self.minimum_note / file_meta.bpm * 60
             try:
-                # 打开beatmap
+                # 打开beatmap json
+                error_path = file_meta.supported_file_path
                 with open(file_meta.supported_file_path, 'r', encoding = 'utf-8') as f:
                     beatmap_file = json.load(f)
-                error_path = file_meta.supported_file_path
-                beatmap = Beatmap(minimum_note = self.minimum_note, token_id_size = self.token_id_size, position_size = self.position_size, note_types = self.note_type)
-                beatmap_token, beatmap_file = beatmap.tokenize_supported(beatmap_file, seek_time_in_quaver,  seek_time_in_quaver + segment_duration_in_quaver, segment_duration_in_quaver, file_meta.bpm)
+                # 打开beatmap token
+                error_path = file_meta.beatmap_token_path
+                beatmap_token = torch.load(file_meta.beatmap_token_path)
+                beatmap_token = beatmap_token[seek_time_in_quaver:seek_time_in_quaver+segment_duration_in_quaver]
+                n_frames = beatmap_token.shape[0]
+                beatmap_token = F.pad(beatmap_token, (0, segment_duration_in_quaver - n_frames), mode='constant', value=self.token_id_size)
+                beatmap_token = beatmap_token.to(torch.int64)
                 # 打开audio，使用encodec需要的sr resample整个audio
                 error_path = file_meta.song_path
                 origin_sample, sr = audio_read(file_meta.song_path, seek_time_in_second, segment_duration_in_sec, pad=False)
@@ -1213,8 +1096,8 @@ class AudioDataset:
                     hop_length = None
                 resample_sample = F.pad(resample_sample, (0, self.target_frames_padded - n_frames))
                 # 创建info
-                segment_info = SegmentInfo(file_meta, round(seek_time_in_quaver * self.minimum_note), n_frames=n_frames, total_frames=target_frames,
-                                                sample_rate=self.sample_rate, channels=origin_sample.shape[0], origin_sample=origin_sample, beatmap_file=beatmap_file, beatmap_class=beatmap, hop_length= hop_length)
+                segment_info = SegmentInfo(file_meta, seek_time_in_quaver, n_frames=n_frames, total_frames=target_frames,
+                                                sample_rate=self.sample_rate, channels=origin_sample.shape[0], origin_sample=origin_sample, beatmap_file=beatmap_file, hop_length= hop_length)
             except Exception as exc:
                 logger.warning("Error opening file %s, seek time, %d,  %r", error_path, round(seek_time_in_quaver * self.minimum_note), exc)
                 if retry == self.max_read_retry - 1:
@@ -1307,7 +1190,7 @@ def main():
                         help='out_originput file to store the metadata, ')
     parser.add_argument('beatmapgen_solver',
                         help='beatmapgen configuration file')
-    parser.add_argument('pipeline', help='create_manifest, remove_unsupported_note')
+    parser.add_argument('pipeline', help='create_manifest, tokenize_beatmap')
     parser.add_argument('--complete',
                         action='store_false', dest='minimal', default=True,
                         help='Retrieve all metadata, even the one that are expansive '
@@ -1322,7 +1205,7 @@ def main():
     args = parser.parse_args()
     # use deno api to parse beatmap
     cfg = OmegaConf.load(args.beatmapgen_solver)
-    assert args.pipeline in ["create_manifest", "remove_unsupported_note"]
+    assert args.pipeline in ["create_manifest", "tokenize_beatmap"]
     if args.pipeline == "create_manifest":
         request_data = {
             "directory": args.root, 
@@ -1338,13 +1221,13 @@ def main():
             return
         
         meta, fail_meta = find_audio_files(out_originput_meta, DEFAULT_EXTS, progress=True,
-                                resolve=args.resolve, minimal=args.minimal, workers=args.workers, audio_duration_threshold=cfg.dataset.audio_duration_threshold, nps_threshold=cfg.dataset.nps_threshold)
+                                resolve=args.resolve, minimal=args.minimal, workers=args.workers, audio_duration_threshold=cfg.parser_pipeline.audio_duration_threshold, nps_threshold=cfg.parser_pipeline.nps_threshold)
         save_audio_meta(args.out_originput_meta_file, meta)
         print("request finished, summary:")
         data['load'] -= len(fail_meta)
         data['fail_audio_nps'] = [meta.id for meta in fail_meta]
         print(data)
-    elif args.pipeline == "remove_unsupported_note":
+    elif args.pipeline == "tokenize_beatmap":
         beatmap_kwargs = cfg.dataset.beatmap_kwargs
         position_size = beatmap_kwargs.position_size
         minimum_note = beatmap_kwargs.minimum_note
@@ -1362,7 +1245,7 @@ def main():
             with open(item.beatmap_file_path, 'r', encoding = 'utf-8') as f:
                 beatmap_file = json.load(f)
             segment_duration_in_quaver = round(item.duration / 60 * item.bpm / minimum_note)
-            beatmap_token, unsupported_note, beatmap_file, beatmap_file_supported = beatmap.tokenize(beatmap_file, 0, segment_duration_in_quaver, segment_duration_in_quaver, item.bpm, debug=True)
+            beatmap_token, unsupported_note, beatmap_file, beatmap_file_supported = beatmap.tokenize(beatmap_file, segment_duration_in_quaver, item.bpm, debug=True)
             reconstructed_beatmap_file = beatmap.detokenize(beatmap_token, item.bpm)
             result = beatmap.check_difference(beatmap_file, reconstructed_beatmap_file, unsupported_note)
 
@@ -1377,6 +1260,12 @@ def main():
                 with open(supported_file_path, 'w') as f:
                     json.dump(beatmap_file_supported, f, indent=4)
                 item.supported_file_path = str(supported_file_path)
+                # cache whole beatmap token
+                beatmap_token = beatmap_token.to(torch.int8)
+                filename = os.path.splitext(filename)[0] + ".pt"
+                beatmap_token_path = supported_path / filename
+                torch.save(beatmap_token, beatmap_token_path)
+                item.beatmap_token_path = str(beatmap_token_path)
                 supported_meta.append(item)
             else:
                 fail_meta.append((item.id, result[COLORNOTE]['not_equal_num']))

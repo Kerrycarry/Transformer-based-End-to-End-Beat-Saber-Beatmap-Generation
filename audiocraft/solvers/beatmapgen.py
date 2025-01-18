@@ -20,7 +20,7 @@ from . import base, builders
 from .compression import CompressionSolver
 from .. import metrics as eval_metrics
 from .. import models
-from ..data.audio_dataset_beatmap import AudioDataset, SegmentInfo
+from ..data.audio_dataset_beatmap import AudioDataset, SegmentInfo, Beatmap
 from ..data.music_dataset import MusicDataset, MusicInfo, AudioInfo
 from ..data.audio_utils import normalize_audio
 from ..modules.conditioners import JointEmbedCondition, SegmentWithAttributes, WavCondition
@@ -192,8 +192,7 @@ class BeatmapGenSolver(base.StandardSolver):
         #         param.requires_grad = True
 
         # calculate receptive field in advanced
-        maximum_duration = math.ceil(self.cfg.dataset.segment_duration * self.cfg.dataset.minimum_note * 60 / self.cfg.dataset.minimum_bpm * self.cfg.sample_rate) 
-        input_size = [1, maximum_duration]
+        input_size = [1, self.maximum_duration]
         with torch.no_grad():
             receptive_field_dict = receptive_field(self.compression_model.model.encoder, input_size)
         target_layer = str(self.cfg.audio_token.encodec.target_layer)       
@@ -219,9 +218,7 @@ class BeatmapGenSolver(base.StandardSolver):
         self.cfg.beatmapgen_lm.difficulty_num = difficulty_num
         self.cfg.beatmapgen_lm.position_size = position_size
         self.cfg.beatmapgen_lm.token_id_size = token_id_size
-        self.cfg.dataset.position_size = position_size
         self.cfg.dataset.token_id_size = token_id_size
-        self.cfg.dataset.note_type = [key for key, value in beatmap_kwargs["note_type"].items() if value]
         self.cfg.dataset.beatmap_sample_window = beatmap_sample_window
         self.cfg.dataset.minimum_note = minimum_note
         self.cfg.dataset.minimum_bpm = minimum_bpm
@@ -242,9 +239,12 @@ class BeatmapGenSolver(base.StandardSolver):
         self.cfg.dataset.representation = representation
         segment_duration = self.cfg.dataset.segment_duration
         self.cfg.beatmapgen_lm.segment_duration = segment_duration
+        self.maximum_duration = math.ceil(segment_duration * minimum_note * 60 / minimum_bpm * self.cfg.sample_rate) 
+        self.cfg.dataset.maximum_duration = self.maximum_duration
         OmegaConf.set_struct(self.cfg, True)
         self.dataloaders = builders.get_audio_datasets(self.cfg, dataset_type=self.DATASET_TYPE)
-
+        note_type = [key for key, value in beatmap_kwargs["note_type"].items() if value]
+        self.beatmap = Beatmap(minimum_note = minimum_note, token_id_size = token_id_size, position_size = position_size, note_types = note_type)
     def show(self) -> None:
         """Show the compression model and LM model."""
         self.logger.info("Compression model:")
@@ -636,8 +636,8 @@ class BeatmapGenSolver(base.StandardSolver):
         assert gen_beatmap_tokens.dim() == 3
         
         ref_audio = [segment_info.origin_sample for segment_info in segment_infos]
-        ref_beatmap_file = [segment_info.beatmap_file for segment_info in segment_infos]
-        gen_beatmap_file = [segment_info.beatmap_class.detokenize(gen_beatmap_token.squeeze(0), segment_info.meta.bpm) for gen_beatmap_token, segment_info in zip(gen_beatmap_tokens, segment_infos) ]
+        ref_beatmap_file = [self.beatmap.sample_beatmap_file(segment_info.beatmap_file, segment_info.seek_time, segment_info.seek_time + self.cfg.dataset.segment_duration, segment_info.meta.bpm) for segment_info in segment_infos]
+        gen_beatmap_file = [self.beatmap.detokenize(gen_beatmap_token.squeeze(0), segment_info.meta.bpm) for gen_beatmap_token, segment_info in zip(gen_beatmap_tokens, segment_infos) ]
         sample_id = [f"{segment_info.meta.id}_{segment_info.seek_time}" for segment_info in segment_infos]
         meta = [segment_info.meta for segment_info in segment_infos]
         bench_end = time.time()

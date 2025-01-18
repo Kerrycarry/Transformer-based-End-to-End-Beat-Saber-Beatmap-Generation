@@ -106,7 +106,7 @@ fi
 # nohup ./beatmapgen.sh -1 default --clear > log/beatmapgen_log.txt 2>&1 &
 # 启动manifest制作流程
 # nohup ./beatmapgen.sh -2 CustomLevels2 bs_curated config/solver/beatmapgen/beatmapgen_base_32khz.yaml create_manifest > log/beatmapgen_log.txt 2>&1 &
-# nohup ./beatmapgen.sh -2 CustomLevels2 bs_curated config/solver/beatmapgen/beatmapgen_base_32khz.yaml remove_unsupported_note > log/beatmapgen_log.txt 2>&1 &
+# nohup ./beatmapgen.sh -2 CustomLevels2 bs_curated config/solver/beatmapgen/beatmapgen_base_32khz.yaml tokenize_beatmap > log/beatmapgen_log.txt 2>&1 &
 # 启动 api
 # ./beatmapgen.sh -3
 # kill 掉api和dora
