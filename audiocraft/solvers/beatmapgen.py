@@ -210,7 +210,6 @@ class BeatmapGenSolver(base.StandardSolver):
         beatmap_sample_window = beatmap_kwargs.beatmap_sample_window
         minimum_note = beatmap_kwargs.minimum_note
         minimum_bpm = beatmap_kwargs.minimum_bpm
-        maximum_bpm = beatmap_kwargs.maximum_bpm
         token_id_size = sum(
             size for note, size in beatmap_kwargs.note_size.items()
             if beatmap_kwargs.note_type.get(note, False)
@@ -221,8 +220,6 @@ class BeatmapGenSolver(base.StandardSolver):
         self.cfg.dataset.token_id_size = token_id_size
         self.cfg.dataset.beatmap_sample_window = beatmap_sample_window
         self.cfg.dataset.minimum_note = minimum_note
-        self.cfg.dataset.minimum_bpm = minimum_bpm
-        self.cfg.dataset.maximum_bpm = maximum_bpm
         
         audio_token = self.cfg.audio_token
         representation = audio_token.representation
@@ -636,7 +633,8 @@ class BeatmapGenSolver(base.StandardSolver):
         assert gen_beatmap_tokens.dim() == 3
         
         ref_audio = [segment_info.origin_sample for segment_info in segment_infos]
-        ref_beatmap_file = [self.beatmap.sample_beatmap_file(segment_info.beatmap_file, segment_info.seek_time, segment_info.seek_time + self.cfg.dataset.segment_duration, segment_info.meta.bpm) for segment_info in segment_infos]
+        seek_time_in_quaver = [self.beatmap.time_map(info.seek_time)[1] for info in segment_infos]
+        ref_beatmap_file = [self.beatmap.sample_beatmap_file(info.beatmap_file, seek_time, seek_time + self.cfg.dataset.segment_duration, info.meta.bpm) for info, seek_time in zip(segment_infos, seek_time_in_quaver)]
         gen_beatmap_file = [self.beatmap.detokenize(gen_beatmap_token.squeeze(0), segment_info.meta.bpm) for gen_beatmap_token, segment_info in zip(gen_beatmap_tokens, segment_infos) ]
         sample_id = [f"{segment_info.meta.id}_{segment_info.seek_time}" for segment_info in segment_infos]
         meta = [segment_info.meta for segment_info in segment_infos]

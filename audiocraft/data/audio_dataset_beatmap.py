@@ -748,7 +748,7 @@ def find_audio_files(input_meta: tp.List[dict],
                      minimal: bool = True,
                      progress: bool = False,
                      workers: int = 0,
-                     audio_duration_threshold: float = 1000, nps_threshold: float = 1) -> tp.List[AudioMeta]:
+                     audio_duration_threshold: float = 1000, nps_threshold: float = 1, minimum_bpm: float = 65, maximum_bpm: float = 260) -> tp.List[AudioMeta]:
     """Build a list of AudioMeta from a given path,
     collecting relevant audio files and fetching meta info.
 
@@ -796,7 +796,8 @@ def find_audio_files(input_meta: tp.List[dict],
             except Exception as err:
                 print("Error with", str(item), err, file=sys.stderr)
                 continue
-            if m.duration > audio_duration_threshold or m.note_num['colorNotes'] / m.duration < nps_threshold:
+            print(m.bpm, maximum_bpm, minimum_bpm)
+            if m.duration > audio_duration_threshold or m.note_num['colorNotes'] / m.duration < nps_threshold or m.bpm < minimum_bpm or m.bpm > maximum_bpm:
                 fail_meta.append(m)
                 continue
             meta.append(m)
@@ -902,8 +903,6 @@ class AudioDataset:
                  token_id_size: int,
                  beatmap_sample_window: int,
                  minimum_note: float,
-                 minimum_bpm: float,
-                 maximum_bpm: float,
                  representation: str,
                  maximum_duration: float,
                  segment_duration: tp.Optional[float] = None,
@@ -957,8 +956,6 @@ class AudioDataset:
         self.token_id_size = token_id_size
         self.beatmap_sample_window = beatmap_sample_window
         self.minimum_note = minimum_note
-        self.minimum_bpm = minimum_bpm
-        self.maximum_bpm = maximum_bpm
         self.representation = representation
         self.target_frames_padded = maximum_duration
         if not load_wav:
@@ -1051,8 +1048,6 @@ class AudioDataset:
         for retry in range(self.max_read_retry):
             # 随机抽取一个beatmap_file      
             file_meta = self.sample_file(index, rng)
-            if file_meta.bpm < self.minimum_bpm or file_meta.bpm> self.maximum_bpm:
-                continue
             duration_in_quaver = math.ceil(file_meta.duration / 60 * file_meta.bpm / self.minimum_note) # 音频长度用八分音符的数量来衡量
             segment_duration_in_quaver = self.segment_duration
             #选择抽取的时间点
@@ -1074,7 +1069,7 @@ class AudioDataset:
                 beatmap_token = torch.load(file_meta.beatmap_token_path)
                 beatmap_token = beatmap_token[seek_time_in_quaver:seek_time_in_quaver+segment_duration_in_quaver]
                 n_frames = beatmap_token.shape[0]
-                beatmap_token = F.pad(beatmap_token, (0, segment_duration_in_quaver - n_frames), mode='constant', value=self.token_id_size)
+                beatmap_token = F.pad(beatmap_token, (0, 0, 0, segment_duration_in_quaver - n_frames), mode='constant', value=self.token_id_size)
                 beatmap_token = beatmap_token.to(torch.int64)
                 # 打开audio，使用encodec需要的sr resample整个audio
                 error_path = file_meta.song_path
@@ -1096,7 +1091,7 @@ class AudioDataset:
                     hop_length = None
                 resample_sample = F.pad(resample_sample, (0, self.target_frames_padded - n_frames))
                 # 创建info
-                segment_info = SegmentInfo(file_meta, seek_time_in_quaver, n_frames=n_frames, total_frames=target_frames,
+                segment_info = SegmentInfo(file_meta, round(seek_time_in_quaver * self.minimum_note), n_frames=n_frames, total_frames=target_frames,
                                                 sample_rate=self.sample_rate, channels=origin_sample.shape[0], origin_sample=origin_sample, beatmap_file=beatmap_file, hop_length= hop_length)
             except Exception as exc:
                 logger.warning("Error opening file %s, seek time, %d,  %r", error_path, round(seek_time_in_quaver * self.minimum_note), exc)
@@ -1221,11 +1216,11 @@ def main():
             return
         
         meta, fail_meta = find_audio_files(out_originput_meta, DEFAULT_EXTS, progress=True,
-                                resolve=args.resolve, minimal=args.minimal, workers=args.workers, audio_duration_threshold=cfg.parser_pipeline.audio_duration_threshold, nps_threshold=cfg.parser_pipeline.nps_threshold)
+                                resolve=args.resolve, minimal=args.minimal, workers=args.workers, audio_duration_threshold=cfg.parser_pipeline.audio_duration_threshold, nps_threshold=cfg.parser_pipeline.nps_threshold, minimum_bpm = cfg.dataset.beatmap_kwargs.minimum_bpm, maximum_bpm = cfg.dataset.beatmap_kwargs.maximum_bpm)
         save_audio_meta(args.out_originput_meta_file, meta)
         print("request finished, summary:")
         data['load'] -= len(fail_meta)
-        data['fail_audio_nps'] = [meta.id for meta in fail_meta]
+        data['fail_audio_nps_bpm'] = [meta.id for meta in fail_meta]
         print(data)
     elif args.pipeline == "tokenize_beatmap":
         beatmap_kwargs = cfg.dataset.beatmap_kwargs
