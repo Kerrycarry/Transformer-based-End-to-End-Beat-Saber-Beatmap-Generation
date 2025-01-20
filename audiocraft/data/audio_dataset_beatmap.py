@@ -32,6 +32,7 @@ from tqdm import tqdm
 
 import torch
 import torch.nn.functional as F
+import numpy as np
 
 from .audio import audio_read, audio_info
 from .audio_utils import convert_audio
@@ -79,6 +80,7 @@ class AudioMeta(BaseInfo):
     note_num: Dict[str, int]
     supported_file_path: tp.Optional[str] = None # path to supported beatmap_file
     beatmap_token_path: tp.Optional[str] = None
+    duration_in_quaver: tp.Optional[int] = None
     duration: tp.Optional[float] = None
     amplitude: tp.Optional[float] = None
     weight: tp.Optional[float] = None
@@ -795,8 +797,7 @@ def find_audio_files(input_meta: tp.List[dict],
                     m = _resolve_audio_meta(m)
             except Exception as err:
                 print("Error with", str(item), err, file=sys.stderr)
-                continue
-            print(m.bpm, maximum_bpm, minimum_bpm)
+                continue            
             if m.duration > audio_duration_threshold or m.note_num['colorNotes'] / m.duration < nps_threshold or m.bpm < minimum_bpm or m.bpm > maximum_bpm:
                 fail_meta.append(m)
                 continue
@@ -1066,11 +1067,20 @@ class AudioDataset:
                     beatmap_file = json.load(f)
                 # 打开beatmap token
                 error_path = file_meta.beatmap_token_path
-                beatmap_token = torch.load(file_meta.beatmap_token_path)
-                beatmap_token = beatmap_token[seek_time_in_quaver:seek_time_in_quaver+segment_duration_in_quaver]
+                start = seek_time_in_quaver
+                end = seek_time_in_quaver+segment_duration_in_quaver
+                end = end if end <= file_meta.duration_in_quaver else file_meta.duration_in_quaver
+                with open(file_meta.beatmap_token_path, 'rb') as f:
+                    # 每行元素占用 int8 的 1 字节，跳过 start 行
+                    f.seek(start * 12 * 1)
+                    # 读取 (end - start) 行数据
+                    data = f.read((end - start) * 12 * 1)
+                # 转换为 Tensor
+                beatmap_token = torch.tensor(
+                    np.frombuffer(data, dtype=np.int8).reshape((end - start, 12))
+                )
                 n_frames = beatmap_token.shape[0]
                 beatmap_token = F.pad(beatmap_token, (0, 0, 0, segment_duration_in_quaver - n_frames), mode='constant', value=self.token_id_size)
-                beatmap_token = beatmap_token.to(torch.int64)
                 # 打开audio，使用encodec需要的sr resample整个audio
                 error_path = file_meta.song_path
                 origin_sample, sr = audio_read(file_meta.song_path, seek_time_in_second, segment_duration_in_sec, pad=False)
@@ -1112,6 +1122,7 @@ class AudioDataset:
         resample_sample = list(resample_sample)
         beatmap_tokens = list(beatmap_tokens)
         beatmap_tokens = torch.stack(beatmap_tokens)
+        beatmap_tokens = beatmap_tokens.to(torch.int64)
         resample_sample = torch.stack(resample_sample)
 
         return segment_infos, resample_sample, beatmap_tokens
@@ -1239,7 +1250,7 @@ def main():
         for item in tqdm(meta, desc="Processing files"):
             with open(item.beatmap_file_path, 'r', encoding = 'utf-8') as f:
                 beatmap_file = json.load(f)
-            segment_duration_in_quaver = round(item.duration / 60 * item.bpm / minimum_note)
+            segment_duration_in_quaver = math.ceil(item.duration / 60 * item.bpm / minimum_note)
             beatmap_token, unsupported_note, beatmap_file, beatmap_file_supported = beatmap.tokenize(beatmap_file, segment_duration_in_quaver, item.bpm, debug=True)
             reconstructed_beatmap_file = beatmap.detokenize(beatmap_token, item.bpm)
             result = beatmap.check_difference(beatmap_file, reconstructed_beatmap_file, unsupported_note)
@@ -1257,10 +1268,13 @@ def main():
                 item.supported_file_path = str(supported_file_path)
                 # cache whole beatmap token
                 beatmap_token = beatmap_token.to(torch.int8)
-                filename = os.path.splitext(filename)[0] + ".pt"
+                filename = os.path.splitext(filename)[0] + ".bin"
                 beatmap_token_path = supported_path / filename
-                torch.save(beatmap_token, beatmap_token_path)
+                # torch.save(beatmap_token, beatmap_token_path)
+                with open(beatmap_token_path, 'wb') as f:
+                    f.write(beatmap_token.numpy().tobytes())
                 item.beatmap_token_path = str(beatmap_token_path)
+                item.duration_in_quaver = segment_duration_in_quaver
                 supported_meta.append(item)
             else:
                 fail_meta.append((item.id, result[COLORNOTE]['not_equal_num']))
