@@ -226,3 +226,49 @@ def receptive_field_for_unit(receptive_field_dict, layer, unit_positions):
     else:
         raise KeyError("Layer name incorrect, or not included in the model.")
 
+def convert_note_code(rf_range, segment_duration_in_quaver, minimum_note, bpm_list, sample_rate, total_frames, total_code):
+    # [0, segment_duration_in_quaver*self.minimum_note] 范围内的八分音符，segment_duration_in_quaver*minimum_note是exlucsive
+    note_quaver = list(range(segment_duration_in_quaver))
+    note_quaver = [x * minimum_note for x in note_quaver]    
+    # note_code_map = [[round(x * 60 / bpm * code_rate) for x in note_quaver] for bpm in bpm_list]
+
+    note_code_list_closest_map = []
+    for bpm, one_total_frame, one_total_code in zip(bpm_list, total_frames, total_code):
+        note_frame = [round(x * 60 / bpm * sample_rate) for x in note_quaver]
+        note_frame_map = []
+        for i in range(len(note_frame)):
+            frame = (note_frame[i], note_frame[i+1]-1) if i in range(len(note_frame) - 1) else (note_frame[i], one_total_frame)
+            note_frame_map.append(frame)
+        assert note_frame_map[-1][0]<note_frame_map[-1][1]
+        note_code_closest_map = []
+        one_rf_range = rf_range[:one_total_code]
+        j = 0
+        for i, (start, end) in enumerate(note_frame_map):
+            min_distance = float('inf')  # 初始化最小距离为无穷大
+            closest_j = None  # 初始化最接近的区间索引
+            x1, y1 = 65, 0.6
+            x2, y2 = 260, 1
+            ratio = (bpm - x1) / (x2 - x1) * (y2 - y1) + y1
+            start_end_mid = (start + end) / 2  # 计算 (start, end) 的中点
+            # distance = start_end_mid - start
+            # start_end_mid = start + distance*ratio
+
+            while j < len(one_rf_range):
+                rf1, rf2 = one_rf_range[j][0]
+                rf_mid = (rf1 + rf2) / 2  # 计算 (rf1, rf2) 的中点
+                
+                # 计算中点的绝对差值并更新最接近的区间
+                distance = abs(start_end_mid - rf_mid)
+                if distance < min_distance:
+                    min_distance = distance
+                    closest_j = j
+                else:
+                    #提前结束
+                    break
+                j += 1
+            note_code_closest_map.append(closest_j)
+            #下一轮从本轮结果继续
+            j = closest_j
+        note_code_list_closest_map.append(note_code_closest_map)
+    return  note_code_list_closest_map
+

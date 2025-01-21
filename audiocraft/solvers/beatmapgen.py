@@ -27,7 +27,6 @@ from ..modules.conditioners import JointEmbedCondition, SegmentWithAttributes, W
 from ..utils.cache import CachedBatchWriter, CachedBatchLoader
 from ..utils.samples.manager_beatmap import SampleManager
 from ..utils.utils import get_dataset_from_loader, is_jsonable, warn_once, model_hash
-from ..utils.receptive_field import receptive_field, receptive_field_for_unit
 class BeatmapGenSolver(base.StandardSolver):
     """Solver for MusicGen training task.
 
@@ -115,26 +114,26 @@ class BeatmapGenSolver(base.StandardSolver):
         """Instantiate models and optimizer."""
         # we can potentially not use all quantizers with which the EnCodec model was trained
         # (e.g. we trained the model with quantizers dropout)
-        self.compression_model = CompressionSolver.wrapped_model_from_checkpoint(
-            self.cfg, self.cfg.compression_model_checkpoint, device=self.device)
-        assert self.compression_model.sample_rate == self.cfg.sample_rate, (
-            f"Compression model sample rate is {self.compression_model.sample_rate} but "
-            f"Solver sample rate is {self.cfg.sample_rate}."
-            )
+        # self.compression_model = CompressionSolver.wrapped_model_from_checkpoint(
+        #     self.cfg, self.cfg.compression_model_checkpoint, device=self.device)
+        # assert self.compression_model.sample_rate == self.cfg.sample_rate, (
+        #     f"Compression model sample rate is {self.compression_model.sample_rate} but "
+        #     f"Solver sample rate is {self.cfg.sample_rate}."
+        #     )
         # ensure we have matching configuration between LM and compression model
-        assert self.cfg.transformer_lm.card == self.compression_model.cardinality, (
-            "Cardinalities of the LM and compression model don't match: ",
-            f"LM cardinality is {self.cfg.transformer_lm.card} vs ",
-            f"compression model cardinality is {self.compression_model.cardinality}"
-        )
-        assert self.cfg.transformer_lm.n_q == self.compression_model.num_codebooks, (
-            "Numbers of codebooks of the LM and compression models don't match: ",
-            f"LM number of codebooks is {self.cfg.transformer_lm.n_q} vs ",
-            f"compression model numer of codebooks is {self.compression_model.num_codebooks}"
-        )
-        self.logger.info("Compression model has %d codebooks with %d cardinality, and a framerate of %d",
-                         self.compression_model.num_codebooks, self.compression_model.cardinality,
-                         self.compression_model.frame_rate)
+        # assert self.cfg.transformer_lm.card == self.compression_model.cardinality, (
+        #     "Cardinalities of the LM and compression model don't match: ",
+        #     f"LM cardinality is {self.cfg.transformer_lm.card} vs ",
+        #     f"compression model cardinality is {self.compression_model.cardinality}"
+        # )
+        # assert self.cfg.transformer_lm.n_q == self.compression_model.num_codebooks, (
+        #     "Numbers of codebooks of the LM and compression models don't match: ",
+        #     f"LM number of codebooks is {self.cfg.transformer_lm.n_q} vs ",
+        #     f"compression model numer of codebooks is {self.compression_model.num_codebooks}"
+        # )
+        # self.logger.info("Compression model has %d codebooks with %d cardinality, and a framerate of %d",
+        #                  self.compression_model.num_codebooks, self.compression_model.cardinality,
+        #                  self.compression_model.frame_rate)
         # instantiate LM model
         self.representation_model: models.LMModel = models.builders.get_lm_model(self.cfg).to(self.device)
         delattr(self.representation_model, 'linears')
@@ -192,13 +191,13 @@ class BeatmapGenSolver(base.StandardSolver):
         #         param.requires_grad = True
 
         # calculate receptive field in advanced
-        input_size = [1, self.maximum_duration]
-        with torch.no_grad():
-            receptive_field_dict = receptive_field(self.compression_model.model.encoder, input_size)
-        target_layer = str(self.cfg.audio_token.encodec.target_layer)       
-        unit_positions = [(i,) for i in range(receptive_field_dict[target_layer]['output_shape'][2])]
-        rf_range = receptive_field_for_unit(receptive_field_dict, target_layer, unit_positions)
-        self.rf_range = rf_range
+        # input_size = [1, math.ceil(self.maximum_duration)]
+        # with torch.no_grad():
+        #     receptive_field_dict = receptive_field(self.compression_model.model.encoder, input_size)
+        # target_layer = str(self.cfg.audio_token.encodec.target_layer)       
+        # unit_positions = [(i,) for i in range(receptive_field_dict[target_layer]['output_shape'][2])]
+        # rf_range = receptive_field_for_unit(receptive_field_dict, target_layer, unit_positions)
+        # self.rf_range = rf_range
 
     def build_dataloaders(self) -> None:
         """Instantiate audio dataloaders for each stage."""
@@ -233,7 +232,7 @@ class BeatmapGenSolver(base.StandardSolver):
         self.cfg.beatmapgen_lm.representation = representation
         segment_duration = self.cfg.dataset.segment_duration
         self.cfg.beatmapgen_lm.segment_duration = segment_duration
-        self.maximum_duration = math.ceil(segment_duration * minimum_note * 60 / minimum_bpm * self.cfg.sample_rate) 
+        self.maximum_duration = segment_duration * minimum_note * 60 / minimum_bpm * self.cfg.sample_rate
         self.cfg.dataset.maximum_duration = self.maximum_duration
         OmegaConf.set_struct(self.cfg, True)
         self.dataloaders = builders.get_audio_datasets(self.cfg, dataset_type=self.DATASET_TYPE)
@@ -351,68 +350,14 @@ class BeatmapGenSolver(base.StandardSolver):
         # Convert to decibel scale
         spectrogram_db = T.AmplitudeToDB(stype="power", top_db=80).to(device)(mel_spectrogram)
         return spectrogram_db
-    
-    def convert_note_code(rf_range, segment_duration_in_quaver, minimum_note, bpm_list, sample_rate, code_rate, total_frames, total_code, ca_window_size):
-        # [0, segment_duration_in_quaver*self.minimum_note] 范围内的八分音符，segment_duration_in_quaver*minimum_note是exlucsive
-        note_quaver = list(range(segment_duration_in_quaver))
-        note_quaver = [x * minimum_note for x in note_quaver]    
-        # note_code_map = [[round(x * 60 / bpm * code_rate) for x in note_quaver] for bpm in bpm_list]
 
-        note_code_list_closest_map = []
-        for bpm, one_total_frame, one_total_code in zip(bpm_list, total_frames, total_code):
-            note_frame = [round(x * 60 / bpm * sample_rate) for x in note_quaver]
-            note_frame_map = []
-            for i in range(len(note_frame)):
-                frame = (note_frame[i], note_frame[i+1]-1) if i in range(len(note_frame) - 1) else (note_frame[i], one_total_frame)
-                note_frame_map.append(frame)
-            assert note_frame_map[-1][0]<note_frame_map[-1][1]
-            note_code_closest_map = []
-            one_rf_range = rf_range[:one_total_code]
-            j = 0
-            for i, (start, end) in enumerate(note_frame_map):
-                min_distance = float('inf')  # 初始化最小距离为无穷大
-                closest_j = None  # 初始化最接近的区间索引
-                x1, y1 = 65, 0.6
-                x2, y2 = 260, 1
-                ratio = (bpm - x1) / (x2 - x1) * (y2 - y1) + y1
-                start_end_mid = (start + end) / 2  # 计算 (start, end) 的中点
-                # distance = start_end_mid - start
-                # start_end_mid = start + distance*ratio
-
-                while j < len(one_rf_range):
-                    rf1, rf2 = one_rf_range[j][0]
-                    rf_mid = (rf1 + rf2) / 2  # 计算 (rf1, rf2) 的中点
-                    
-                    # 计算中点的绝对差值并更新最接近的区间
-                    distance = abs(start_end_mid - rf_mid)
-                    if distance < min_distance:
-                        min_distance = distance
-                        closest_j = j
-                    else:
-                        #提前结束
-                        break
-                    j += 1
-                note_code_closest_map.append(closest_j)
-                #下一轮从本轮结果继续
-                j = closest_j
-            note_code_list_closest_map.append(note_code_closest_map)
-        return  note_code_list_closest_map
-
-    def tokenize_audio(self, segment_infos, tokens):
+    def tokenize_audio(self, segment_infos, tokens, note_code_maps):
         representation = self.cfg.audio_token.representation
         segment_duration_in_quaver = self.cfg.dataset.segment_duration        
         if representation == "musicgen":
             with self.autocast:
                 window_size = self.cfg.audio_token.musicgen.training_sequence_length
                 tokens = self.representation_model.compute_representation(tokens)
-        code_rate = self.cfg.audio_token.encodec.code_rate
-        minimum_note = self.cfg.dataset.minimum_note
-        sample_rate = self.cfg.sample_rate
-        ca_window_size = self.cfg.beatmapgen_lm.ca_window_size
-        bpm_list = [info.meta.bpm for info in segment_infos]
-        total_code = [info.total_code for info in segment_infos]
-        total_frames = [info.total_code*self.cfg.audio_token.encodec.stride_rate for info in segment_infos]
-        note_code_maps = BeatmapGenSolver.convert_note_code(self.rf_range, segment_duration_in_quaver, minimum_note, bpm_list, sample_rate, code_rate, total_frames, total_code, ca_window_size)
         
         dim = tokens.shape[-1]
         B = tokens.shape[0]
@@ -422,6 +367,7 @@ class BeatmapGenSolver(base.StandardSolver):
             note_code_maps = torch.tensor(note_code_maps, device=self.device)
             tokens = torch.gather(tokens, dim=1, index=note_code_maps.unsqueeze(-1).expand(B, segment_duration_in_quaver, dim))
         else:
+            total_code = [info.total_code for info in segment_infos]
             note_code_trim_list_map = torch.tensor(note_code_trim_list_map, device=self.device)
             tokens = [F.pad(one_token[:one_code], (0, 0, 2, 2)) for one_token, one_code in zip(tokens, total_code)]
             window_size = note_code_trim_list_map.shape[2]
@@ -449,14 +395,15 @@ class BeatmapGenSolver(base.StandardSolver):
                 with B the batch size, K the number of codebooks, T_s the token timesteps.
             Padding mask (torch.Tensor): Mask with valid positions in the tokens tensor, of shape [B, K, T_s].
         """
-        segment_infos, resample_samples, beatmap_tokens = batch
-        assert len(segment_infos) == beatmap_tokens.size(0)==resample_samples.size(0), (
+        segment_infos, resample_samples, beatmap_tokens, note_code_maps = batch
+        assert len(segment_infos) == beatmap_tokens.size(0)==resample_samples.size(0) == note_code_maps.size(0), (
             f"Mismatch between number of items in audio batch({resample_samples.size(0)})",
             f" and in metadata ({len(segment_infos)})",
             f"and beatmap {beatmap_tokens.size(0)}"
         )
         beatmap_tokens = beatmap_tokens.to(self.device)
         resample_samples = resample_samples.to(self.device)
+        note_code_maps = note_code_maps.to(self.device)
         difficulty = self.tokenize_difficulty(segment_infos)
         # sample_id_seek_time = [f"{segment_info.meta.id}_{segment_info.seek_time}" for segment_info in segment_infos]
         # sample_id = [f"{segment_info.meta.id}" for segment_info in segment_infos]
@@ -467,7 +414,7 @@ class BeatmapGenSolver(base.StandardSolver):
         if self.device == "cuda" and check_synchronization_points:
             torch.cuda.set_sync_debug_mode("warn")
         
-        audio_tokens = self.tokenize_audio(segment_infos, resample_samples)
+        audio_tokens = self.tokenize_audio(segment_infos, resample_samples, note_code_maps)
 
         if self.device == "cuda" and check_synchronization_points:
             torch.cuda.set_sync_debug_mode("default")
@@ -587,15 +534,16 @@ class BeatmapGenSolver(base.StandardSolver):
                 and the prompt along with additional information.
         """
         bench_start = time.time()
-        segment_infos, resample_samples, beatmap_tokens = batch
-        assert len(segment_infos) == beatmap_tokens.size(0)==resample_samples.size(0), (
+        segment_infos, resample_samples, beatmap_tokens, note_code_maps = batch
+        assert len(segment_infos) == beatmap_tokens.size(0)==resample_samples.size(0) == note_code_maps.size(0), (
             f"Mismatch between number of items in audio batch({resample_samples.size(0)})",
             f" and in metadata ({len(segment_infos)})",
             f"and beatmap {beatmap_tokens.size(0)}"
         )
         beatmap_tokens = beatmap_tokens.to(self.device)
         resample_samples = resample_samples.to(self.device)
-        audio_tokens = self.tokenize_audio(segment_infos, resample_samples)
+        note_code_maps = note_code_maps.to(self.device)
+        audio_tokens = self.tokenize_audio(segment_infos, resample_samples, note_code_maps)
         difficulty = self.tokenize_difficulty(segment_infos)
         
         with self.autocast:

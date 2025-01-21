@@ -81,6 +81,7 @@ class AudioMeta(BaseInfo):
     supported_file_path: tp.Optional[str] = None # path to supported beatmap_file
     beatmap_token_path: tp.Optional[str] = None
     audio_token_path: tp.Optional[str] = None
+    receptive_field_path: tp.Optional[str] = None
     duration_in_quaver: tp.Optional[int] = None
     duration: tp.Optional[float] = None
     duration_in_code: tp.Optional[int] = None
@@ -672,6 +673,9 @@ class Beatmap:
 
         return result
 
+def traditional_round(n):
+    return int(n + 0.5) if n > 0 else int(n - 0.5)
+
 @dataclass(order=True)
 class SegmentInfo(BaseInfo):
     meta: AudioMeta
@@ -740,6 +744,8 @@ def _resolve_audio_meta(m: AudioMeta, fast: bool = True) -> AudioMeta:
         m.beatmap_token_path = dora.git_save.to_absolute_path(m.beatmap_token_path)
     if m.audio_token_path is not None and not is_abs(m.audio_token_path):
         m.audio_token_path = dora.git_save.to_absolute_path(m.audio_token_path)
+    if m.receptive_field_path is not None and not is_abs(m.receptive_field_path):
+        m.receptive_field_path = dora.git_save.to_absolute_path(m.receptive_field_path)
     if m.info_path is not None and not is_abs(m.info_path.zip_path):
         m.info_path.zip_path = dora.git_save.to_absolute_path(m.song_path)
     return m
@@ -1033,8 +1039,6 @@ class AudioDataset:
             assert self.segment_duration is not None
             n_frames = int(self.sample_rate * self.segment_duration)
             return torch.zeros(self.channels, n_frames), self.sample_rate
-    def traditional_round(self, n):
-            return int(n + 0.5) if n > 0 else int(n - 0.5)
     
     def read_bin(self, path, start, end, row_size, data_type, data_size):
         with open(path, 'rb') as f:
@@ -1098,14 +1102,17 @@ class AudioDataset:
                 beatmap_token = F.pad(beatmap_token, (0, 0, 0, segment_duration_in_quaver - n_frames), mode='constant', value=self.token_id_size)
                 # 打开audio_token
                 error_path = file_meta.audio_token_path
-                start = self.traditional_round(seek_time_in_second*self.code_rate)
-                end = self.traditional_round((seek_time_in_second+segment_duration_in_sec)*self.code_rate)
-                total_code = end - start
+                start = traditional_round(seek_time_in_second*self.code_rate)
+                total_code = traditional_round(segment_duration_in_sec*self.code_rate)
+                end = start + total_code
                 end = end if end <= file_meta.duration_in_code else file_meta.duration_in_code
                 audio_token = self.read_bin(file_meta.audio_token_path, start, end, 4, np.int16, 2)
                 pad_values = torch.tensor([83, 2044, 2019, 1770])  # 每一列不同的padding值
                 padded_tensor = torch.stack([torch.full((self.target_code - audio_token.shape[0],), pad_value, dtype=torch.int16) for pad_value in pad_values], dim=1)
                 audio_token = torch.cat((audio_token, padded_tensor), dim=0)
+                # 打开receptive_field
+                error_path = file_meta.receptive_field_path
+                note_code_map = self.read_bin(file_meta.receptive_field_path, 0, 1, segment_duration_in_quaver, np.int16, 2)
                 # 创建info
                 segment_info = SegmentInfo(file_meta, round(seek_time_in_quaver * self.minimum_note), total_code=total_code,
                                                 sample_rate=self.sample_rate, origin_sample=origin_sample, beatmap_file=beatmap_file)
@@ -1116,23 +1123,24 @@ class AudioDataset:
             else:
                 break
         
-        return segment_info, audio_token, beatmap_token
+        return segment_info, audio_token, beatmap_token, note_code_map
     def collater(self, samples):
         """The collater function has to be provided to the dataloader
         if AudioDataset has return_info=True in order to properly collate
         the samples of a batch.
         """
-        segment_infos, audio_tokens, beatmap_tokens = zip(*samples)
-
+        segment_infos, audio_tokens, beatmap_tokens, note_code_maps = zip(*samples)
         segment_infos = list(segment_infos)
-        audio_tokens = list(audio_tokens)
         beatmap_tokens = list(beatmap_tokens)
         beatmap_tokens = torch.stack(beatmap_tokens)
-        beatmap_tokens = beatmap_tokens.to(torch.int64)
+        beatmap_tokens = beatmap_tokens.long()
+        audio_tokens = list(audio_tokens)
         audio_tokens = torch.stack(audio_tokens)
         audio_tokens = audio_tokens.permute(0, 2, 1).long()
-
-        return segment_infos, audio_tokens, beatmap_tokens
+        note_code_maps = list(note_code_maps)
+        note_code_maps = torch.stack(note_code_maps)
+        note_code_maps = note_code_maps.squeeze(1).long()
+        return segment_infos, audio_tokens, beatmap_tokens, note_code_maps
 
     def _filter_duration(self, meta: tp.List[AudioMeta]) -> tp.List[AudioMeta]:
         """Filters out_origin audio files with audio durations that will not allow to sample examples from them."""
@@ -1290,18 +1298,29 @@ def main():
         for fail in fail_meta:
             print(fail)
     elif args.pipeline == "tokenize_audio":
-        from ..solvers import CompressionSolver
-        model = CompressionSolver.model_from_checkpoint('//pretrained/facebook/encodec_32khz', device='cuda')
         meta_file = Path(args.out_originput_meta_file)
         meta = load_audio_meta(meta_file, resolve=False)
-        supported_meta = []
+        # get compression model and padding size
+        from ..solvers import CompressionSolver
+        model = CompressionSolver.model_from_checkpoint(cfg.compression_model_checkpoint, device='cuda')
         max_duration = max([one_meta.duration for one_meta in meta])
         print(f"**********max_duration is {max_duration}")
         target_frames = math.ceil(max_duration * cfg.sample_rate)
 
+        # get receptive field param
+        from ..utils.receptive_field import receptive_field, receptive_field_for_unit, convert_note_code
+        training_maximum_duration = math.ceil(cfg.dataset.segment_duration * cfg.dataset.beatmap_kwargs.minimum_note * 60 / cfg.dataset.beatmap_kwargs.minimum_bpm * cfg.sample_rate) 
+        input_size = [1, training_maximum_duration]
+        with torch.no_grad():
+            receptive_field_dict = receptive_field(model.model.encoder, input_size)
+        target_layer = str(cfg.audio_token.encodec.target_layer)
+        unit_positions = [(i,) for i in range(receptive_field_dict[target_layer]['output_shape'][2])]
+        rf_range = receptive_field_for_unit(receptive_field_dict, target_layer, unit_positions)
+
         last_id = None
-        for one_meta in tqdm(meta, desc="Processing files"):
+        for one_meta in tqdm(meta, desc="tokenize audio"):
             if last_id is None or last_id != one_meta.id:
+                # get audio, resample, pad, tokenize, unpad
                 origin_sample, sr = audio_read(one_meta.song_path, pad=False)
                 resample_sample = convert_audio(origin_sample, sr, cfg.sample_rate, cfg.channels)
                 n_frames = resample_sample.shape[-1]
@@ -1311,6 +1330,7 @@ def main():
                     audio_token, scale = model.encode(resample_sample)
                 n_code = math.ceil(n_frames / cfg.audio_token.encodec.stride_rate)
                 audio_token = audio_token[:,:,:n_code]
+                # cache audio token 
                 file_path = one_meta.beatmap_file_path
                 full_path = Path(file_path).parent
                 supported_path = full_path / 'supported'
@@ -1319,12 +1339,30 @@ def main():
                 audio_token_path = supported_path / filename
                 with open(audio_token_path, 'wb') as f:
                     f.write(audio_token.numpy().tobytes())
+                
+                # calcualte receptive field
+                segment_duration_in_quaver = cfg.dataset.segment_duration
+                minimum_note = cfg.dataset.beatmap_kwargs.minimum_note
+                bpm_list = [one_meta.bpm]
+                segment_duration_in_sec = segment_duration_in_quaver * minimum_note / one_meta.bpm * 60
+                total_code = traditional_round(segment_duration_in_sec*cfg.audio_token.encodec.code_rate)
+                total_frames = total_code*cfg.audio_token.encodec.stride_rate
+                total_code = [total_code]
+                total_frames = [total_frames]
+                note_code_maps = convert_note_code(rf_range, segment_duration_in_quaver, minimum_note, bpm_list, cfg.sample_rate, total_frames, total_code)
+                # cache receptive field
+                assert max(max(note_code_maps))< 2**15, max(max(note_code_maps))
+                note_code_maps = np.array(note_code_maps, dtype=np.int16)
+                receptive_field_path = supported_path / "rf.bin"
+                with open(receptive_field_path, 'wb') as f:
+                    f.write(note_code_maps.tobytes())
+            # update meta, same bpm share same update
             one_meta.duration_in_code = audio_token.shape[0]
             one_meta.audio_token_path = str(audio_token_path)
-            supported_meta.append(one_meta)
+            one_meta.receptive_field_path = str(receptive_field_path)
+            # record last id
             last_id = one_meta.id
-        supported_meta.sort()
-        save_audio_meta(args.out_originput_meta_file, supported_meta)
+        save_audio_meta(args.out_originput_meta_file, meta)
 
 if __name__ == '__main__':
     main()
