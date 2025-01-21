@@ -960,9 +960,8 @@ class AudioDataset:
         self.token_id_size = token_id_size
         self.beatmap_sample_window = beatmap_sample_window
         self.minimum_note = minimum_note
-        self.target_frames_padded = maximum_duration
+        self.target_code = math.ceil(maximum_duration/stride_rate)
         self.code_rate = code_rate
-        self.stride_rate = stride_rate
         self.split = split
         if not load_wav:
             assert segment_duration is not None
@@ -1104,10 +1103,8 @@ class AudioDataset:
                 total_code = end - start
                 end = end if end <= file_meta.duration_in_code else file_meta.duration_in_code
                 audio_token = self.read_bin(file_meta.audio_token_path, start, end, 4, np.int16, 2)
-                n_frames = audio_token.shape[0]
-                target_code = math.ceil(self.target_frames_padded/self.stride_rate)
                 pad_values = torch.tensor([83, 2044, 2019, 1770])  # 每一列不同的padding值
-                padded_tensor = torch.stack([torch.full((target_code - n_frames,), pad_value, dtype=torch.int16) for pad_value in pad_values], dim=1)
+                padded_tensor = torch.stack([torch.full((self.target_code - audio_token.shape[0],), pad_value, dtype=torch.int16) for pad_value in pad_values], dim=1)
                 audio_token = torch.cat((audio_token, padded_tensor), dim=0)
                 # 创建info
                 segment_info = SegmentInfo(file_meta, round(seek_time_in_quaver * self.minimum_note), total_code=total_code,
@@ -1298,13 +1295,22 @@ def main():
         meta_file = Path(args.out_originput_meta_file)
         meta = load_audio_meta(meta_file, resolve=False)
         supported_meta = []
+        max_duration = max([one_meta.duration for one_meta in meta])
+        print(f"**********max_duration is {max_duration}")
+        target_frames = math.ceil(max_duration * cfg.sample_rate)
+
         last_id = None
         for one_meta in tqdm(meta, desc="Processing files"):
             if last_id is None or last_id != one_meta.id:
                 origin_sample, sr = audio_read(one_meta.song_path, pad=False)
                 resample_sample = convert_audio(origin_sample, sr, cfg.sample_rate, cfg.channels)
+                n_frames = resample_sample.shape[-1]
+                resample_sample = F.pad(resample_sample, (0, target_frames - n_frames))
                 resample_sample = resample_sample.unsqueeze(0).cuda()
-                audio_token, scale = model.encode(resample_sample)
+                with torch.no_grad():
+                    audio_token, scale = model.encode(resample_sample)
+                n_code = math.ceil(n_frames / cfg.audio_token.encodec.stride_rate)
+                audio_token = audio_token[:,:,:n_code]
                 file_path = one_meta.beatmap_file_path
                 full_path = Path(file_path).parent
                 supported_path = full_path / 'supported'
