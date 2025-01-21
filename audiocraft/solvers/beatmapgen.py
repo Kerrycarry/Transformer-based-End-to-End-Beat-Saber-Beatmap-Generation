@@ -220,20 +220,17 @@ class BeatmapGenSolver(base.StandardSolver):
         self.cfg.dataset.token_id_size = token_id_size
         self.cfg.dataset.beatmap_sample_window = beatmap_sample_window
         self.cfg.dataset.minimum_note = minimum_note
+        self.cfg.dataset.code_rate = self.cfg.audio_token.encodec.code_rate
+        self.cfg.dataset.stride_rate = self.cfg.audio_token.encodec.stride_rate
         
         audio_token = self.cfg.audio_token
         representation = audio_token.representation
-        if representation == "spectrogram":
-            n_mels = audio_token.spectrogram.n_mels
-            self.cfg.beatmapgen_lm.representation_dim = n_mels
-        elif representation in ["musicgen", "encodec"]:
-            representation_dim = audio_token.encodec.representation_dim
-            use_receptive_field = audio_token.encodec.use_receptive_field
-            self.cfg.beatmapgen_lm.representation_dim = representation_dim
-            self.cfg.beatmapgen_lm.use_receptive_field = use_receptive_field
+        representation_dim = audio_token.encodec.representation_dim
+        use_receptive_field = audio_token.encodec.use_receptive_field
+        self.cfg.beatmapgen_lm.representation_dim = representation_dim
+        self.cfg.beatmapgen_lm.use_receptive_field = use_receptive_field
 
         self.cfg.beatmapgen_lm.representation = representation
-        self.cfg.dataset.representation = representation
         segment_duration = self.cfg.dataset.segment_duration
         self.cfg.beatmapgen_lm.segment_duration = segment_duration
         self.maximum_duration = math.ceil(segment_duration * minimum_note * 60 / minimum_bpm * self.cfg.sample_rate) 
@@ -401,57 +398,34 @@ class BeatmapGenSolver(base.StandardSolver):
             note_code_list_closest_map.append(note_code_closest_map)
         return  note_code_list_closest_map
 
-    def tokenize_audio(self, segment_infos, resample_samples):
-        tokens = []
+    def tokenize_audio(self, segment_infos, tokens):
         representation = self.cfg.audio_token.representation
-        segment_duration_in_quaver = self.cfg.dataset.segment_duration
-        if representation == "spectrogram":
-            center = self.cfg.audio_token.spectrogram.center
-            for info, sample in zip(segment_infos, resample_samples):
-                hop_length = info.hop_length
-                if center == False:
-                    n_fft = hop_length
-                else:
-                    n_fft = hop_length*2
-                audio_token = self.get_spec_torch(waveform = sample, sr = info.meta.sample_rate, n_fft = n_fft, hop_length = hop_length, center = center)
-                audio_token = audio_token[...,:segment_duration_in_quaver]
-                assert audio_token.shape[-1] == segment_duration_in_quaver, f"audio_token.shape[-1] = {audio_token.shape[-1]}, segment_duration_in_quaver = {segment_duration_in_quaver}"
-                audio_token = torch.mean(audio_token, axis=0) 
-                audio_token = audio_token.permute(1,0)
-                tokens.append(audio_token)
-            tokens = torch.stack(tokens)
-        elif representation in ["musicgen", "encodec"]:
-            with torch.no_grad():
-                if representation == "encodec":
-                    tokens = self.compression_model.model.encoder(resample_samples).permute(0, 2, 1)
-                else:
-                    tokens, scale = self.compression_model.encode(resample_samples)
-                    assert scale is None, "Scaled compression model not supported with LM."
+        segment_duration_in_quaver = self.cfg.dataset.segment_duration        
+        if representation == "musicgen":
+            with self.autocast:
+                window_size = self.cfg.audio_token.musicgen.training_sequence_length
+                tokens = self.representation_model.compute_representation(tokens)
+        code_rate = self.cfg.audio_token.encodec.code_rate
+        minimum_note = self.cfg.dataset.minimum_note
+        sample_rate = self.cfg.sample_rate
+        ca_window_size = self.cfg.beatmapgen_lm.ca_window_size
+        bpm_list = [info.meta.bpm for info in segment_infos]
+        total_code = [info.total_code for info in segment_infos]
+        total_frames = [info.total_code*self.cfg.audio_token.encodec.stride_rate for info in segment_infos]
+        note_code_maps = BeatmapGenSolver.convert_note_code(self.rf_range, segment_duration_in_quaver, minimum_note, bpm_list, sample_rate, code_rate, total_frames, total_code, ca_window_size)
+        
+        dim = tokens.shape[-1]
+        B = tokens.shape[0]
+        if not self.cfg.audio_token.encodec.use_receptive_field:
             if representation == "musicgen":
-                with self.autocast:
-                    window_size = self.cfg.audio_token.musicgen.training_sequence_length
-                    tokens = self.representation_model.compute_representation(tokens)
-            code_rate = self.cfg.audio_token.encodec.code_rate
-            minimum_note = self.cfg.dataset.minimum_note
-            sample_rate = self.cfg.sample_rate
-            ca_window_size = self.cfg.beatmapgen_lm.ca_window_size
-            bpm_list = [info.meta.bpm for info in segment_infos]
-            total_frames = [info.total_frames for info in segment_infos]
-            total_code = [math.ceil(info.total_frames/self.cfg.audio_token.encodec.stride_rate) for info in segment_infos]
-            note_code_maps = BeatmapGenSolver.convert_note_code(self.rf_range, segment_duration_in_quaver, minimum_note, bpm_list, sample_rate, code_rate, total_frames, total_code, ca_window_size)
-            
-            dim = tokens.shape[-1]
-            B = tokens.shape[0]
-            if not self.cfg.audio_token.encodec.use_receptive_field:
-                if representation == "musicgen":
-                    tokens = tokens[:,4:]
-                note_code_maps = torch.tensor(note_code_maps, device=self.device)
-                tokens = torch.gather(tokens, dim=1, index=note_code_maps.unsqueeze(-1).expand(B, segment_duration_in_quaver, dim))
-            else:
-                note_code_trim_list_map = torch.tensor(note_code_trim_list_map, device=self.device)
-                tokens = [F.pad(one_token[:one_code], (0, 0, 2, 2)) for one_token, one_code in zip(tokens, total_code)]
-                window_size = note_code_trim_list_map.shape[2]
-                tokens = torch.stack([torch.gather(one_token.unsqueeze(0).expand(segment_duration_in_quaver, one_token.shape[0], dim), dim=1, index = one_map.unsqueeze(-1).expand(target_sequence, window_size, dim)) for one_token, one_map in zip(tokens, note_code_trim_list_map)])
+                tokens = tokens[:,4:]
+            note_code_maps = torch.tensor(note_code_maps, device=self.device)
+            tokens = torch.gather(tokens, dim=1, index=note_code_maps.unsqueeze(-1).expand(B, segment_duration_in_quaver, dim))
+        else:
+            note_code_trim_list_map = torch.tensor(note_code_trim_list_map, device=self.device)
+            tokens = [F.pad(one_token[:one_code], (0, 0, 2, 2)) for one_token, one_code in zip(tokens, total_code)]
+            window_size = note_code_trim_list_map.shape[2]
+            tokens = torch.stack([torch.gather(one_token.unsqueeze(0).expand(segment_duration_in_quaver, one_token.shape[0], dim), dim=1, index = one_map.unsqueeze(-1).expand(target_sequence, window_size, dim)) for one_token, one_map in zip(tokens, note_code_trim_list_map)])
         return tokens
     def tokenize_difficulty(self, segment_infos):
         difficulty_map = {'Easy': 0, 'Normal': 1, 'Hard': 2, 'Expert': 3, 'ExpertPlus': 4}
@@ -636,7 +610,7 @@ class BeatmapGenSolver(base.StandardSolver):
         seek_time_in_quaver = [self.beatmap.time_map(info.seek_time)[1] for info in segment_infos]
         ref_beatmap_file = [self.beatmap.sample_beatmap_file(info.beatmap_file, seek_time, seek_time + self.cfg.dataset.segment_duration, info.meta.bpm) for info, seek_time in zip(segment_infos, seek_time_in_quaver)]
         gen_beatmap_file = [self.beatmap.detokenize(gen_beatmap_token.squeeze(0), segment_info.meta.bpm) for gen_beatmap_token, segment_info in zip(gen_beatmap_tokens, segment_infos) ]
-        sample_id = [f"{segment_info.meta.id}_{segment_info.seek_time}" for segment_info in segment_infos]
+        sample_id = [f"{segment_info.meta.id}_{segment_info.meta.difficulty}_{segment_info.seek_time}" for segment_info in segment_infos]
         meta = [segment_info.meta for segment_info in segment_infos]
         bench_end = time.time()
 

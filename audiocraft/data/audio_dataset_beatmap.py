@@ -80,8 +80,10 @@ class AudioMeta(BaseInfo):
     note_num: Dict[str, int]
     supported_file_path: tp.Optional[str] = None # path to supported beatmap_file
     beatmap_token_path: tp.Optional[str] = None
+    audio_token_path: tp.Optional[str] = None
     duration_in_quaver: tp.Optional[int] = None
     duration: tp.Optional[float] = None
+    duration_in_code: tp.Optional[int] = None
     amplitude: tp.Optional[float] = None
     weight: tp.Optional[float] = None
     # info_path is used to load additional information about_origin the audio file that is stored in zip files.
@@ -675,11 +677,8 @@ class SegmentInfo(BaseInfo):
     meta: AudioMeta
     # seek time in beat
     seek_time: int 
-    n_frames: int      # actual number of frames without_origin padding
-    total_frames: int  # total number of frames, padding included
+    total_code: int  # total number of frames, padding included
     sample_rate: int   # actual sample rate
-    channels: int      # number of audio channels.
-    hop_length: int
 
     origin_sample: torch.Tensor
     beatmap_file: dict
@@ -739,6 +738,8 @@ def _resolve_audio_meta(m: AudioMeta, fast: bool = True) -> AudioMeta:
         m.supported_file_path = dora.git_save.to_absolute_path(m.supported_file_path)
     if m.beatmap_token_path is not None and not is_abs(m.beatmap_token_path):
         m.beatmap_token_path = dora.git_save.to_absolute_path(m.beatmap_token_path)
+    if m.audio_token_path is not None and not is_abs(m.audio_token_path):
+        m.audio_token_path = dora.git_save.to_absolute_path(m.audio_token_path)
     if m.info_path is not None and not is_abs(m.info_path.zip_path):
         m.info_path.zip_path = dora.git_save.to_absolute_path(m.song_path)
     return m
@@ -904,8 +905,10 @@ class AudioDataset:
                  token_id_size: int,
                  beatmap_sample_window: int,
                  minimum_note: float,
-                 representation: str,
                  maximum_duration: float,
+                 code_rate: int,
+                 stride_rate: int,
+                 split: str,
                  segment_duration: tp.Optional[float] = None,
                  shuffle: bool = True,
                  num_samples: int = 10_000,
@@ -957,8 +960,10 @@ class AudioDataset:
         self.token_id_size = token_id_size
         self.beatmap_sample_window = beatmap_sample_window
         self.minimum_note = minimum_note
-        self.representation = representation
         self.target_frames_padded = maximum_duration
+        self.code_rate = code_rate
+        self.stride_rate = stride_rate
+        self.split = split
         if not load_wav:
             assert segment_duration is not None
         self.permutation_on_files = permutation_on_files
@@ -1032,6 +1037,18 @@ class AudioDataset:
     def traditional_round(self, n):
             return int(n + 0.5) if n > 0 else int(n - 0.5)
     
+    def read_bin(self, path, start, end, row_size, data_type, data_size):
+        with open(path, 'rb') as f:
+            # 每行元素占用 data_type 的 data_size 字节，跳过 start 行
+            f.seek(start * row_size * data_size)
+            # 读取 (end - start) 行数据
+            data = f.read((end - start) * row_size * data_size)
+        # 转换为 Tensor
+        data = torch.tensor(
+            np.frombuffer(data, dtype=data_type).reshape((end - start, row_size))
+        )
+        return data
+
     def __getitem__(self, index: int) -> tp.Tuple[SegmentInfo, torch.Tensor, torch.Tensor]:
         # 抽取时间点，resample整个音频，原始音频对应被抽取的片段，对应beatmap的片段，还有对应beatmap片段tokenize后的tensor
         rng = torch.Generator()
@@ -1061,48 +1078,40 @@ class AudioDataset:
             seek_time_in_second = seek_time_in_quaver * self.minimum_note / file_meta.bpm * 60
             segment_duration_in_sec = segment_duration_in_quaver * self.minimum_note / file_meta.bpm * 60
             try:
-                # 打开beatmap json
-                error_path = file_meta.supported_file_path
-                with open(file_meta.supported_file_path, 'r', encoding = 'utf-8') as f:
-                    beatmap_file = json.load(f)
+                if self.split == 'generate':
+                    # 打开beatmap json
+                    error_path = file_meta.supported_file_path
+                    with open(file_meta.supported_file_path, 'r', encoding = 'utf-8') as f:
+                        beatmap_file = json.load(f)
+                    # 打开audio
+                    error_path = file_meta.song_path
+                    origin_sample, sr = audio_read(file_meta.song_path, seek_time_in_second, segment_duration_in_sec, pad=False)  
+                else:
+                    beatmap_file = None
+                    origin_sample = None
                 # 打开beatmap token
                 error_path = file_meta.beatmap_token_path
                 start = seek_time_in_quaver
                 end = seek_time_in_quaver+segment_duration_in_quaver
                 end = end if end <= file_meta.duration_in_quaver else file_meta.duration_in_quaver
-                with open(file_meta.beatmap_token_path, 'rb') as f:
-                    # 每行元素占用 int8 的 1 字节，跳过 start 行
-                    f.seek(start * 12 * 1)
-                    # 读取 (end - start) 行数据
-                    data = f.read((end - start) * 12 * 1)
-                # 转换为 Tensor
-                beatmap_token = torch.tensor(
-                    np.frombuffer(data, dtype=np.int8).reshape((end - start, 12))
-                )
+                beatmap_token = self.read_bin(file_meta.beatmap_token_path, start, end, 12, np.int8, 1)
                 n_frames = beatmap_token.shape[0]
                 beatmap_token = F.pad(beatmap_token, (0, 0, 0, segment_duration_in_quaver - n_frames), mode='constant', value=self.token_id_size)
-                # 打开audio，使用encodec需要的sr resample整个audio
-                error_path = file_meta.song_path
-                origin_sample, sr = audio_read(file_meta.song_path, seek_time_in_second, segment_duration_in_sec, pad=False)
-                if self.representation == "spectrogram":
-                    #求spectrogram需要的hop_size并且padding
-                    quaver_in_sec = 60 / file_meta.bpm * self.minimum_note
-                    quaver_in_frames = quaver_in_sec * file_meta.sample_rate
-                    hop_length = self.traditional_round(quaver_in_frames)
-                    # pad resample
-                    n_frames = origin_sample.shape[-1]
-                    target_frames = self.traditional_round(hop_length * segment_duration_in_quaver)
-                    resample_sample = origin_sample
-                elif self.representation in ["musicgen", "encodec"]:
-                    resample_sample = convert_audio(origin_sample, sr, self.sample_rate, self.channels)    
-                    #pad resample
-                    n_frames = resample_sample.shape[-1]
-                    target_frames = self.traditional_round(segment_duration_in_sec * self.sample_rate)
-                    hop_length = None
-                resample_sample = F.pad(resample_sample, (0, self.target_frames_padded - n_frames))
+                # 打开audio_token
+                error_path = file_meta.audio_token_path
+                start = self.traditional_round(seek_time_in_second*self.code_rate)
+                end = self.traditional_round((seek_time_in_second+segment_duration_in_sec)*self.code_rate)
+                total_code = end - start
+                end = end if end <= file_meta.duration_in_code else file_meta.duration_in_code
+                audio_token = self.read_bin(file_meta.audio_token_path, start, end, 4, np.int16, 2)
+                n_frames = audio_token.shape[0]
+                target_code = math.ceil(self.target_frames_padded/self.stride_rate)
+                pad_values = torch.tensor([83, 2044, 2019, 1770])  # 每一列不同的padding值
+                padded_tensor = torch.stack([torch.full((target_code - n_frames,), pad_value, dtype=torch.int16) for pad_value in pad_values], dim=1)
+                audio_token = torch.cat((audio_token, padded_tensor), dim=0)
                 # 创建info
-                segment_info = SegmentInfo(file_meta, round(seek_time_in_quaver * self.minimum_note), n_frames=n_frames, total_frames=target_frames,
-                                                sample_rate=self.sample_rate, channels=origin_sample.shape[0], origin_sample=origin_sample, beatmap_file=beatmap_file, hop_length= hop_length)
+                segment_info = SegmentInfo(file_meta, round(seek_time_in_quaver * self.minimum_note), total_code=total_code,
+                                                sample_rate=self.sample_rate, origin_sample=origin_sample, beatmap_file=beatmap_file)
             except Exception as exc:
                 logger.warning("Error opening file %s, seek time, %d,  %r", error_path, round(seek_time_in_quaver * self.minimum_note), exc)
                 if retry == self.max_read_retry - 1:
@@ -1110,22 +1119,23 @@ class AudioDataset:
             else:
                 break
         
-        return segment_info, resample_sample, beatmap_token
+        return segment_info, audio_token, beatmap_token
     def collater(self, samples):
         """The collater function has to be provided to the dataloader
         if AudioDataset has return_info=True in order to properly collate
         the samples of a batch.
         """
-        segment_infos, resample_sample, beatmap_tokens = zip(*samples)
+        segment_infos, audio_tokens, beatmap_tokens = zip(*samples)
 
         segment_infos = list(segment_infos)
-        resample_sample = list(resample_sample)
+        audio_tokens = list(audio_tokens)
         beatmap_tokens = list(beatmap_tokens)
         beatmap_tokens = torch.stack(beatmap_tokens)
         beatmap_tokens = beatmap_tokens.to(torch.int64)
-        resample_sample = torch.stack(resample_sample)
+        audio_tokens = torch.stack(audio_tokens)
+        audio_tokens = audio_tokens.permute(0, 2, 1).long()
 
-        return segment_infos, resample_sample, beatmap_tokens
+        return segment_infos, audio_tokens, beatmap_tokens
 
     def _filter_duration(self, meta: tp.List[AudioMeta]) -> tp.List[AudioMeta]:
         """Filters out_origin audio files with audio durations that will not allow to sample examples from them."""
@@ -1211,7 +1221,7 @@ def main():
     args = parser.parse_args()
     # use deno api to parse beatmap
     cfg = OmegaConf.load(args.beatmapgen_solver)
-    assert args.pipeline in ["create_manifest", "tokenize_beatmap"]
+    assert args.pipeline in ["create_manifest", "tokenize_beatmap", "tokenize_audio"]
     if args.pipeline == "create_manifest":
         request_data = {
             "directory": args.root, 
@@ -1270,19 +1280,45 @@ def main():
                 beatmap_token = beatmap_token.to(torch.int8)
                 filename = os.path.splitext(filename)[0] + ".bin"
                 beatmap_token_path = supported_path / filename
-                # torch.save(beatmap_token, beatmap_token_path)
                 with open(beatmap_token_path, 'wb') as f:
                     f.write(beatmap_token.numpy().tobytes())
                 item.beatmap_token_path = str(beatmap_token_path)
                 item.duration_in_quaver = segment_duration_in_quaver
                 supported_meta.append(item)
             else:
-                fail_meta.append((item.id, result[COLORNOTE]['not_equal_num']))
+                fail_meta.append((item.id+"_"+item.difficulty, result[COLORNOTE]['not_equal_num']))
         supported_meta.sort()
         save_audio_meta(args.out_originput_meta_file, supported_meta)
         print("request finished, summary:")
         for fail in fail_meta:
             print(fail)
-        
+    elif args.pipeline == "tokenize_audio":
+        from ..solvers import CompressionSolver
+        model = CompressionSolver.model_from_checkpoint('//pretrained/facebook/encodec_32khz', device='cuda')
+        meta_file = Path(args.out_originput_meta_file)
+        meta = load_audio_meta(meta_file, resolve=False)
+        supported_meta = []
+        last_id = None
+        for one_meta in tqdm(meta, desc="Processing files"):
+            if last_id is None or last_id != one_meta.id:
+                origin_sample, sr = audio_read(one_meta.song_path, pad=False)
+                resample_sample = convert_audio(origin_sample, sr, cfg.sample_rate, cfg.channels)
+                resample_sample = resample_sample.unsqueeze(0).cuda()
+                audio_token, scale = model.encode(resample_sample)
+                file_path = one_meta.beatmap_file_path
+                full_path = Path(file_path).parent
+                supported_path = full_path / 'supported'
+                audio_token = audio_token.squeeze(0).permute(1, 0).short().cpu()
+                filename = "audio_token.bin"
+                audio_token_path = supported_path / filename
+                with open(audio_token_path, 'wb') as f:
+                    f.write(audio_token.numpy().tobytes())
+            one_meta.duration_in_code = audio_token.shape[0]
+            one_meta.audio_token_path = str(audio_token_path)
+            supported_meta.append(one_meta)
+            last_id = one_meta.id
+        supported_meta.sort()
+        save_audio_meta(args.out_originput_meta_file, supported_meta)
+
 if __name__ == '__main__':
     main()

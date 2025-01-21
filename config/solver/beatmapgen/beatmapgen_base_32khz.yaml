@@ -121,9 +121,6 @@ beatmapgen_lm:
 
 audio_token:
   representation: musicgen # spectrogram, encodec or  musicgen
-  spectrogram:
-    center: False
-    n_mels: 128
   encodec:
     use_receptive_field: False # use receptive_field to look for representation from encodec
     representation_dim: 128
