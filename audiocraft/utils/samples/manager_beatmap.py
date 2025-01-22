@@ -262,7 +262,8 @@ class SampleManager:
             generated_path = self.base_folder / 'generated' / sample_id
             reference_path_zip = self.base_folder / 'reference_zip' / sample_id
             generated_path_zip = self.base_folder / 'generated_zip' / sample_id
-            self.add_sample(reference_path, audio, meta, ground_truth_beatmap, reference_path_zip, sample_id, )
+            if ground_truth_beatmap is not None:
+                self.add_sample(reference_path, audio, meta, ground_truth_beatmap, reference_path_zip, sample_id, )
             self.add_sample(generated_path, audio, meta, gen_beatmap, generated_path_zip, sample_id)
 
     def get_samples(self, epoch: int = -1, max_epoch: int = -1, exclude_prompted: bool = False,

@@ -556,7 +556,10 @@ class BeatmapGenSolver(base.StandardSolver):
         
         ref_audio = [segment_info.origin_sample for segment_info in segment_infos]
         seek_time_in_quaver = [self.beatmap.time_map(info.seek_time)[1] for info in segment_infos]
-        ref_beatmap_file = [self.beatmap.sample_beatmap_file(info.beatmap_file, seek_time, seek_time + self.cfg.dataset.segment_duration, info.meta.bpm) for info, seek_time in zip(segment_infos, seek_time_in_quaver)]
+        if segment_infos[0].beatmap_file is not None:
+            ref_beatmap_file = [self.beatmap.sample_beatmap_file(info.beatmap_file, seek_time, seek_time + self.cfg.dataset.segment_duration, info.meta.bpm) for info, seek_time in zip(segment_infos, seek_time_in_quaver)]
+        else:
+            ref_beatmap_file = [None] * len(segment_infos)
         gen_beatmap_file = [self.beatmap.detokenize(gen_beatmap_token.squeeze(0), segment_info.meta.bpm) for gen_beatmap_token, segment_info in zip(gen_beatmap_tokens, segment_infos) ]
         sample_id = [f"{segment_info.meta.id}_{segment_info.meta.difficulty}_{segment_info.seek_time}" for segment_info in segment_infos]
         meta = [segment_info.meta for segment_info in segment_infos]

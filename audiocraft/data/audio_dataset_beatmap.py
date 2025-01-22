@@ -969,6 +969,7 @@ class AudioDataset:
         self.target_code = math.ceil(maximum_duration/stride_rate)
         self.code_rate = code_rate
         self.split = split
+        self.is_generated = False
         if not load_wav:
             assert segment_duration is not None
         self.permutation_on_files = permutation_on_files
@@ -1081,14 +1082,15 @@ class AudioDataset:
             seek_time_in_second = seek_time_in_quaver * self.minimum_note / file_meta.bpm * 60
             segment_duration_in_sec = segment_duration_in_quaver * self.minimum_note / file_meta.bpm * 60
             try:
-                if self.split == 'generate':
+                if self.split == 'generate' and not self.is_generated:
                     # 打开beatmap json
                     error_path = file_meta.supported_file_path
                     with open(file_meta.supported_file_path, 'r', encoding = 'utf-8') as f:
                         beatmap_file = json.load(f)
                     # 打开audio
                     error_path = file_meta.song_path
-                    origin_sample, sr = audio_read(file_meta.song_path, seek_time_in_second, segment_duration_in_sec, pad=False)  
+                    origin_sample, sr = audio_read(file_meta.song_path, seek_time_in_second, segment_duration_in_sec, pad=False)
+                    self.is_generated = True
                 else:
                     beatmap_file = None
                     origin_sample = None
