@@ -915,6 +915,8 @@ class AudioDataset:
                  code_rate: int,
                  stride_rate: int,
                  split: str,
+                 generate_every: int,
+                 beatmap: Beatmap,
                  segment_duration: tp.Optional[float] = None,
                  shuffle: bool = True,
                  num_samples: int = 10_000,
@@ -969,7 +971,8 @@ class AudioDataset:
         self.target_code = math.ceil(maximum_duration/stride_rate)
         self.code_rate = code_rate
         self.split = split
-        self.is_generated = False
+        self.generate_every = generate_every
+        self.beatmap = Beatmap(**beatmap)
         if not load_wav:
             assert segment_duration is not None
         self.permutation_on_files = permutation_on_files
@@ -1082,18 +1085,18 @@ class AudioDataset:
             seek_time_in_second = seek_time_in_quaver * self.minimum_note / file_meta.bpm * 60
             segment_duration_in_sec = segment_duration_in_quaver * self.minimum_note / file_meta.bpm * 60
             try:
-                if self.split == 'generate' and not self.is_generated:
+                beatmap_file = None
+                origin_sample = None
+                if self.split == 'generate' and self.current_epoch == self.generate_every:
                     # 打开beatmap json
                     error_path = file_meta.supported_file_path
                     with open(file_meta.supported_file_path, 'r', encoding = 'utf-8') as f:
                         beatmap_file = json.load(f)
+                    beatmap_file = self.beatmap.sample_beatmap_file(beatmap_file, seek_time_in_quaver, seek_time_in_quaver + segment_duration_in_quaver, file_meta.bpm)
+                if self.split == 'generate':
                     # 打开audio
                     error_path = file_meta.song_path
                     origin_sample, sr = audio_read(file_meta.song_path, seek_time_in_second, segment_duration_in_sec, pad=False)
-                    self.is_generated = True
-                else:
-                    beatmap_file = None
-                    origin_sample = None
                 # 打开beatmap token
                 error_path = file_meta.beatmap_token_path
                 start = seek_time_in_quaver

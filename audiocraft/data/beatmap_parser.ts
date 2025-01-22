@@ -113,7 +113,7 @@ export const read = async (
           id = dir.name
         }
         output_meta.push({
-          id: id + "_" + difficultyTuple[1],
+          id: id,
           beatmap_info_path: join(dir.fullPath, info_path),
           song_path: songPath,
           beatmap_file_path: difficultyPath,

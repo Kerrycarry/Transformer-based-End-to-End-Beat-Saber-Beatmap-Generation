@@ -234,10 +234,13 @@ class BeatmapGenSolver(base.StandardSolver):
         self.cfg.beatmapgen_lm.segment_duration = segment_duration
         self.maximum_duration = segment_duration * minimum_note * 60 / minimum_bpm * self.cfg.sample_rate
         self.cfg.dataset.maximum_duration = self.maximum_duration
-        OmegaConf.set_struct(self.cfg, True)
-        self.dataloaders = builders.get_audio_datasets(self.cfg, dataset_type=self.DATASET_TYPE)
+        self.cfg.dataset.generate_every = self.cfg.generate.every
         note_type = [key for key, value in beatmap_kwargs["note_type"].items() if value]
         self.beatmap = Beatmap(minimum_note = minimum_note, token_id_size = token_id_size, position_size = position_size, note_types = note_type)
+        self.cfg.dataset.beatmap = self.beatmap
+        OmegaConf.set_struct(self.cfg, True)
+        self.dataloaders = builders.get_audio_datasets(self.cfg, dataset_type=self.DATASET_TYPE)
+        
     def show(self) -> None:
         """Show the compression model and LM model."""
         self.logger.info("Compression model:")
@@ -555,11 +558,7 @@ class BeatmapGenSolver(base.StandardSolver):
         assert gen_beatmap_tokens.dim() == 3
         
         ref_audio = [segment_info.origin_sample for segment_info in segment_infos]
-        seek_time_in_quaver = [self.beatmap.time_map(info.seek_time)[1] for info in segment_infos]
-        if segment_infos[0].beatmap_file is not None:
-            ref_beatmap_file = [self.beatmap.sample_beatmap_file(info.beatmap_file, seek_time, seek_time + self.cfg.dataset.segment_duration, info.meta.bpm) for info, seek_time in zip(segment_infos, seek_time_in_quaver)]
-        else:
-            ref_beatmap_file = [None] * len(segment_infos)
+        ref_beatmap_file = [info.beatmap_file for info in segment_infos]
         gen_beatmap_file = [self.beatmap.detokenize(gen_beatmap_token.squeeze(0), segment_info.meta.bpm) for gen_beatmap_token, segment_info in zip(gen_beatmap_tokens, segment_infos) ]
         sample_id = [f"{segment_info.meta.id}_{segment_info.meta.difficulty}_{segment_info.seek_time}" for segment_info in segment_infos]
         meta = [segment_info.meta for segment_info in segment_infos]
@@ -586,6 +585,7 @@ class BeatmapGenSolver(base.StandardSolver):
 
         dataset = get_dataset_from_loader(loader)
         dataset_duration = dataset.segment_duration
+        dataset.current_epoch = self.epoch
         assert dataset_duration is not None
         assert isinstance(dataset, AudioDataset)
         target_duration = self.cfg.generate.lm.gen_duration
