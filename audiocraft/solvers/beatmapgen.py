@@ -560,7 +560,7 @@ class BeatmapGenSolver(base.StandardSolver):
         ref_audio = [segment_info.origin_sample for segment_info in segment_infos]
         ref_beatmap_file = [info.beatmap_file for info in segment_infos]
         gen_beatmap_file = [self.beatmap.detokenize(gen_beatmap_token.squeeze(0), segment_info.meta.bpm) for gen_beatmap_token, segment_info in zip(gen_beatmap_tokens, segment_infos) ]
-        sample_id = [f"{segment_info.meta.id}_{segment_info.meta.difficulty}_{segment_info.seek_time}" for segment_info in segment_infos]
+        sample_id = [f"{segment_info.meta.id}_{segment_info.seek_time}" for segment_info in segment_infos]
         meta = [segment_info.meta for segment_info in segment_infos]
         bench_end = time.time()
 

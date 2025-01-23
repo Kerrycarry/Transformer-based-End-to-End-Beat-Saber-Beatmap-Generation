@@ -113,7 +113,7 @@ export const read = async (
           id = dir.name
         }
         output_meta.push({
-          id: id,
+          id: id + "_" + difficultyTuple[1],
           beatmap_info_path: join(dir.fullPath, info_path),
           song_path: songPath,
           beatmap_file_path: difficultyPath,
@@ -166,8 +166,10 @@ export const generate_difficulty = async (
   const beatmapInfoPath = queryParams.get("beatmap_info_path")||'';
   const info_version = parseInt(queryParams.get("info_version")||'2');
   const beatmapName = queryParams.get("beatmap_name")||'';
+  const write_info_switch: boolean = queryParams.get("write_info_switch")==="True";
   // bsmap.globals.directory = save_directory|| '';
   let parsedDifficulty, difficultyFile
+  // generate difficulty dat file
   try {
     difficultyFile = await Deno.readTextFile(filePath);
   } catch (error) {    
@@ -191,20 +193,22 @@ export const generate_difficulty = async (
     directory: save_directory,
     filename: difficulty+"Standard.dat"
   });
+  // generate info dat file
+  if (write_info_switch){
+    //move info
+    bsmap.globals.directory = dirname(beatmapInfoPath)
+    const info = bsmap.readInfoFileSync(basename(beatmapInfoPath)); 
+    // writeInfoFileSync(info)
+    info.song.title = beatmapName
+    info.audio.filename = "song.ogg"
+    info.difficulties = info.difficulties.filter(difficulties => difficulties.characteristic === 'Standard' && difficulties.difficulty === difficulty)
+    info.difficulties[0].filename = difficulty+"Standard.dat"
 
-  //move info
-  bsmap.globals.directory = dirname(beatmapInfoPath)
-  const info = bsmap.readInfoFileSync(basename(beatmapInfoPath)); 
-  // writeInfoFileSync(info)
-  info.song.title = beatmapName
-  info.audio.filename = "song.ogg"
-  info.difficulties = info.difficulties.filter(difficulties => difficulties.characteristic === 'Standard' && difficulties.difficulty === difficulty)
-  info.difficulties[0].filename = difficulty+"Standard.dat"
-
-  await bsmap.writeInfoFile(info, info_version, {
-    directory: save_directory,
-    filename: 'Info.dat'
-  })
+    await bsmap.writeInfoFile(info, info_version, {
+      directory: save_directory,
+      filename: 'Info.dat'
+    })
+  }
 
   response.status = 200;
   response.body = {

@@ -399,6 +399,30 @@ class Beatmap:
         beatmap_supported['lightshow'] = self.empty_light
         return token, unsupported_note, beatmap_origin, beatmap_supported
     
+    flip_color = {0: 1, 1: 0, -1: -1}
+    flip_direction = {0: 0, 1: 1, 2: 3, 3: 2, 4: 5, 5: 4, 6: 7, 7: 6, 8: 8}
+    def mirror(self, beatmap_origin: json):
+        beatmap_mirror = copy.deepcopy(beatmap_origin)
+        beatmap_difficulty = beatmap_mirror['difficulty']
+        for one_type in self.note_types:
+            note_list = beatmap_difficulty[one_type]
+            for note in note_list:
+                # flip posX
+                note['posX'] = 3 - note['posX']
+                if 'tailPosX' in note:
+                    note['tailPosX'] = 3 - note['tailPosX']
+                if 'width' in note:
+                    note['posX'] = note['posX'] - note['width'] + 1
+                # flip color
+                if 'color' in note:
+                    note['color'] = self.flip_color[note['color']]
+                # flip direction
+                if 'direction' in note:
+                    note['direction'] = self.flip_direction[note['direction']]
+                if 'tailDirection' in note:
+                    note['tailDirection'] = self.flip_direction[note['tailDirection']]
+        return beatmap_mirror
+    
     def detokenize(self, tokens: torch.Tensor, bpm: float):
         beatmap_reconstructe = {'difficulty':{}}
         colorNotes = []
@@ -1093,7 +1117,6 @@ class AudioDataset:
                     with open(file_meta.supported_file_path, 'r', encoding = 'utf-8') as f:
                         beatmap_file = json.load(f)
                     beatmap_file = self.beatmap.sample_beatmap_file(beatmap_file, seek_time_in_quaver, seek_time_in_quaver + segment_duration_in_quaver, file_meta.bpm)
-                if self.split == 'generate':
                     # 打开audio
                     error_path = file_meta.song_path
                     origin_sample, sr = audio_read(file_meta.song_path, seek_time_in_second, segment_duration_in_sec, pad=False)
@@ -1254,6 +1277,7 @@ def main():
         data['fail_audio_nps_bpm'] = [meta.id for meta in fail_meta]
         print(data)
     elif args.pipeline == "tokenize_beatmap":
+        # get beatmap class
         beatmap_kwargs = cfg.dataset.beatmap_kwargs
         position_size = beatmap_kwargs.position_size
         minimum_note = beatmap_kwargs.minimum_note
@@ -1268,6 +1292,10 @@ def main():
         fail_meta = []
         supported_meta = []
         for item in tqdm(meta, desc="Processing files"):
+            # this avoids repetitve generation for mirror meta
+            if item.id.split("_")[-1] == 'mirror':
+                continue
+            #load beatmap, tokenize, detokenize, compare difference 
             with open(item.beatmap_file_path, 'r', encoding = 'utf-8') as f:
                 beatmap_file = json.load(f)
             segment_duration_in_quaver = math.ceil(item.duration / 60 * item.bpm / minimum_note)
@@ -1276,27 +1304,48 @@ def main():
             result = beatmap.check_difference(beatmap_file, reconstructed_beatmap_file, unsupported_note)
 
             if all([result[note]['same'] for note in beatmap.note_types]):
+                # cache supported beatmap json
                 file_path = item.beatmap_file_path
                 full_path = Path(file_path)
                 path = full_path.parent
-                filename = full_path.name
-                supported_path = path / 'supported'
+                filename = full_path.name # Expert.json
+                supported_path = path / 'supported'  #/supported
                 supported_path.mkdir(parents=True, exist_ok=True)
-                supported_file_path = supported_path / filename
+                supported_file_path = supported_path / filename   # /supported/Expert.json
                 with open(supported_file_path, 'w') as f:
                     json.dump(beatmap_file_supported, f, indent=4)
                 item.supported_file_path = str(supported_file_path)
-                # cache whole beatmap token
+                # cache corresponding beatmap token
                 beatmap_token = beatmap_token.to(torch.int8)
-                filename = os.path.splitext(filename)[0] + ".bin"
-                beatmap_token_path = supported_path / filename
+                filename = os.path.splitext(filename)[0] + ".bin" # Expert.bin
+                beatmap_token_path = supported_path / filename # /supported/Expert.bin
                 with open(beatmap_token_path, 'wb') as f:
                     f.write(beatmap_token.numpy().tobytes())
                 item.beatmap_token_path = str(beatmap_token_path)
                 item.duration_in_quaver = segment_duration_in_quaver
                 supported_meta.append(item)
+
+                # mirror the supported beatmap json, tokenize, cache, create mirror meta
+                beatmap_file_mirror = beatmap.mirror(beatmap_file_supported)
+                beatmap_token_mirror, unsupported_note, _, _ = beatmap.tokenize(beatmap_file_mirror, segment_duration_in_quaver, item.bpm)
+                assert all([len(unsupported_note[note]) == 0 for note in beatmap.note_types])
+                filename_mirror = os.path.splitext(filename)[0] + "_mirror.json" # Expert_mirror.json
+                mirror_file_path = supported_path / filename_mirror #/supported/Expert_mirror.json
+                with open(mirror_file_path, 'w') as f:
+                    json.dump(beatmap_file_mirror, f, indent=4)
+                #update id, json path, token path
+                item_mirror = copy.deepcopy(item)
+                item_mirror.id = item_mirror.id + "_mirror"
+                item_mirror.supported_file_path = str(mirror_file_path)
+                beatmap_token_mirror = beatmap_token_mirror.to(torch.int8)
+                filename_mirror = os.path.splitext(filename_mirror)[0] + ".bin" # Expert_mirror.bin
+                mirror_token_path = supported_path / filename_mirror # /supported/Expert_mirror.bin
+                with open(mirror_token_path, 'wb') as f:
+                    f.write(beatmap_token_mirror.numpy().tobytes())
+                item_mirror.beatmap_token_path = str(mirror_token_path)
+                supported_meta.append(item_mirror)
             else:
-                fail_meta.append((item.id+"_"+item.difficulty, result[COLORNOTE]['not_equal_num']))
+                fail_meta.append((item.id, result[COLORNOTE]['not_equal_num']))
         supported_meta.sort()
         save_audio_meta(args.out_originput_meta_file, supported_meta)
         print("request finished, summary:")
@@ -1324,7 +1373,8 @@ def main():
 
         last_id = None
         for one_meta in tqdm(meta, desc="tokenize audio"):
-            if last_id is None or last_id != one_meta.id:
+            current_id = one_meta.id.split("_")[0]
+            if last_id is None or last_id != current_id:
                 # get audio, resample, pad, tokenize, unpad
                 origin_sample, sr = audio_read(one_meta.song_path, pad=False)
                 resample_sample = convert_audio(origin_sample, sr, cfg.sample_rate, cfg.channels)
@@ -1366,7 +1416,7 @@ def main():
             one_meta.audio_token_path = str(audio_token_path)
             one_meta.receptive_field_path = str(receptive_field_path)
             # record last id
-            last_id = one_meta.id
+            last_id = current_id
         save_audio_meta(args.out_originput_meta_file, meta)
 
 if __name__ == '__main__':

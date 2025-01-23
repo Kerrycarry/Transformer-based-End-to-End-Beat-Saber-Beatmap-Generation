@@ -36,6 +36,7 @@ import requests
 import zipfile
 import os
 
+import shutil
 
 from ...data.audio import audio_read, audio_write
 
@@ -214,13 +215,15 @@ class SampleManager:
                     relative_path = os.path.relpath(file_path, source_folder)
                     zipf.write(file_path, relative_path)
 
-    def add_sample(self, save_directory, audio, meta, beatmap, save_directory_zip, sample_id):
-        song_name = 'song'
-        audio_write(save_directory / song_name, audio, meta.sample_rate, format="ogg")
+    def add_sample(self, save_directory, audio, meta, beatmap, save_directory_zip, sample_id, write_info_switch):
+        # save audio
+        if audio is not None:
+            song_name = 'song'
+            audio_write(save_directory / song_name, audio, meta.sample_rate, format="ogg")
+        # save beatmap json file
         with open((save_directory / meta.difficulty).with_suffix('.json'), 'w', encoding='utf-8') as f:
             json.dump(beatmap, f, ensure_ascii=False, indent=2)
-        
-        
+        # use deno api to convert json to dat, and get info
         request_data = {
             "beatmap_file_path": (save_directory / meta.difficulty).with_suffix('.json'),
             "difficulty": meta.difficulty,
@@ -228,11 +231,13 @@ class SampleManager:
             "beatmap_info_path": meta.beatmap_info_path,
             "beatmap_name": sample_id,
             "difficulty_version": self.xp.cfg.parser_pipeline.generate_difficulty_version,
-            'info_version': self.xp.cfg.parser_pipeline.generate_info_version 
+            'info_version': self.xp.cfg.parser_pipeline.generate_info_version,
+            "write_info_switch": write_info_switch,
         }
         response = requests.get(self.xp.cfg.parser_pipeline.generate_url, params=request_data)
         if response.status_code != 200:
             print(f"Error: {response.status_code}, {response.text}")
+        # pack everything into zip
         self.zip_folder(save_directory, save_directory_zip.with_suffix('.zip'))
 
     def add_samples(self, sample_ids: list, audios: list, metas: list, epoch: int,
@@ -257,14 +262,22 @@ class SampleManager:
         """
         
         for index, (sample_id, audio, meta, ground_truth_beatmap, gen_beatmap) in enumerate(zip(sample_ids, audios, metas, ground_truth_beatmaps, gen_beatmaps)):
-            sample_id = f"{epoch}-{index}_{sample_id}"
             reference_path = self.base_folder / 'reference' / sample_id
-            generated_path = self.base_folder / 'generated' / sample_id
+            generated_path = self.base_folder / 'generated' / f"{epoch}-{index}_{sample_id}"
             reference_path_zip = self.base_folder / 'reference_zip' / sample_id
-            generated_path_zip = self.base_folder / 'generated_zip' / sample_id
+            generated_path_zip = self.base_folder / 'generated_zip' / f"{epoch}-{index}_{sample_id}"
+            # generate every for reference
             if ground_truth_beatmap is not None:
-                self.add_sample(reference_path, audio, meta, ground_truth_beatmap, reference_path_zip, sample_id, )
-            self.add_sample(generated_path, audio, meta, gen_beatmap, generated_path_zip, sample_id)
+                self.add_sample(reference_path, audio, meta, ground_truth_beatmap, reference_path_zip, sample_id, True)
+            # copy song.ogg from reference
+            song_name = 'song.ogg'
+            os.makedirs(generated_path, exist_ok=True)
+            shutil.copy(reference_path / song_name, generated_path / song_name)
+            # copy Info.dat from reference
+            info_name = 'Info.dat'
+            shutil.copy(reference_path / info_name, generated_path / info_name)
+            # after copy these two, only need to generate beatmap dat file
+            self.add_sample(generated_path, None, meta, gen_beatmap, generated_path_zip, sample_id, False)
 
     def get_samples(self, epoch: int = -1, max_epoch: int = -1, exclude_prompted: bool = False,
                     exclude_unprompted: bool = False, exclude_conditioned: bool = False,
