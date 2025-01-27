@@ -9,6 +9,16 @@ start_parser_api() {
     echo "Deno API PID: $API_PID"
 }
 
+# 
+beatmap_dataset_load() {
+    echo "Starting loading beatmap dataset..."
+    nohup deno run --allow-net --allow-read --allow-write audiocraft/data/beatmap_dataset.ts \
+    dataset/$SOURCE_DIR egs/$MANIFEST_DIR/data.jsonl $PIPELINE 0.125 \
+     > "$LOG_FILE" 2>&1 &
+    DENO_PID=$!
+    wait $DENO_PID
+}
+
 #
 run_dora_process() {
     echo "Running beatmapgen without caching"
@@ -60,7 +70,12 @@ kill_process() {
 echo "Calling command: $0 $@" 
 FIRST_ARG=$1
 TAG=$2
+
 if [[ "$FIRST_ARG" == "-2" ]]; then
+    SOURCE_DIR=$2
+    MANIFEST_DIR=$3
+    PIPELINE=$4
+elif [[ "$FIRST_ARG" == "-3" ]]; then
     SOURCE_DIR=$2
     MANIFEST_DIR=$3
     SOLVER_DIR=$4
@@ -83,15 +98,20 @@ if [[ "$FIRST_ARG" == "-1" ]]; then
     run_dora_process
     stop_parser_api
 elif [[ "$FIRST_ARG" == "-2" ]]; then
-    TAG="manifest"
-    LOG_FILE="${LOG_DIR}/beatmapgen_log_${TAG}.dora"
-    LOG_FILE2="${LOG_DIR}/beatmapgen_log_${TAG}.api"
+    TAG="deno_pipeline"
+    LOG_FILE="${LOG_DIR}/beatmapgen_log_${TAG}"
+    beatmap_dataset_load
+elif [[ "$FIRST_ARG" == "-3" ]]; then
+    TAG="python_pipeline"
+    LOG_FILE="${LOG_DIR}/beatmapgen_log_${TAG}"
+    TAG="generate_api"
+    LOG_FILE2="${LOG_DIR}/beatmapgen_log_${TAG}"
     start_parser_api
     run_python_process
     stop_parser_api
-elif [[ "$FIRST_ARG" == "-3" ]]; then
-    start_parser_api
 elif [[ "$FIRST_ARG" == "-4" ]]; then
+    start_parser_api
+elif [[ "$FIRST_ARG" == "-5" ]]; then
     for PROCESS in deno dora
     do
         kill_process "$PROCESS"
@@ -104,9 +124,11 @@ fi
 # 启动主流程
 # nohup ./beatmapgen.sh -1 default > log/beatmapgen_log.txt 2>&1 &
 # nohup ./beatmapgen.sh -1 default --clear > log/beatmapgen_log.txt 2>&1 &
-# 启动manifest制作流程
-# nohup ./beatmapgen.sh -2 CustomLevels2 bs_curated config/solver/beatmapgen/beatmapgen_base_32khz.yaml create_manifest > log/beatmapgen_log.txt 2>&1 &
-# nohup ./beatmapgen.sh -2 CustomLevels2 bs_curated config/solver/beatmapgen/beatmapgen_base_32khz.yaml tokenize_beatmap > log/beatmapgen_log.txt 2>&1 &
+# 启动deno manifest制作流程
+# nohup ./beatmapgen.sh -2 CustomLevels2 bs_curated create_manifest > log/beatmapgen_log.txt 2>&1 &
+# 启动python制作流程
+# nohup ./beatmapgen.sh -3 CustomLevels2 bs_curated config/solver/beatmapgen/beatmapgen_base_32khz.yaml create_manifest > log/beatmapgen_log.txt 2>&1 &
+# nohup ./beatmapgen.sh -3 CustomLevels2 bs_curated config/solver/beatmapgen/beatmapgen_base_32khz.yaml tokenize_beatmap > log/beatmapgen_log.txt 2>&1 &
 # 启动 api
 # ./beatmapgen.sh -3
 # kill 掉api和dora
