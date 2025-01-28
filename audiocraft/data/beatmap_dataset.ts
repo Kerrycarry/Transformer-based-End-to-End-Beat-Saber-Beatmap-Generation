@@ -1,12 +1,8 @@
-//deno run --allow-net --allow-read --allow-write beatmap_parser.ts 
-//deno run --allow-net --allow-read --allow-write beatmap_parser.ts &
-
 import * as bsmap from '../../../BeatSaber-JSMap/src/mod.ts';
-import { join, basename, dirname } from "https://deno.land/std@0.201.0/path/mod.ts";
-import { exists, copy } from "https://deno.land/std/fs/mod.ts";
-
-const pathCount: Record<string, number> = {};
-let complexCount : number = 0
+import type { IWrapInfo } from '../../../BeatSaber-JSMap/src/types/beatmap/wrapper/info.ts';
+import type { IWrapBeatmap } from '../../../BeatSaber-JSMap/src/types/beatmap/wrapper/beatmap.ts';
+import { join } from "https://deno.land/std@0.201.0/path/mod.ts";
+import { exists } from "https://deno.land/std/fs/mod.ts";
 
 function hasBpmFieldWithNonEmptyListRecursive(
   instance: any,
@@ -47,18 +43,13 @@ function hasBpmFieldWithNonEmptyListRecursive(
 
 function getDecimalPlaces(num: number): number {
   const numStr = num.toString();
-  if (numStr.includes('.')) {
-    return numStr.split('.')[1].length;
-  }
-  return 0; // 没有小数点，返回0
+  return numStr.includes('.') ? numStr.split('.')[1].length : 0;
 }
 
 async function getDirectoriesWithPaths(dirPath: string) {
   const entries = [];
-  // 遍历目录中的文件和文件夹
   for await (const entry of Deno.readDir(dirPath)) {
     if (entry.isDirectory) {
-      // 获取文件夹的完整路径
       const fullPath = join(dirPath, entry.name);
       entries.push({ name: entry.name, fullPath });
     }
@@ -66,155 +57,240 @@ async function getDirectoriesWithPaths(dirPath: string) {
   return entries;
 }
 
-const directory = Deno.args[0];
-const manifest_directory = Deno.args[1];
-const pipeline = Deno.args[2];
-const complex_beat_number = Number(Deno.args[3]);
-
-const directories = await getDirectoriesWithPaths(directory||'');
-const new_entries = [];
-
-const output_meta = [];
-let load: number = 0;
-const fail_dir_error: string[] = [];
-const fail_audio_offset: string[] = [];
-const fail_editor_offset: string[] = [];
-const fail_bpm_events: string[] = [];
-const fail_no_offset: string[] = [];
-const fail_floating_error: string[] = [];
-const fail_complex_beats: string[] = [];
-for (const dir of directories){
-  bsmap.globals.directory = dir.fullPath || '';
+function processBeatmap(meta: any) {
+  bsmap.globals.directory = meta.beatmap_path || '';
   try {
-    let info_path = "Info.dat"
-    const file1 = `${dir.fullPath}/info.dat`;
-    if (await exists(file1)) {
-      info_path = "info.dat"
-    }
-    const info = bsmap.readInfoFileSync(info_path); 
-    // filter map with audioOffset
-    if (info.audio.audioOffset != 0){
-      fail_audio_offset.push(dir.name);
-      continue; 
-    }
-    //parse 不同的 diff 为json并且保存
-    const difficultyTuples: [string, string,number,number, number][] = info.difficulties
-      .filter(difficulty => difficulty.characteristic === 'Standard')  // 过滤characteristic为Standard的
-      .map(difficulty => [difficulty.filename, difficulty.difficulty,difficulty.njs,difficulty.njsOffset, difficulty.customData._editorOffset]);  // 提取filename,difficulty等组成元组
+    const info = bsmap.readInfoFileSync(meta.info_name);
     
-    for (const difficultyTuple of difficultyTuples){
-      const difficultyFile = bsmap.readDifficultyFileSync(difficultyTuple[0]);
-      // filter map with bpmEvents
-      const res = hasBpmFieldWithNonEmptyListRecursive(difficultyFile)
-      if (res){
-          fail_bpm_events.push(dir.name+'_'+difficultyTuple[1])
-          continue;
-      }
-      // if (difficultyFile.bpmEvents.length != 0){
-      //   //例外：如果只有一个bpm event且其time=0并bpm和本身bpm一样
-      //   if (!(difficultyFile.bpmEvents.length == 1 && difficultyFile.bpmEvents[0].time ==0 && difficultyFile.bpmEvents[0].bpm == info.audio.bpm)){
-      //     fail_bpm_events.push(dir.name+'_'+difficultyTuple[1])
-      //     continue;
-      //   }
-      // }
-      // if (difficultyFile.difficulty?.customData?._BPMChanges && difficultyFile.difficulty.customData._BPMChanges.length > 0){
-      //     fail_bpm_events.push(dir.name+'_'+difficultyTuple[1])
-      //     continue;
-      //   }
-      if (difficultyTuple[4] != 0){
-          fail_editor_offset.push(dir.name+'_'+difficultyTuple[1])
-          continue;
-        }
+    if (info.audio.audioOffset !== 0) {
+      error[AUDIO_OFFSET].push(meta.id);
+      return;
+    }
 
-      // filter 找出需要16分音符或者更小单位的时间
-      const beat: number[] = difficultyFile.colorNotes.map(colorNote => colorNote.time);
-      const complexBeats = beat.filter(time => time % complex_beat_number !== 0);
-      if (complexBeats.length != 0){
-        const timeDeciamlPlaces: number[] = complexBeats.map(time => getDecimalPlaces(time));
-        if (timeDeciamlPlaces.some(num => num > 6)){
-          fail_floating_error.push(dir.name+'_'+difficultyTuple[1]);
-          continue;
-        }
-        const offsets: number[] = complexBeats.map(time => time % complex_beat_number);
-        if(offsets.every((val, _, arr) => val === arr[0])){
-          fail_no_offset.push(dir.name+'_'+difficultyTuple[1]);
-          continue;
-        }
-        if (complexBeats.length/difficultyFile.colorNotes.length > 0.2){
-          console.log("found > 0.2")
-          console.log(dir.name+'_'+difficultyTuple[1])
-          console.log("*******************",complexBeats.length, difficultyFile.colorNotes.length, complexBeats.length/difficultyFile.colorNotes.length)
-          console.log(difficultyFile.colorNotes.map(note => note.time))
-          complexCount = complexCount + 1
-        }
-        console.log("*******************",complexBeats)
-        
-        new_entries.push({name: dir.name, fullPath: dir.fullPath})
-        fail_complex_beats.push(dir.name+'_'+difficultyTuple[1]);
-        continue;
-      }
-      //更新meta, egg, diff json位置，bpm, njs, njsoffset
-      const regex = /^[a-zA-Z0-9]+/;
-      const match = dir.name.match(regex);
-      let id
-      if (match) {
-        id = match[0]
-      }
-      else{
-        id = dir.name
-      }
-      output_meta.push({
-        id: id + "_" + difficultyTuple[1],
-        beatmap_path: dir.fullPath,
-        info_name: info_path,
-        song_name: info.audio.filename,
-        beatmap_file_name: difficultyTuple[1]+".json",
-        difficulty: difficultyTuple[1],
-        bpm: info.audio.bpm,
-        njs: difficultyTuple[2],
-        njsoffset: difficultyTuple[3],
-        note_num: {
-          colorNotes: difficultyFile.colorNotes.length,
-          bombNotes: difficultyFile.bombNotes.length,
-          obstacles: difficultyFile.obstacles.length,
-          arcs: difficultyFile.arcs.length,
-          chains: difficultyFile.chains.length,
-        },
-      });
-      load++;
-    }
+    const difficultyFile = bsmap.readDifficultyFileSync(meta.beatmap_dat_name);
     
+    if (hasBpmFieldWithNonEmptyListRecursive(difficultyFile)) {
+      error[BPM_EVENTS].push(meta.id);
+      return;
+    }
+
+    if (meta.editor_offset !== 0) {
+      error[EDITOR_OFFSET].push(meta.id);
+      return;
+    }
+
+    const complexBeats = getComplexBeats(difficultyFile);
+    if (complexBeats.length > 0) {
+      handleComplexBeats(complexBeats, meta.id);
+      return;
+    }
+
+    updateNewMeta(meta, difficultyFile);
+
   } catch (error) {
-    console.error("捕获到的错误:", error);
-    fail_dir_error.push(dir.name);
+    console.error("Error processing directory:", meta.beatmap_path, error);
+    error[DIR_ERROR].push(meta.id);
   }
 }
 
-console.log("*****************************result:")
-console.log("Path count:", pathCount);
-console.log("Nontcomplex count:", complexCount);
 
+async function processDirectory(dir: { name: string, fullPath: string }) {
+  bsmap.globals.directory = dir.fullPath || '';
+  try {
+    const infoPath = await getInfoPath(dir.fullPath);
+    const info = bsmap.readInfoFileSync(infoPath);
 
-// Convert each JSON object to a string and write it to the file
+    const difficultyTuples = getDifficultyTuples(info);
+
+    for (const difficultyTuple of difficultyTuples) {
+
+      updateMeta(info, difficultyTuple, dir);
+    }
+    
+  } catch (error) {
+    console.error("Error processing directory:", dir.name, error);
+    error[DIR_ERROR].push(dir.name);
+  }
+}
+
+async function getInfoPath(dirPath: string): Promise<string> {
+  const filePath = `${dirPath}/info.dat`;
+  const fileExists = await exists(filePath); // Await the exists check
+  return fileExists ? "info.dat" : "Info.dat";
+}
+
+function getDifficultyTuples(info: IWrapInfo): [string, string, number, number, number][] {
+  return info.difficulties
+    .filter(difficulty => difficulty.characteristic === 'Standard')
+    .map(difficulty => [
+      difficulty.filename,
+      difficulty.difficulty,
+      difficulty.njs,
+      difficulty.njsOffset,
+      difficulty.customData._editorOffset
+    ]);
+}
+
+function getComplexBeats(difficultyFile: IWrapBeatmap): number[] {
+  const beats = difficultyFile.colorNotes.map(note => note.time);
+  return beats.filter(time => time % complexBeatNumber !== 0);
+}
+
+function handleComplexBeats(complexBeats: number[], id: string ) {
+  const timeDecimalPlaces = complexBeats.map(time => getDecimalPlaces(time));
+  if (timeDecimalPlaces.some(num => num > 6)) {
+    error[FLOATING_ERROR].push(id);
+    return;
+  }
+
+  const offsets = complexBeats.map(time => time % complexBeatNumber);
+  if (offsets.every((val, _, arr) => val === arr[0])) {
+    error[MISSING_OFFSET].push(id);
+    return;
+  }
+
+  if (complexBeats.length / complexBeatNumber > 0.2) {
+    console.log("Complex beat detected:", `${id}`, complexBeats);
+    complexCount++;
+  }
+
+  error[COMPLEX_BEATS].push(id);
+}
+
+function updateMeta(info: IWrapInfo, difficultyTuple: [string, string, number, number, number], dir: { name: string, fullPath: string }) {
+  const id = dir.name.match(/^[a-zA-Z0-9]+/)?.[0] || dir.name;
+  
+  output_meta.push({
+    id: `${id}_${difficultyTuple[1]}`,
+    beatmap_path: dir.fullPath,
+    info_name: "Info.dat",
+    song_name: info.audio.filename,
+    bpm: info.audio.bpm,
+    beatmap_dat_name: difficultyTuple[0],
+    difficulty: difficultyTuple[1],
+    njs: difficultyTuple[2],
+    njsoffset: difficultyTuple[3],
+    editor_offset: difficultyTuple[4]
+  });
+  load++;
+}
+
+function updateNewMeta(meta: any, difficultyFile: any) {
+  const jsonData = JSON.stringify(difficultyFile);
+  const difficultyPath = meta.beatmap_path+"/"+meta.difficulty+".json"
+  Deno.writeTextFile(difficultyPath, jsonData);
+  meta.beatmap_json_name = meta.difficulty+".json";
+  meta.note_num = {
+    colorNotes: difficultyFile.colorNotes.length,
+    bombNotes: difficultyFile.bombNotes.length,
+    obstacles: difficultyFile.obstacles.length,
+    arcs: difficultyFile.arcs.length,
+    chains: difficultyFile.chains.length,
+  };
+  output_meta.push({
+    ...meta
+  });
+  load++;
+}
+const loadJsonl = async (filePath: string) => {
+  // 读取 JSONL 文件的内容
+  const data = await Deno.readTextFile(filePath);
+  
+  // 按行拆分，并将每行解析为 JSON 对象
+  const jsonObjects = data.split('\n').map(line => {
+    try {
+      return JSON.parse(line);
+    } catch (error) {
+      console.error('Invalid JSON on line:', line);
+      return null;
+    }
+  }).filter(Boolean); // 过滤掉解析失败的行
+  
+  return jsonObjects;
+};
+
+const output_meta: any[] = [];
+let load: number = 0;
+const DIR_ERROR: string = "Directory Error";
+const AUDIO_OFFSET: string = "Audio Offset";
+const EDITOR_OFFSET: string = "Editor Offset";
+const BPM_EVENTS: string = "BPM Events";
+const MISSING_OFFSET: string = "Missing Offset";
+const FLOATING_ERROR: string = "Floating Error";
+const COMPLEX_BEATS: string = "Complex Beats";
+
+// create a dictionary to store the each error type
+const error: Record<string, string[]> = {};
+error[DIR_ERROR] = [];
+error[AUDIO_OFFSET] = [];
+error[EDITOR_OFFSET] = [];
+error[BPM_EVENTS] = [];
+error[MISSING_OFFSET] = [];
+error[FLOATING_ERROR] = [];
+error[COMPLEX_BEATS] = [];
+
+const pathCount: Record<string, number> = {};
+let complexCount: number = 0;
+
+const [directory, manifest_directory, pipeline, complex_beat_number] = Deno.args;
+const complexBeatNumber = Number(complex_beat_number);
+
+if(pipeline === "create_manifest"){
+  const directories = await getDirectoriesWithPaths(directory || '');
+  for (const dir of directories) {
+    await processDirectory(dir);
+  }
+
+  const summary = {
+    dir_num: directories.length,
+    load,
+    error_num: {
+      DIR_ERROR: error[DIR_ERROR].length,
+    },
+    error_type:{
+      DIR_ERROR: error[DIR_ERROR],
+    }
+  };
+  console.log(summary);
+}
+else{
+  const input_meta: JSON[] = await loadJsonl(manifest_directory)
+  input_meta.forEach(meta => {
+    processBeatmap(meta)
+  });
+  console.log("*****************************result:");
+  console.log("Path count:", pathCount);
+  console.log("Noncomplex count:", complexCount);
+
+  // Summary
+  const summary = {
+    total_num: input_meta.length,
+    load,
+    error_num: {
+      DIR_ERROR: error[DIR_ERROR].length,
+      AUDIO_OFFSET: error[AUDIO_OFFSET].length,
+      EDITOR_OFFSET: error[EDITOR_OFFSET].length,
+      BPM_EVENTS: error[BPM_EVENTS].length,
+      MISSING_OFFSET: error[MISSING_OFFSET].length,
+      FLOATING_ERROR: error[FLOATING_ERROR].length,
+      COMPLEX_BEATS: error[COMPLEX_BEATS].length,
+    },
+    error_type:{
+      DIR_ERROR: error[DIR_ERROR],
+      AUDIO_OFFSET: error[AUDIO_OFFSET],
+      EDITOR_OFFSET: error[EDITOR_OFFSET],
+      BPM_EVENTS: error[BPM_EVENTS],
+      MISSING_OFFSET: error[MISSING_OFFSET],
+      FLOATING_ERROR: error[FLOATING_ERROR],
+      COMPLEX_BEATS: error[COMPLEX_BEATS],
+    }
+  };
+
+  console.log(summary);
+}
+
+// Save metadata to file
 const fileContent = output_meta.map((obj) => JSON.stringify(obj)).join("\n");
 await Deno.writeTextFile(manifest_directory, fileContent);
 
-// summary
-const res = { 
-  dir_num : directories.length,
-  total_num : load+fail_dir_error.length+fail_audio_offset.length+fail_bpm_events.length+fail_complex_beats.length,
-  load : load,
-  fail_dir_error_number: fail_dir_error.length,
-  fail_audio_offset_number: fail_audio_offset.length,
-  fail_editor_offset_number : fail_editor_offset.length,
-  fail_bpm_events_number: fail_bpm_events.length,
-  fail_no_offset_number: fail_no_offset.length,
-  fail_floating_error_number: fail_floating_error.length,
-  fail_complex_beats_number: fail_complex_beats.length,
-  fail_dir_error: fail_dir_error,
-  fail_audio_offset: fail_audio_offset,
-  fail_editor_offset : fail_editor_offset,
-  fail_bpm_events: fail_bpm_events,
-  fail_complex_beats: fail_complex_beats,
-  };
-console.log(res);
+
