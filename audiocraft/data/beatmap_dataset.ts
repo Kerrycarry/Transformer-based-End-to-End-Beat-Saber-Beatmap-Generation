@@ -3,6 +3,9 @@ import type { IWrapInfo } from '../../../BeatSaber-JSMap/src/types/beatmap/wrapp
 import type { IWrapBeatmap } from '../../../BeatSaber-JSMap/src/types/beatmap/wrapper/beatmap.ts';
 import { join } from "https://deno.land/std@0.201.0/path/mod.ts";
 import { exists } from "https://deno.land/std/fs/mod.ts";
+import { basename } from "https://deno.land/std/path/mod.ts";
+import { assert } from "https://deno.land/std/assert/mod.ts";
+
 
 function hasBpmFieldWithNonEmptyListRecursive(
   instance: any,
@@ -27,8 +30,6 @@ function hasBpmFieldWithNonEmptyListRecursive(
     ) {
       // 更新统计字典
       pathCount[currentPath] = (pathCount[currentPath] || 0) + 1;
-
-      console.log(`Found matching field: ${currentPath} with value:`);
       found = true; // 标记找到
     }
 
@@ -57,13 +58,17 @@ async function getDirectoriesWithPaths(dirPath: string) {
   return entries;
 }
 
-function processBeatmap(meta: any) {
+async function processBeatmap(meta: any, target_data: string[]) {
+  //check if meta.status is in target_data
+  if (!target_data.includes(meta.status)) {
+    updateFailMeta(meta, meta.status);
+    return;
+  }
   bsmap.globals.directory = meta.beatmap_path || '';
   try {
-    const info = bsmap.readInfoFileSync(meta.info_name);
-    
-    if (info.audio.audioOffset !== 0) {
+    if (meta.audio_offset !== 0) {
       error[AUDIO_OFFSET].push(meta.id);
+      updateFailMeta(meta, AUDIO_OFFSET);
       return;
     }
 
@@ -71,25 +76,28 @@ function processBeatmap(meta: any) {
     
     if (hasBpmFieldWithNonEmptyListRecursive(difficultyFile)) {
       error[BPM_EVENTS].push(meta.id);
+      updateFailMeta(meta, BPM_EVENTS);
       return;
     }
 
     if (meta.editor_offset !== 0) {
       error[EDITOR_OFFSET].push(meta.id);
+      updateFailMeta(meta, EDITOR_OFFSET);
       return;
     }
 
-    const complexBeats = getComplexBeats(difficultyFile);
-    if (complexBeats.length > 0) {
-      handleComplexBeats(complexBeats, meta.id);
+    const is_complex = await handleComplexBeats(meta, difficultyFile);
+    if (is_complex) {
+      error[COMPLEX_BEATS].push(meta.id);
+      updateFailMeta(meta, COMPLEX_BEATS);
       return;
-    }
-
-    updateNewMeta(meta, difficultyFile);
+    }          
+    updateProcessedMeta(meta, difficultyFile);
 
   } catch (error) {
-    console.error("Error processing directory:", meta.beatmap_path, error);
+    console.error("Error processing directory:", meta.beatmap_path,meta.beatmap_dat_name, error);
     error[DIR_ERROR].push(meta.id);
+    updateFailMeta(meta, DIR_ERROR);
   }
 }
 
@@ -99,14 +107,10 @@ async function processDirectory(dir: { name: string, fullPath: string }) {
   try {
     const infoPath = await getInfoPath(dir.fullPath);
     const info = bsmap.readInfoFileSync(infoPath);
-
     const difficultyTuples = getDifficultyTuples(info);
-
     for (const difficultyTuple of difficultyTuples) {
-
       updateMeta(info, difficultyTuple, dir);
     }
-    
   } catch (error) {
     console.error("Error processing directory:", dir.name, error);
     error[DIR_ERROR].push(dir.name);
@@ -127,7 +131,7 @@ function getDifficultyTuples(info: IWrapInfo): [string, string, number, number, 
       difficulty.difficulty,
       difficulty.njs,
       difficulty.njsOffset,
-      difficulty.customData._editorOffset
+      difficulty.customData?._editorOffset ?? 0
     ]);
 }
 
@@ -136,29 +140,176 @@ function getComplexBeats(difficultyFile: IWrapBeatmap): number[] {
   return beats.filter(time => time % complexBeatNumber !== 0);
 }
 
-function handleComplexBeats(complexBeats: number[], id: string ) {
-  const timeDecimalPlaces = complexBeats.map(time => getDecimalPlaces(time));
-  if (timeDecimalPlaces.some(num => num > 6)) {
-    error[FLOATING_ERROR].push(id);
-    return;
+async function copyBeatmap(meta: any, difficultyFile: IWrapBeatmap) {
+  // log the changes
+  console.log("copy path:");
+  const folderName = basename(meta.beatmap_path);
+  const command = `robocopy "X:\\Beatmap\\${folderName}" "X:\\Beatmap2\\${folderName}" /E`;
+  const command2 = `robocopy "X:\\Beatmap\\${folderName}\\processed" "X:\\Beatmap2\\${folderName}_processed" /E`;
+  const command3 = `Remove-Item -Path "X:\\Beatmap2\\*" -Recurse -Force`
+  console.log(command3);
+  console.log(command); 
+  console.log(command2);
+  //copy the beatmap to processed folder
+  const processedPath = `${meta.beatmap_path}/processed`;
+  //copy info.dat and song to processed folder
+  if (lastPath !== meta.beatmap_path) {
+    const fileExists = await exists(processedPath); 
+    if (!fileExists){await Deno.mkdir(processedPath);}
+    await Deno.copyFile(`${meta.beatmap_path}/${meta.info_name}`, `${processedPath}/${meta.info_name}`);
+    await Deno.copyFile(`${meta.beatmap_path}/${meta.song_name}`, `${processedPath}/${meta.song_name}`);
+    //copy difficulty to processed folder
+    const info = bsmap.readInfoFileSync(meta.info_name);
+    const difficultyTuples = getDifficultyTuples(info);
+    for (const difficultyTuple of difficultyTuples) {
+      await Deno.copyFile(`${meta.beatmap_path}/${difficultyTuple[0]}`, `${processedPath}/${difficultyTuple[0]}`);
+    }
+  }
+  // record lastPath to avoid redo
+  lastPath = meta.beatmap_path
+}
+
+async function handleOffset(difficultyFile: IWrapBeatmap, meta: any){
+  const offsets = difficultyFile.colorNotes.map(note => parseFloat((note.time % complexBeatNumber).toFixed(3)));
+  //get offset stats
+  const countMap = new Map<number, number>();
+  for (const num of offsets) {
+    countMap.set(num, (countMap.get(num) || 0) + 1);
+  }
+  // 找到出现次数最少的数
+  let minCountNum: number[] = [];
+  let minCount = Infinity;
+  for (const [num, count] of countMap) {
+    if (count < minCount) {
+      minCount = count;
+      minCountNum = [num]; // 重新赋值
+    } else if (count === minCount) {
+      minCountNum.push(num); // 追加
+    }
+  }
+  // 找到出现最多的数
+  let maxCountNum: number | null = null;
+  let maxCount = 0;
+
+  for (const [num, count] of countMap) {
+    if (count > maxCount) {
+      maxCount = count;
+      maxCountNum = num;
+    }
+  }
+  // 找到原列表中等于 minCountNum 的元素及其索引
+  const indices : number[] = [];
+  offsets.forEach((num, index) => {
+    if (minCountNum.includes(num)) {
+      indices.push(index);
+    }
+  });
+  const minElementsWithIndex = indices.map(index => difficultyFile.colorNotes[index].time);
+  console.log("***************offsets stats:");
+  console.log(countMap);
+  console.log("minElementsWithIndex:", minElementsWithIndex);
+  console.log("maxCountNum, maxCount:", maxCountNum, maxCount);
+  if(maxCountNum !== 0){
+    console.log("maxCountNum!=0:", maxCountNum);
+    console.log("maxCount/difficultyFile.colorNotes.length:", maxCount/difficultyFile.colorNotes.length);
+  }
+  if (countMap.size === 1 || (maxCountNum!==0 && maxCount > 0.7 * difficultyFile.colorNotes.length)) {
+    //update offset to info.dat
+    const processedPath = `${meta.beatmap_path}/processed`;
+    bsmap.globals.directory = processedPath;
+    const info = bsmap.readInfoFileSync(meta.info_name);
+    info.difficulties.map(difficulty => {
+      if (difficulty.characteristic === 'Standard' && difficulty.difficulty === meta.difficulty) {
+        const offset = (maxCountNum as number) * 60 / meta.bpm * 1000;
+        difficulty.customData._editorOffset = difficulty.customData._editorOffset + offset;
+        difficulty.customData._editorOldOffset = difficulty.customData._editorOffset;
+      }
+    });
+    await bsmap.writeInfoFile(info, 2, {
+      directory: processedPath,
+      filename: meta.info_name
+    });
+    // remove offset from difficulty.colorNotes
+    difficultyFile.colorNotes.map(note => {note.time = note.time - (maxCountNum as number);});
+  }
+  return countMap.size
+}
+
+function handleSlide(difficultyFile: IWrapBeatmap){
+  const tempSlideNote: Record<number, any[]> = {};
+  const noteWithoutSlide = [];
+  const noteWithSlide = [];
+  // looking for slides
+  for (const note of difficultyFile.colorNotes) {
+    const currentColor = note.color;
+    if (currentColor in tempSlideNote){
+      const lastNote = tempSlideNote[currentColor].at(-1)
+      // check if it is part of slide
+      if (note.time > lastNote.time && note.time - lastNote.time < complexBeatNumber && (lastNote.direction == note.direction || note.direction == 8)){
+        tempSlideNote[currentColor].push(note);
+      }
+      // identify it as a new note. Handle slide in temp
+      else{
+        noteWithoutSlide.push(tempSlideNote[currentColor][0]);
+        if (tempSlideNote[currentColor].length > 1){
+          noteWithSlide.push(tempSlideNote[currentColor].map(note => note.time));
+        }
+        tempSlideNote[currentColor] = [note];
+      }
+    }
+    else{
+      tempSlideNote[currentColor] = [note];
+    }
+  }
+  // handle rest of note in tempSlideNote
+  [0,1].map(currentColor => {
+    noteWithoutSlide.push(tempSlideNote[currentColor][0]);
+    if (tempSlideNote[currentColor].length > 1){
+      noteWithSlide.push(tempSlideNote[currentColor].map(note => note.time));
+    }
+  });
+  // update difficultyFile.colorNotes with note without slide
+  difficultyFile.colorNotes = noteWithoutSlide
+  console.log("noteWithSlide length:",noteWithSlide.length)
+  console.log(noteWithSlide)
+}
+async function handleComplexBeats(meta: any, difficultyFile: IWrapBeatmap) {
+  const complexBeats = getComplexBeats(difficultyFile);
+  if (complexBeats.length === 0) {
+    return false;
   }
 
-  const offsets = complexBeats.map(time => time % complexBeatNumber);
-  if (offsets.every((val, _, arr) => val === arr[0])) {
-    error[MISSING_OFFSET].push(id);
-    return;
+  // handle floating point issue
+  difficultyFile.colorNotes.map(note => {note.time = parseFloat(note.time.toFixed(3));});
+  const complexBeatsRound = getComplexBeats(difficultyFile);
+  if (complexBeatsRound.length === 0) {
+    return false;
   }
 
-  if (complexBeats.length / complexBeatNumber > 0.2) {
-    console.log("Complex beat detected:", `${id}`, complexBeats);
-    complexCount++;
+  // copy beatmap file and edit it in the processed folder
+  await copyBeatmap(meta, difficultyFile);
+
+  // handle potential offset
+  const countMapSize = await handleOffset(difficultyFile, meta);
+  if(countMapSize === 1){
+    return false;
   }
 
-  error[COMPLEX_BEATS].push(id);
+  // handle slide
+  handleSlide(difficultyFile)
+  const complexBeatsWithoutSlice = getComplexBeats(difficultyFile);
+  console.log("complexBeatsWithoutSlice.length",complexBeatsWithoutSlice.length)
+  console.log(complexBeatsWithoutSlice)
+  if (complexBeatsWithoutSlice.length === 0) {
+    return false;
+  }
+  
+
+  return true;
 }
 
 function updateMeta(info: IWrapInfo, difficultyTuple: [string, string, number, number, number], dir: { name: string, fullPath: string }) {
-  const id = dir.name.match(/^[a-zA-Z0-9]+/)?.[0] || dir.name;
+  const id = dir.name.match(id_pattern)?.[0] || dir.name;
   
   output_meta.push({
     id: `${id}_${difficultyTuple[1]}`,
@@ -170,12 +321,20 @@ function updateMeta(info: IWrapInfo, difficultyTuple: [string, string, number, n
     difficulty: difficultyTuple[1],
     njs: difficultyTuple[2],
     njsoffset: difficultyTuple[3],
-    editor_offset: difficultyTuple[4]
+    editor_offset: difficultyTuple[4],
+    audio_offset: info.audio.audioOffset,
+    status: RAW_DATA,
   });
-  load++;
 }
 
-function updateNewMeta(meta: any, difficultyFile: any) {
+function updateFailMeta(meta: any, errorType: string) {
+  meta.status = errorType;
+  output_meta.push({
+    ...meta
+  });
+}
+
+function updateProcessedMeta(meta: any, difficultyFile: any) {
   const jsonData = JSON.stringify(difficultyFile);
   const difficultyPath = meta.beatmap_path+"/"+meta.difficulty+".json"
   Deno.writeTextFile(difficultyPath, jsonData);
@@ -187,6 +346,7 @@ function updateNewMeta(meta: any, difficultyFile: any) {
     arcs: difficultyFile.arcs.length,
     chains: difficultyFile.chains.length,
   };
+  meta.status = PROCESSED_DATA;
   output_meta.push({
     ...meta
   });
@@ -210,14 +370,16 @@ const loadJsonl = async (filePath: string) => {
 };
 
 const output_meta: any[] = [];
-let load: number = 0;
 const DIR_ERROR: string = "Directory Error";
 const AUDIO_OFFSET: string = "Audio Offset";
 const EDITOR_OFFSET: string = "Editor Offset";
-const BPM_EVENTS: string = "BPM Events";
-const MISSING_OFFSET: string = "Missing Offset";
+const BPM_EVENTS: string = "BPM Events"; // bpm, editor_offset, audio_offset, the level of these three issues is same
 const FLOATING_ERROR: string = "Floating Error";
-const COMPLEX_BEATS: string = "Complex Beats";
+const MISSING_OFFSET: string = "Missing Offset";
+const SMALL_COMPLEX: string = "1/64 note"
+const COMPLEX_BEATS: string = "Complex Beats";//issues cannot be resolved are classfied as complex beats
+const RAW_DATA: string = "Raw Data";
+const PROCESSED_DATA: string = "Processed Data";
 
 // create a dictionary to store the each error type
 const error: Record<string, string[]> = {};
@@ -225,15 +387,18 @@ error[DIR_ERROR] = [];
 error[AUDIO_OFFSET] = [];
 error[EDITOR_OFFSET] = [];
 error[BPM_EVENTS] = [];
-error[MISSING_OFFSET] = [];
 error[FLOATING_ERROR] = [];
+error[MISSING_OFFSET] = [];
+error[SMALL_COMPLEX] = [];
 error[COMPLEX_BEATS] = [];
 
-const pathCount: Record<string, number> = {};
-let complexCount: number = 0;
 
+const pathCount: Record<string, number> = {};
+let load: number = 0;
 const [directory, manifest_directory, pipeline, complex_beat_number] = Deno.args;
 const complexBeatNumber = Number(complex_beat_number);
+let lastPath: string | null = null;
+const id_pattern = /^[a-zA-Z0-9]+/;
 
 if(pipeline === "create_manifest"){
   const directories = await getDirectoriesWithPaths(directory || '');
@@ -243,7 +408,7 @@ if(pipeline === "create_manifest"){
 
   const summary = {
     dir_num: directories.length,
-    load,
+    load: output_meta.length,
     error_num: {
       DIR_ERROR: error[DIR_ERROR].length,
     },
@@ -254,13 +419,14 @@ if(pipeline === "create_manifest"){
   console.log(summary);
 }
 else{
+  const target_data: string[] = [COMPLEX_BEATS];
   const input_meta: JSON[] = await loadJsonl(manifest_directory)
-  input_meta.forEach(meta => {
-    processBeatmap(meta)
-  });
+  for (const meta of input_meta) {
+    await processBeatmap(meta, target_data);
+  }
   console.log("*****************************result:");
   console.log("Path count:", pathCount);
-  console.log("Noncomplex count:", complexCount);
+
 
   // Summary
   const summary = {
@@ -271,8 +437,9 @@ else{
       AUDIO_OFFSET: error[AUDIO_OFFSET].length,
       EDITOR_OFFSET: error[EDITOR_OFFSET].length,
       BPM_EVENTS: error[BPM_EVENTS].length,
-      MISSING_OFFSET: error[MISSING_OFFSET].length,
       FLOATING_ERROR: error[FLOATING_ERROR].length,
+      MISSING_OFFSET: error[MISSING_OFFSET].length,
+      SMALL_COMPLEX: error[SMALL_COMPLEX].length,
       COMPLEX_BEATS: error[COMPLEX_BEATS].length,
     },
     error_type:{
@@ -280,8 +447,9 @@ else{
       AUDIO_OFFSET: error[AUDIO_OFFSET],
       EDITOR_OFFSET: error[EDITOR_OFFSET],
       BPM_EVENTS: error[BPM_EVENTS],
-      MISSING_OFFSET: error[MISSING_OFFSET],
       FLOATING_ERROR: error[FLOATING_ERROR],
+      MISSING_OFFSET: error[MISSING_OFFSET],
+      SMALL_COMPLEX: error[SMALL_COMPLEX],
       COMPLEX_BEATS: error[COMPLEX_BEATS],
     }
   };

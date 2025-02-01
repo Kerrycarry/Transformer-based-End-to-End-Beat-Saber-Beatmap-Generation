@@ -95,6 +95,28 @@
                 "--clear",
             ],
         },
+        {
+            "request": "launch",
+            "name": "Deno",
+            "type": "node",
+            "program": "${workspaceFolder}/audiocraft/data/beatmap_dataset.ts",
+            "cwd": "${workspaceFolder}",
+            "env": {},
+            "runtimeExecutable": "/home/kk/.deno/bin/deno",
+            "runtimeArgs": [
+                "run",
+                "--unstable",
+                "--inspect-wait",
+                "--allow-all",
+            ],
+            "args": [
+                "dataset/CustomLevels",       // directory
+                "egs/bs_curated/data.jsonl",        // manifest_directory
+                "create_manifest2",      // pipeline
+                "0.125" // complex_beat_number
+            ],
+            "attachSimplePort": 9229
+        }
         
     ]
 }

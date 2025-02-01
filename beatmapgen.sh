@@ -104,11 +104,7 @@ elif [[ "$FIRST_ARG" == "-2" ]]; then
 elif [[ "$FIRST_ARG" == "-3" ]]; then
     TAG="python_pipeline"
     LOG_FILE="${LOG_DIR}/beatmapgen_log_${TAG}"
-    TAG="generate_api"
-    LOG_FILE2="${LOG_DIR}/beatmapgen_log_${TAG}"
-    start_parser_api
     run_python_process
-    stop_parser_api
 elif [[ "$FIRST_ARG" == "-4" ]]; then
     start_parser_api
 elif [[ "$FIRST_ARG" == "-5" ]]; then
@@ -126,6 +122,10 @@ fi
 # nohup ./beatmapgen.sh -1 default --clear > log/beatmapgen_log.txt 2>&1 &
 # 启动deno manifest制作流程
 # nohup ./beatmapgen.sh -2 CustomLevels2 bs_curated create_manifest > log/beatmapgen_log.txt 2>&1 &
+# nohup ./beatmapgen.sh -2 CustomLevels2 bs_curated process_beatmap > log/beatmapgen_log.txt 2>&1 &
+# test
+# nohup ./beatmapgen.sh -2 CustomLevels3 bs_curated2 create_manifest > log/beatmapgen_log.txt 2>&1 &
+# nohup ./beatmapgen.sh -2 CustomLevels3 bs_curated2 process_beatmap > log/beatmapgen_log.txt 2>&1 &
 # 启动python制作流程
 # nohup ./beatmapgen.sh -3 CustomLevels2 bs_curated config/solver/beatmapgen/beatmapgen_base_32khz.yaml create_manifest > log/beatmapgen_log.txt 2>&1 &
 # nohup ./beatmapgen.sh -3 CustomLevels2 bs_curated config/solver/beatmapgen/beatmapgen_base_32khz.yaml tokenize_beatmap > log/beatmapgen_log.txt 2>&1 &
