@@ -13,7 +13,7 @@ start_parser_api() {
 beatmap_dataset_load() {
     echo "Starting loading beatmap dataset..."
     nohup deno run --allow-net --allow-read --allow-write audiocraft/data/beatmap_dataset.ts \
-    dataset/$SOURCE_DIR egs/$MANIFEST_DIR/data.jsonl $PIPELINE 0.125 \
+    dataset/$SOURCE_DIR egs/$MANIFEST_DIR/data.jsonl $PIPELINE 0.125 $TARGET_DATA \
      > "$LOG_FILE" 2>&1 &
     DENO_PID=$!
     wait $DENO_PID
@@ -75,6 +75,7 @@ if [[ "$FIRST_ARG" == "-2" ]]; then
     SOURCE_DIR=$2
     MANIFEST_DIR=$3
     PIPELINE=$4
+    TARGET_DATA=$5
 elif [[ "$FIRST_ARG" == "-3" ]]; then
     SOURCE_DIR=$2
     MANIFEST_DIR=$3
@@ -121,11 +122,9 @@ fi
 # nohup ./beatmapgen.sh -1 default > log/beatmapgen_log.txt 2>&1 &
 # nohup ./beatmapgen.sh -1 default --clear > log/beatmapgen_log.txt 2>&1 &
 # 启动deno manifest制作流程
-# nohup ./beatmapgen.sh -2 CustomLevels2 bs_curated create_manifest > log/beatmapgen_log.txt 2>&1 &
-# nohup ./beatmapgen.sh -2 CustomLevels2 bs_curated process_beatmap > log/beatmapgen_log.txt 2>&1 &
-# test
-# nohup ./beatmapgen.sh -2 CustomLevels3 bs_curated2 create_manifest > log/beatmapgen_log.txt 2>&1 &
-# nohup ./beatmapgen.sh -2 CustomLevels3 bs_curated2 process_beatmap > log/beatmapgen_log.txt 2>&1 &
+# nohup ./beatmapgen.sh -2 CustomLevels2 bs_curated create_manifest RAW_DATA > log/beatmapgen_log.txt 2>&1 &
+# nohup ./beatmapgen.sh -2 CustomLevels2 bs_curated process_beatmap RAW_DATA > log/beatmapgen_log.txt 2>&1 &
+# nohup ./beatmapgen.sh -2 CustomLevels2 bs_curated process_beatmap COMPLEX_BEATS > log/beatmapgen_log.txt 2>&1 &
 # 启动python制作流程
 # nohup ./beatmapgen.sh -3 CustomLevels2 bs_curated config/solver/beatmapgen/beatmapgen_base_32khz.yaml create_manifest > log/beatmapgen_log.txt 2>&1 &
 # nohup ./beatmapgen.sh -3 CustomLevels2 bs_curated config/solver/beatmapgen/beatmapgen_base_32khz.yaml tokenize_beatmap > log/beatmapgen_log.txt 2>&1 &
