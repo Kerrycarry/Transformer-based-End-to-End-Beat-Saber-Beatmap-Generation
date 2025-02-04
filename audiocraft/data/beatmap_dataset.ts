@@ -29,7 +29,7 @@ function hasBpmFieldWithNonEmptyListRecursive(
       value.length > 0
     ) {
       // 更新统计字典
-      pathCount[currentPath] = (pathCount[currentPath] || 0) + 1;
+      // pathCount[currentPath] = (pathCount[currentPath] || 0) + 1;
       found = true; // 标记找到
     }
 
@@ -64,10 +64,10 @@ async function processBeatmap(meta: any, target_data: string[]) {
     updateFailMeta(meta, meta.status);
     return;
   }
-  // copy beatmap files to processed folder, and save all beatmap changes there
-  await copyBeatmap(meta);
-
   try {
+    // copy beatmap files to processed folder, and save all beatmap changes there
+    await copyBeatmap(meta);
+
     if (meta.audio_offset !== 0 || lastSongOffsetPath === meta.beatmap_path) {
       error[AUDIO_OFFSET].push(meta.id);
       updateFailMeta(meta, AUDIO_OFFSET);
@@ -100,10 +100,12 @@ async function processBeatmap(meta: any, target_data: string[]) {
     }          
     updateProcessedMeta(meta, difficultyFile);
 
-  } catch (error) {
-    console.error("Error processing directory:", meta.beatmap_path,meta.beatmap_dat_name, error);
-    error[DIR_ERROR].push(meta.id);
-    updateFailMeta(meta, DIR_ERROR);
+  } catch (_error) {
+    console.error(`Error processing beatmap ${meta.id}`, _error);
+    const folderName = basename(meta.beatmap_path);
+    console.log(`${folderName}\\${meta.difficulty}`)
+    error[UNKNOWN_ERROR].push(meta.id);
+    updateFailMeta(meta, UNKNOWN_ERROR);
   }
 }
 
@@ -117,9 +119,16 @@ async function processDirectory(dir: { name: string, fullPath: string }) {
     for (const difficultyTuple of difficultyTuples) {
       updateMeta(info, difficultyTuple, dir);
     }
-  } catch (error) {
-    console.error("Error processing directory:", dir.name, error);
-    error[DIR_ERROR].push(dir.name);
+  } catch (_error) {
+    console.error("Error processing directory:", dir.name, _error);
+    error[UNKNOWN_ERROR].push(dir.name);
+    const folderName = basename(dir.fullPath);
+    const command1 = `X:\\Beatmap\\${folderName}`
+    const command2 = `Remove-Item -Path "X:\\Beatmap2\\*" -Recurse -Force`
+    const command3 = `robocopy "X:\\Beatmap\\${folderName}" "X:\\Beatmap2\\${folderName}" /E`;
+    console.log(command1)
+    console.log(command2)
+    console.log(command3)
   }
 }
 
@@ -165,21 +174,26 @@ async function copyDifficulty(filePath: string, targetPath: string) {
       
       await Deno.writeTextFile(targetPath, JSON.stringify(json, null, 2));
       
-  } catch (error) {
-      console.error("Error reading or parsing JSON:", error);
+  } catch (_error) {
+      console.error("Error reading or parsing JSON:", _error);
   }
 }
 
 async function copyBeatmap(meta: any) {
   // log the changes
-  console.log("copy path:");
+  console.log("*************************");
+  console.log("Handing:");
   const folderName = basename(meta.beatmap_path);
-  const command = `robocopy "X:\\Beatmap\\${folderName}" "X:\\Beatmap2\\${folderName}" /E`;
-  const command2 = `robocopy "X:\\Beatmap\\${folderName}\\processed" "X:\\Beatmap2\\${folderName}_processed" /E`;
+  const command1 = `X:\\Beatmap\\${folderName}`
+  const command2 = meta.beatmap_dat_name
   const command3 = `Remove-Item -Path "X:\\Beatmap2\\*" -Recurse -Force`
-  console.log(command3);
-  console.log(command); 
+  const command4 = `robocopy "X:\\Beatmap\\${folderName}" "X:\\Beatmap2\\${folderName}" /E`;
+  const command5 = `robocopy "X:\\Beatmap\\${folderName}\\processed" "X:\\Beatmap2\\${folderName}_processed" /E`;
+  console.log(command1);
   console.log(command2);
+  console.log(command3); 
+  console.log(command4);
+  console.log(command5);
   //copy the beatmap to processed folder
   const processedPath = `${meta.beatmap_path}/processed`;
   bsmap.globals.directory = processedPath;
@@ -195,7 +209,6 @@ async function copyBeatmap(meta: any) {
     const difficultyTuples = getDifficultyTuples(info);
     for (const difficultyTuple of difficultyTuples) {
       await copyDifficulty(`${meta.beatmap_path}/${difficultyTuple[0]}`, `${processedPath}/${difficultyTuple[0]}`)
-      // await Deno.copyFile(`${meta.beatmap_path}/${difficultyTuple[0]}`, `${processedPath}/${difficultyTuple[0]}`);
     }
   }
   // record lastPath to avoid redo
@@ -238,7 +251,7 @@ async function handleOffset(difficultyFile: IWrapBeatmap, meta: any){
     }
   });
   const minElementsWithIndex = indices.map(index => difficultyFile.colorNotes[index].time);
-  console.log("***************offsets stats:");
+  console.log("offsets stats:");
   console.log(countMap);
   console.log("minElementsWithIndex:", minElementsWithIndex);
   console.log("maxCountNum, maxCount:", maxCountNum, maxCount);
@@ -421,8 +434,16 @@ const loadJsonl = async (filePath: string) => {
   return jsonObjects;
 };
 
+const id_pattern = /^[a-zA-Z0-9]+/;
+const [directory, manifest_directory, pipeline, complex_beat_number, target] = Deno.args;
+const complexBeatNumber = Number(complex_beat_number);
+
+//count bpm event
+// const pathCount: Record<string, number> = {};
+
+//all following variables are global updated
 const output_meta: any[] = [];
-const DIR_ERROR: string = "DIR_ERROR";
+const UNKNOWN_ERROR: string = "UNKNOWN_ERROR";
 const AUDIO_OFFSET: string = "AUDIO_OFFSET";
 const EDITOR_OFFSET: string = "EDITOR_OFFSET";
 const BPM_EVENTS: string = "BPM_EVENTS"; // bpm, editor_offset, audio_offset, the level of these three issues is same
@@ -435,7 +456,7 @@ const PROCESSED_DATA: string = "PROCESSED_DATA";
 
 // create a dictionary to store the each error type
 const error: Record<string, string[]> = {};
-error[DIR_ERROR] = [];
+error[UNKNOWN_ERROR] = [];
 error[AUDIO_OFFSET] = [];
 error[EDITOR_OFFSET] = [];
 error[BPM_EVENTS] = [];
@@ -444,16 +465,13 @@ error[MISSING_OFFSET] = [];
 error[SMALL_COMPLEX] = [];
 error[COMPLEX_BEATS] = [];
 
-
-const pathCount: Record<string, number> = {};
 let load: number = 0;
-const [directory, manifest_directory, pipeline, complex_beat_number, target] = Deno.args;
-const complexBeatNumber = Number(complex_beat_number);
 let lastPath: string | null = null;
-const id_pattern = /^[a-zA-Z0-9]+/;
 let lastBPMEventPath: string | null = null;
 let lastEditorOffsetPath: string | null = null;
 let lastSongOffsetPath: string | null = null;
+
+const start = performance.now();
 
 if(pipeline === "create_manifest"){
   const directories = await getDirectoriesWithPaths(directory || '');
@@ -465,10 +483,10 @@ if(pipeline === "create_manifest"){
     dir_num: directories.length,
     load: output_meta.length,
     error_num: {
-      DIR_ERROR: error[DIR_ERROR].length,
+      UNKNOWN_ERROR: error[UNKNOWN_ERROR].length,
     },
     error_type:{
-      DIR_ERROR: error[DIR_ERROR],
+      UNKNOWN_ERROR: error[UNKNOWN_ERROR],
     }
   };
   console.log(summary);
@@ -479,8 +497,8 @@ else{
   for (const meta of input_meta) {
     await processBeatmap(meta, target_data);
   }
-  console.log("*****************************result:");
-  console.log("Path count:", pathCount);
+  // console.log("*****************************result:");
+  // console.log("Path count:", pathCount);
 
 
   // Summary
@@ -488,7 +506,7 @@ else{
     total_num: input_meta.length,
     load,
     error_num: {
-      DIR_ERROR: error[DIR_ERROR].length,
+      UNKNOWN_ERROR: error[UNKNOWN_ERROR].length,
       AUDIO_OFFSET: error[AUDIO_OFFSET].length,
       EDITOR_OFFSET: error[EDITOR_OFFSET].length,
       BPM_EVENTS: error[BPM_EVENTS].length,
@@ -498,7 +516,7 @@ else{
       COMPLEX_BEATS: error[COMPLEX_BEATS].length,
     },
     error_type:{
-      DIR_ERROR: error[DIR_ERROR],
+      UNKNOWN_ERROR: error[UNKNOWN_ERROR],
       AUDIO_OFFSET: error[AUDIO_OFFSET],
       EDITOR_OFFSET: error[EDITOR_OFFSET],
       BPM_EVENTS: error[BPM_EVENTS],
@@ -511,6 +529,9 @@ else{
 
   console.log(summary);
 }
+
+const end = performance.now();
+console.log(`代码执行时间: ${(end - start).toFixed(2)} 毫秒`);
 
 // Save metadata to file
 const fileContent = output_meta.map((obj) => JSON.stringify(obj)).join("\n");
