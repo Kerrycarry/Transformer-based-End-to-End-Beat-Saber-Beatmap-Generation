@@ -67,15 +67,15 @@ async function processBeatmap(meta: any, target_data: string[]) {
   try {
     // copy beatmap files to processed folder, and save all beatmap changes there
     await copyBeatmap(meta);
-
+    
     if (meta.audio_offset !== 0 || lastSongOffsetPath === meta.beatmap_path) {
       error[AUDIO_OFFSET].push(meta.id);
       updateFailMeta(meta, AUDIO_OFFSET);
       lastSongOffsetPath = meta.beatmap_path
       return;
     }
-
-    const difficultyFile = bsmap.readDifficultyFileSync(meta.beatmap_dat_name);
+    const processedPath = `${meta.beatmap_path}/processed/${meta.beatmap_dat_name}`;
+    const difficultyFile = bsmap.readDifficultyFileSync(processedPath);
     
     //the reason of second condition: under same directory, some difficulties have bpm event but some not, add them anyway
     if (hasBpmFieldWithNonEmptyListRecursive(difficultyFile) || lastBPMEventPath === meta.beatmap_path) {
@@ -111,25 +111,31 @@ async function processBeatmap(meta: any, target_data: string[]) {
 
 
 async function processDirectory(dir: { name: string, fullPath: string }) {
-  bsmap.globals.directory = dir.fullPath || '';
   try {
     const infoPath = await getInfoPath(dir.fullPath);
-    const info = bsmap.readInfoFileSync(infoPath);
+    const info = bsmap.readInfoFileSync(`${dir.fullPath}/${infoPath}`);
     const difficultyTuples = getDifficultyTuples(info);
-    for (const difficultyTuple of difficultyTuples) {
-      updateMeta(info, difficultyTuple, dir);
-    }
+    // 确保所有的 push 操作按顺序执行
+    lastPromise = lastPromise.then(() => {
+      for (const difficultyTuple of difficultyTuples) {
+        updateMeta(info, difficultyTuple, dir);
+      }
+    });
+    
   } catch (_error) {
-    console.error("Error processing directory:", dir.name, _error);
     error[UNKNOWN_ERROR].push(dir.name);
     const folderName = basename(dir.fullPath);
     const command1 = `X:\\Beatmap\\${folderName}`
     const command2 = `Remove-Item -Path "X:\\Beatmap2\\*" -Recurse -Force`
     const command3 = `robocopy "X:\\Beatmap\\${folderName}" "X:\\Beatmap2\\${folderName}" /E`;
-    console.log(command1)
-    console.log(command2)
-    console.log(command3)
+    console.error("Error processing directory:", dir.name, _error);
+    lastPromise = lastPromise.then(() => {
+      console.log(command1)
+      console.log(command2)
+      console.log(command3)
+    });
   }
+  return lastPromise; // 确保外部可以等待它完成
 }
 
 async function getInfoPath(dirPath: string): Promise<string> {
@@ -196,7 +202,6 @@ async function copyBeatmap(meta: any) {
   console.log(command5);
   //copy the beatmap to processed folder
   const processedPath = `${meta.beatmap_path}/processed`;
-  bsmap.globals.directory = processedPath;
   //copy info.dat and song to processed folder
   if (lastPath !== meta.beatmap_path) {
     const fileExists = await exists(processedPath); 
@@ -205,7 +210,7 @@ async function copyBeatmap(meta: any) {
     await Deno.copyFile(`${meta.beatmap_path}/${meta.info_name}`, `${processedPath}/${meta.info_name}`);
     await Deno.copyFile(`${meta.beatmap_path}/${meta.song_name}`, `${processedPath}/${meta.song_name}`);
     //copy difficulty to processed folder
-    const info = bsmap.readInfoFileSync(meta.info_name);
+    const info = bsmap.readInfoFileSync(`${processedPath}/${meta.info_name}`);
     const difficultyTuples = getDifficultyTuples(info);
     for (const difficultyTuple of difficultyTuples) {
       await copyDifficulty(`${meta.beatmap_path}/${difficultyTuple[0]}`, `${processedPath}/${difficultyTuple[0]}`)
@@ -264,7 +269,8 @@ async function handleOffset(difficultyFile: IWrapBeatmap, meta: any){
       // meet strong condition or lose condition
       (maxCount/difficultyFile.colorNotes.length > 0.7 || (maxCount/difficultyFile.colorNotes.length > 0.6 && (difficultyFile.colorNotes[0].time - (maxCountNum as number))% complexBeatNumber === 0) ))) {
     //update offset to info.dat
-    const info = bsmap.readInfoFileSync(meta.info_name);
+    const processedPath = `${meta.beatmap_path}/processed`;
+    const info = bsmap.readInfoFileSync(`${processedPath}/${meta.info_name}`);
     
     let offset = (maxCountNum as number) * 60 / meta.bpm * 1000 + meta.editor_offset;
     const difficultyTuples = getDifficultyTuples(info);
@@ -288,7 +294,7 @@ async function handleOffset(difficultyFile: IWrapBeatmap, meta: any){
       }
     });
     await bsmap.writeInfoFile(info, 2, {
-      directory: bsmap.globals.directory,
+      directory: processedPath,
       filename: meta.info_name
     });
     // remove offset from difficulty.colorNotes
@@ -465,6 +471,8 @@ error[MISSING_OFFSET] = [];
 error[SMALL_COMPLEX] = [];
 error[COMPLEX_BEATS] = [];
 
+let lastPromise = Promise.resolve(); // 维护一个全局的 Promise 队列
+const tasks: Promise<void>[] = [];//// 记录所有的 updateList 任务
 let load: number = 0;
 let lastPath: string | null = null;
 let lastBPMEventPath: string | null = null;
@@ -476,9 +484,10 @@ const start = performance.now();
 if(pipeline === "create_manifest"){
   const directories = await getDirectoriesWithPaths(directory || '');
   for (const dir of directories) {
-    await processDirectory(dir);
+    tasks.push(processDirectory(dir));
   }
-
+  // 等待所有任务执行完
+  await Promise.all(tasks)
   const summary = {
     dir_num: directories.length,
     load: output_meta.length,
@@ -531,7 +540,7 @@ else{
 }
 
 const end = performance.now();
-console.log(`代码执行时间: ${(end - start).toFixed(2)} 毫秒`);
+console.log(`代码执行时间: ${((end - start)/1000).toFixed(2)} 秒`);
 
 // Save metadata to file
 const fileContent = output_meta.map((obj) => JSON.stringify(obj)).join("\n");
