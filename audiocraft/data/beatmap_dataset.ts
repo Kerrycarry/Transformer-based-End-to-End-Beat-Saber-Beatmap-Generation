@@ -57,86 +57,132 @@ async function getDirectoriesWithPaths(dirPath: string) {
   }
   return entries;
 }
+const processBeatmap=(metaList: any[]) =>
+  Promise.all(metaList.map((meta) => processSingleBeatmap(meta)))
+  .then((processedMetaList: any[]) => {
+    // handle inconsistent error type
+    for (const errorType of [AUDIO_OFFSET, EDITOR_OFFSET, BPM_EVENTS]){
+      if(processedMetaList.some(meta => meta.status === errorType)){
+        processedMetaList = processedMetaList.map(item => ({
+          ...item,
+          status: errorType,
+          // reset meta offset to 0 temporarily (change in the future version)
+          editor_offset: 0
+        }));
+        break;
+      }
+    }
+    // handle inconsistent offset, check if same
+    const meta = processedMetaList[0]
+    const offsetList = processedMetaList.map(meta => meta.editor_offset)
+    const firstOffset = offsetList[0]
+    if(offsetList.some(offset => offset !== 0 && offset !== firstOffset) ){
+      // only allow 0.012 difference measured in beat 
+      const diff_threshold = 0.012 * 60 / meta.bpm * 1000
+      
+      for (const offset of offsetList){
+        const diff = Math.abs(firstOffset - offset)
+        if(diff > diff_threshold){
+          console.log(`first offset = ${firstOffset}, difference = ${diff}`)
+          assert(false, `offset difference: > diff_threshold: ${diff_threshold}`)
+        }
+      }
+    }
+    // update offset to info.dat
+    if(firstOffset !== 0){
+      const processedPath = `${meta.beatmap_path}/processed`;
+      const info = bsmap.readInfoFileSync(`${processedPath}/${meta.info_name}`);
+      info.difficulties.map(difficulty => {
+        if (difficulty.characteristic === 'Standard') {
+          difficulty.customData._editorOffset = firstOffset;
+          difficulty.customData._editorOldOffset = firstOffset;
+        }
+      });
+      bsmap.writeInfoFile(info, 2, {
+        directory: processedPath,
+        filename: meta.info_name
+      });
+      // reset meta offset to 0 temporarily (change in the future version)
+      processedMetaList = processedMetaList.map(item => ({
+        ...item,
+        editor_offset: 0
+      }));
+    }
+    for (const meta of processedMetaList){
+      output_meta.push({
+        ...meta
+      });
+    }
+  });
 
-async function processBeatmap(meta: any, target_data: string[]) {
+
+function processSingleBeatmap(meta: any) {
   //check if meta.status is in target_data
   if (!target_data.includes(meta.status)) {
-    updateFailMeta(meta, meta.status);
-    return;
+    return meta;
   }
   try {
-    // copy beatmap files to processed folder, and save all beatmap changes there
-    await copyBeatmap(meta);
-    
-    if (meta.audio_offset !== 0 || lastSongOffsetPath === meta.beatmap_path) {
+    if (meta.audio_offset !== 0) {
       error[AUDIO_OFFSET].push(meta.id);
-      updateFailMeta(meta, AUDIO_OFFSET);
-      lastSongOffsetPath = meta.beatmap_path
-      return;
+      meta.status = AUDIO_OFFSET;
+      return meta;
     }
+
+    if (meta.editor_offset !== 0) {
+      error[EDITOR_OFFSET].push(meta.id);
+      meta.status = EDITOR_OFFSET;
+      return meta;
+    }
+
     const processedPath = `${meta.beatmap_path}/processed/${meta.beatmap_dat_name}`;
     const difficultyFile = bsmap.readDifficultyFileSync(processedPath);
     
-    //the reason of second condition: under same directory, some difficulties have bpm event but some not, add them anyway
-    if (hasBpmFieldWithNonEmptyListRecursive(difficultyFile) || lastBPMEventPath === meta.beatmap_path) {
+    if (hasBpmFieldWithNonEmptyListRecursive(difficultyFile)) {
       error[BPM_EVENTS].push(meta.id);
-      updateFailMeta(meta, BPM_EVENTS);
-      lastBPMEventPath = meta.beatmap_path
-      return;
+      meta.status = BPM_EVENTS;
+      return meta;
     }
 
-    if (meta.editor_offset !== 0 || lastEditorOffsetPath === meta.beatmap_path) {
-      error[EDITOR_OFFSET].push(meta.id);
-      updateFailMeta(meta, EDITOR_OFFSET);
-      lastEditorOffsetPath = meta.beatmap_path
-      return;
-    }
-
-    const is_complex = await handleComplexBeats(meta, difficultyFile);
+    const is_complex = handleComplexBeats(meta, difficultyFile);
     if (is_complex) {
       error[COMPLEX_BEATS].push(meta.id);
-      updateFailMeta(meta, COMPLEX_BEATS);
-      return;
-    }          
+      meta.status = COMPLEX_BEATS;
+      return meta;
+    }
+
     updateProcessedMeta(meta, difficultyFile);
+    return meta;
 
   } catch (_error) {
     console.error(`Error processing beatmap ${meta.id}`, _error);
     const folderName = basename(meta.beatmap_path);
     console.log(`${folderName}\\${meta.difficulty}`)
     error[UNKNOWN_ERROR].push(meta.id);
-    updateFailMeta(meta, UNKNOWN_ERROR);
+    meta.status = UNKNOWN_ERROR;
+    return meta
   }
 }
 
 
-async function processDirectory(dir: { name: string, fullPath: string }) {
-  try {
-    const infoPath = await getInfoPath(dir.fullPath);
-    const info = bsmap.readInfoFileSync(`${dir.fullPath}/${infoPath}`);
+const processDirectory = (dir: { name: string, fullPath: string }) =>
+  getInfoPath(dir.fullPath)
+  .then(infoPath => bsmap.readInfoFileSync(`${dir.fullPath}/${infoPath}`))
+  .then(info => {
     const difficultyTuples = getDifficultyTuples(info);
-    // 确保所有的 push 操作按顺序执行
-    lastPromise = lastPromise.then(() => {
-      for (const difficultyTuple of difficultyTuples) {
-        updateMeta(info, difficultyTuple, dir);
-      }
-    });
-    
-  } catch (_error) {
+    difficultyTuples.map(difficultyTuple => updateMeta(info, difficultyTuple, dir));
+  })
+  .catch (_error=>{
     error[UNKNOWN_ERROR].push(dir.name);
     const folderName = basename(dir.fullPath);
     const command1 = `X:\\Beatmap\\${folderName}`
     const command2 = `Remove-Item -Path "X:\\Beatmap2\\*" -Recurse -Force`
     const command3 = `robocopy "X:\\Beatmap\\${folderName}" "X:\\Beatmap2\\${folderName}" /E`;
     console.error("Error processing directory:", dir.name, _error);
-    lastPromise = lastPromise.then(() => {
-      console.log(command1)
-      console.log(command2)
-      console.log(command3)
-    });
-  }
-  return lastPromise; // 确保外部可以等待它完成
-}
+    console.log(command1)
+    console.log(command2)
+    console.log(command3)
+    }
+  )
 
 async function getInfoPath(dirPath: string): Promise<string> {
   const filePath = `${dirPath}/info.dat`;
@@ -185,42 +231,35 @@ async function copyDifficulty(filePath: string, targetPath: string) {
   }
 }
 
-async function copyBeatmap(meta: any) {
+async function copyBeatmap(metaList: any[]) {
+  const meta = metaList[0]
   // log the changes
   console.log("*************************");
   console.log("Handing:");
   const folderName = basename(meta.beatmap_path);
   const command1 = `X:\\Beatmap\\${folderName}`
-  const command2 = meta.beatmap_dat_name
-  const command3 = `Remove-Item -Path "X:\\Beatmap2\\*" -Recurse -Force`
-  const command4 = `robocopy "X:\\Beatmap\\${folderName}" "X:\\Beatmap2\\${folderName}" /E`;
-  const command5 = `robocopy "X:\\Beatmap\\${folderName}\\processed" "X:\\Beatmap2\\${folderName}_processed" /E`;
+  const command2 = `Remove-Item -Path "X:\\Beatmap2\\*" -Recurse -Force`
+  const command3 = `robocopy "X:\\Beatmap\\${folderName}" "X:\\Beatmap2\\${folderName}" /E`;
+  const command4 = `robocopy "X:\\Beatmap\\${folderName}\\processed" "X:\\Beatmap2\\${folderName}_processed" /E`;
   console.log(command1);
   console.log(command2);
   console.log(command3); 
   console.log(command4);
-  console.log(command5);
   //copy the beatmap to processed folder
   const processedPath = `${meta.beatmap_path}/processed`;
-  //copy info.dat and song to processed folder
-  if (lastPath !== meta.beatmap_path) {
-    const fileExists = await exists(processedPath); 
-    if (!fileExists)
-      await Deno.mkdir(processedPath);
-    await Deno.copyFile(`${meta.beatmap_path}/${meta.info_name}`, `${processedPath}/${meta.info_name}`);
-    await Deno.copyFile(`${meta.beatmap_path}/${meta.song_name}`, `${processedPath}/${meta.song_name}`);
-    //copy difficulty to processed folder
-    const info = bsmap.readInfoFileSync(`${processedPath}/${meta.info_name}`);
-    const difficultyTuples = getDifficultyTuples(info);
-    for (const difficultyTuple of difficultyTuples) {
-      await copyDifficulty(`${meta.beatmap_path}/${difficultyTuple[0]}`, `${processedPath}/${difficultyTuple[0]}`)
-    }
+  const fileExists = await exists(processedPath); 
+  if (!fileExists)
+    await Deno.mkdir(processedPath);
+  //copy info.dat, song and difficulty to processed folder
+  await Deno.copyFile(`${meta.beatmap_path}/${meta.info_name}`, `${processedPath}/${meta.info_name}`);
+  await Deno.copyFile(`${meta.beatmap_path}/${meta.song_name}`, `${processedPath}/${meta.song_name}`);
+  for (const targetMeta of metaList) {
+    await copyDifficulty(`${meta.beatmap_path}/${targetMeta.beatmap_dat_name}`, `${processedPath}/${targetMeta.beatmap_dat_name}`)
   }
-  // record lastPath to avoid redo
-  lastPath = meta.beatmap_path
+  console.log(`finished copy ${folderName}`);
 }
 
-async function handleOffset(difficultyFile: IWrapBeatmap, meta: any){
+function handleOffset(difficultyFile: IWrapBeatmap, meta: any){
   const offsets = difficultyFile.colorNotes.map(note => parseFloat((note.time % complexBeatNumber).toFixed(3)));
   //get offset stats
   const countMap = new Map<number, number>();
@@ -268,35 +307,8 @@ async function handleOffset(difficultyFile: IWrapBeatmap, meta: any){
     (maxCountNum!==0 && 
       // meet strong condition or lose condition
       (maxCount/difficultyFile.colorNotes.length > 0.7 || (maxCount/difficultyFile.colorNotes.length > 0.6 && (difficultyFile.colorNotes[0].time - (maxCountNum as number))% complexBeatNumber === 0) ))) {
-    //update offset to info.dat
-    const processedPath = `${meta.beatmap_path}/processed`;
-    const info = bsmap.readInfoFileSync(`${processedPath}/${meta.info_name}`);
-    
-    let offset = (maxCountNum as number) * 60 / meta.bpm * 1000 + meta.editor_offset;
-    const difficultyTuples = getDifficultyTuples(info);
-    if(difficultyTuples[0][1] !== meta.difficulty){
-      const previousOffset = difficultyTuples[0][4]
-      const diff = Math.abs(previousOffset- offset)
-      const diff_threshold = 0.012 * 60 / meta.bpm * 1000
-      console.log(`previous offset = ${previousOffset}, difference = ${diff}`)
-      if(diff <= diff_threshold){
-        offset = previousOffset
-      }
-      else{
-        assert(false, `offset difference: > diff_threshold: ${diff_threshold}`)
-      }
-    }
-    
-    info.difficulties.map(difficulty => {
-      if (difficulty.characteristic === 'Standard' && difficulty.difficulty === meta.difficulty) {
-        difficulty.customData._editorOffset = offset;
-        difficulty.customData._editorOldOffset = offset;
-      }
-    });
-    await bsmap.writeInfoFile(info, 2, {
-      directory: processedPath,
-      filename: meta.info_name
-    });
+    //update offset to meta and deal with it later in processBeatmap()
+    meta.editor_offset = (maxCountNum as number) * 60 / meta.bpm * 1000 + meta.editor_offset;
     // remove offset from difficulty.colorNotes
     difficultyFile.colorNotes.map(note => {note.time = note.time - (maxCountNum as number);});
   }
@@ -348,7 +360,7 @@ function handleSlide(difficultyFile: IWrapBeatmap){
   console.log("noteWithSlide length:",noteWithSlide.length)
   console.log(noteWithSlide)
 }
-async function handleComplexBeats(meta: any, difficultyFile: IWrapBeatmap) {
+function handleComplexBeats(meta: any, difficultyFile: IWrapBeatmap) {
   const complexBeats = getComplexBeats(difficultyFile);
   if (complexBeats.length === 0) {
     return false;
@@ -371,7 +383,7 @@ async function handleComplexBeats(meta: any, difficultyFile: IWrapBeatmap) {
   }
 
   // handle potential offset
-  const countMapSize = await handleOffset(difficultyFile, meta);
+  const countMapSize = handleOffset(difficultyFile, meta);
   if(countMapSize === 1){
     return false;
   }
@@ -398,13 +410,6 @@ function updateMeta(info: IWrapInfo, difficultyTuple: [string, string, number, n
   });
 }
 
-function updateFailMeta(meta: any, errorType: string) {
-  meta.status = errorType;
-  output_meta.push({
-    ...meta
-  });
-}
-
 function updateProcessedMeta(meta: any, difficultyFile: any) {
   const jsonData = JSON.stringify(difficultyFile);
   const difficultyPath = meta.beatmap_path+"/"+meta.difficulty+".json"
@@ -418,9 +423,6 @@ function updateProcessedMeta(meta: any, difficultyFile: any) {
     chains: difficultyFile.chains.length,
   };
   meta.status = PROCESSED_DATA;
-  output_meta.push({
-    ...meta
-  });
   load++;
 }
 const loadJsonl = async (filePath: string) => {
@@ -471,23 +473,13 @@ error[MISSING_OFFSET] = [];
 error[SMALL_COMPLEX] = [];
 error[COMPLEX_BEATS] = [];
 
-let lastPromise = Promise.resolve(); // 维护一个全局的 Promise 队列
-const tasks: Promise<void>[] = [];//// 记录所有的 updateList 任务
 let load: number = 0;
-let lastPath: string | null = null;
-let lastBPMEventPath: string | null = null;
-let lastEditorOffsetPath: string | null = null;
-let lastSongOffsetPath: string | null = null;
+const target_data: string[] = [target];
 
 const start = performance.now();
-
 if(pipeline === "create_manifest"){
   const directories = await getDirectoriesWithPaths(directory || '');
-  for (const dir of directories) {
-    tasks.push(processDirectory(dir));
-  }
-  // 等待所有任务执行完
-  await Promise.all(tasks)
+  await Promise.all(directories.map(dir => processDirectory(dir)))
   const summary = {
     dir_num: directories.length,
     load: output_meta.length,
@@ -501,14 +493,18 @@ if(pipeline === "create_manifest"){
   console.log(summary);
 }
 else{
-  const target_data: string[] = [target];
   const input_meta: JSON[] = await loadJsonl(manifest_directory)
+  const input_meta_group: Record<string, any[]> = {};
   for (const meta of input_meta) {
-    await processBeatmap(meta, target_data);
+    const currentPath: string = (meta as any).beatmap_path;
+    (input_meta_group[currentPath] ||= []).push(meta);
   }
+  // copy beatmap files to processed folder, and save all beatmap changes there
+  await Promise.all(Object.entries(input_meta_group).map(([key, value])=>copyBeatmap(value)));
+  await Promise.all(Object.entries(input_meta_group).map(([key, value])=>processBeatmap(value)));
+  
   // console.log("*****************************result:");
   // console.log("Path count:", pathCount);
-
 
   // Summary
   const summary = {
