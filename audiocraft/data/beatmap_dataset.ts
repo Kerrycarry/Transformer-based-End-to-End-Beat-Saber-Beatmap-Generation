@@ -71,8 +71,10 @@ const processBeatmap=(metaList: any[]) =>
         ...item,
         status: foundError,
       }));
-      for (const meta of processedMetaList)
+      for (const meta of processedMetaList){
         output_meta.push({...meta});
+        result[foundError].push(meta.id);
+      } 
       return;
     }
     // handle inconsistent offset
@@ -111,8 +113,10 @@ const processBeatmap=(metaList: any[]) =>
       // TODO: don't update offset to meta for now (change in the future version),
       // TODO：把更新offset从赋值改成+=
     }
-    for (const meta of processedMetaList)
+    for (const meta of processedMetaList){
       output_meta.push({...meta});
+      result[meta.status].push(meta.id);
+    }
   });
 
 function logPath(beatmapPath: string, difficulty: string){
@@ -131,14 +135,12 @@ function logPath(beatmapPath: string, difficulty: string){
   console.log(command4);
 }
 function processSingleBeatmap(meta: any) {
-  logPath(meta.beatmap_path, meta.difficulty)
   //check if meta.status is in target_data
-  if (!target_data.includes(meta.status)) {
+  if (!target_data.includes(meta.status))
     return meta;
-  }
+  logPath(meta.beatmap_path, meta.difficulty)
   try {
     if (meta.audio_offset !== 0) {
-      error[AUDIO_OFFSET].push(meta.id);
       meta.status = AUDIO_OFFSET;
       return meta;
     }
@@ -147,20 +149,17 @@ function processSingleBeatmap(meta: any) {
     const difficultyFile = bsmap.readDifficultyFileSync(processedPath);
     
     if (hasBpmFieldWithNonEmptyListRecursive(difficultyFile)) {
-      error[BPM_EVENTS].push(meta.id);
       meta.status = BPM_EVENTS;
       return meta;
     }
 
     if (meta.editor_offset !== 0) {
-      error[EDITOR_OFFSET].push(meta.id);
       meta.status = EDITOR_OFFSET;
       return meta;
     }
 
     const is_complex = handleComplexBeats(meta, difficultyFile);
     if (is_complex) {
-      error[COMPLEX_BEATS].push(meta.id);
       meta.status = COMPLEX_BEATS;
       return meta;
     }
@@ -172,7 +171,6 @@ function processSingleBeatmap(meta: any) {
     console.error(`Error processing beatmap ${meta.id}`, _error);
     const folderName = basename(meta.beatmap_path);
     console.log(`${folderName}\\${meta.difficulty}`)
-    error[UNKNOWN_ERROR].push(meta.id);
     meta.status = UNKNOWN_ERROR;
     return meta
   }
@@ -187,7 +185,7 @@ const processDirectory = (dir: { name: string, fullPath: string }) =>
     difficultyTuples.map(difficultyTuple => updateMeta(info, difficultyTuple, dir));
   })
   .catch (_error=>{
-    error[UNKNOWN_ERROR].push(dir.name);
+    result[UNKNOWN_ERROR].push(dir.name);
     logPath(dir.fullPath, "")
     console.error("Error processing directory:", dir.name, _error);
     }
@@ -305,7 +303,7 @@ function handleOffset(difficultyFile: IWrapBeatmap, meta: any){
     // remove offset from difficulty.colorNotes
     difficultyFile.colorNotes.map(note => {note.time = note.time - (maxCountNum as number);});
   }
-  return countMap.size
+  return countMap
 }
 
 function handleSlide(difficultyFile: IWrapBeatmap){
@@ -381,10 +379,28 @@ function handleComplexBeats(meta: any, difficultyFile: IWrapBeatmap) {
   }
 
   // handle potential offset
-  const countMapSize = handleOffset(difficultyFile, meta);
-  if(countMapSize === 1){
+  const countMap= handleOffset(difficultyFile, meta);
+  if(countMap.size === 1){
     return false;
   }
+
+  // handle potential bpm event
+  // if (countMap.size !== 1){
+  //   // check if contain tuplet notes
+  //   const keys = Array.from(countMap.keys());
+  //   const hasOnly = keys.length === 3 && keys.includes(0) && keys.includes(0.042) && keys.includes(0.083);
+  //   if(hasOnly)
+  //     console.log("complex beats are all tuplet notes")
+  //   else if(keys.includes(0.042) && countMap.get(0.042) > 2 && keys.includes(0.083) && countMap.get(0.083) > 2)
+  //     console.log("complex beats has something beyond tuplet note")
+  //   else
+  //     console.log("complex beats has something else")
+  // }
+  
+  const complexBeatsWithoutOffset = getComplexBeats(difficultyFile);
+  console.log(`complex Beats Without offset (length: ${complexBeatsWithoutOffset.length})`)
+  console.log(complexBeatsWithoutOffset)
+  console.log()
 
   return true;
 }
@@ -421,7 +437,6 @@ function updateProcessedMeta(meta: any, difficultyFile: any) {
     chains: difficultyFile.chains.length,
   };
   meta.status = PROCESSED_DATA;
-  load++;
 }
 const loadJsonl = async (filePath: string) => {
   // 读取 JSONL 文件的内容
@@ -461,17 +476,17 @@ const RAW_DATA: string = "RAW_DATA";
 const PROCESSED_DATA: string = "PROCESSED_DATA";
 
 // create a dictionary to store the each error type
-const error: Record<string, string[]> = {};
-error[UNKNOWN_ERROR] = [];
-error[AUDIO_OFFSET] = [];
-error[EDITOR_OFFSET] = [];
-error[BPM_EVENTS] = [];
-error[FLOATING_ERROR] = [];
-error[MISSING_OFFSET] = [];
-error[SMALL_COMPLEX] = [];
-error[COMPLEX_BEATS] = [];
+const result: Record<string, string[]> = {};
+result[UNKNOWN_ERROR] = [];
+result[AUDIO_OFFSET] = [];
+result[EDITOR_OFFSET] = [];
+result[BPM_EVENTS] = [];
+result[FLOATING_ERROR] = [];
+result[MISSING_OFFSET] = [];
+result[SMALL_COMPLEX] = [];
+result[COMPLEX_BEATS] = [];
+result[PROCESSED_DATA] = [];
 
-let load: number = 0;
 const target_data: string[] = [target];
 
 const start = performance.now();
@@ -482,10 +497,10 @@ if(pipeline === "create_manifest"){
     dir_num: directories.length,
     load: output_meta.length,
     error_num: {
-      UNKNOWN_ERROR: error[UNKNOWN_ERROR].length,
+      UNKNOWN_ERROR: result[UNKNOWN_ERROR].length,
     },
     error_type:{
-      UNKNOWN_ERROR: error[UNKNOWN_ERROR],
+      UNKNOWN_ERROR: result[UNKNOWN_ERROR],
     }
   };
   console.log(summary);
@@ -511,26 +526,27 @@ else{
   // Summary
   const summary = {
     total_num: input_meta.length,
-    load,
     error_num: {
-      UNKNOWN_ERROR: error[UNKNOWN_ERROR].length,
-      AUDIO_OFFSET: error[AUDIO_OFFSET].length,
-      EDITOR_OFFSET: error[EDITOR_OFFSET].length,
-      BPM_EVENTS: error[BPM_EVENTS].length,
-      FLOATING_ERROR: error[FLOATING_ERROR].length,
-      MISSING_OFFSET: error[MISSING_OFFSET].length,
-      SMALL_COMPLEX: error[SMALL_COMPLEX].length,
-      COMPLEX_BEATS: error[COMPLEX_BEATS].length,
+      PROCESSED_DATA: result[PROCESSED_DATA].length,
+      UNKNOWN_ERROR: result[UNKNOWN_ERROR].length,
+      AUDIO_OFFSET: result[AUDIO_OFFSET].length,
+      EDITOR_OFFSET: result[EDITOR_OFFSET].length,
+      BPM_EVENTS: result[BPM_EVENTS].length,
+      FLOATING_ERROR: result[FLOATING_ERROR].length,
+      MISSING_OFFSET: result[MISSING_OFFSET].length,
+      SMALL_COMPLEX: result[SMALL_COMPLEX].length,
+      COMPLEX_BEATS: result[COMPLEX_BEATS].length,
     },
     error_type:{
-      UNKNOWN_ERROR: error[UNKNOWN_ERROR],
-      AUDIO_OFFSET: error[AUDIO_OFFSET],
-      EDITOR_OFFSET: error[EDITOR_OFFSET],
-      BPM_EVENTS: error[BPM_EVENTS],
-      FLOATING_ERROR: error[FLOATING_ERROR],
-      MISSING_OFFSET: error[MISSING_OFFSET],
-      SMALL_COMPLEX: error[SMALL_COMPLEX],
-      COMPLEX_BEATS: error[COMPLEX_BEATS],
+      PROCESSED_DATA: result[PROCESSED_DATA],
+      UNKNOWN_ERROR: result[UNKNOWN_ERROR],
+      AUDIO_OFFSET: result[AUDIO_OFFSET],
+      EDITOR_OFFSET: result[EDITOR_OFFSET],
+      BPM_EVENTS: result[BPM_EVENTS],
+      FLOATING_ERROR: result[FLOATING_ERROR],
+      MISSING_OFFSET: result[MISSING_OFFSET],
+      SMALL_COMPLEX: result[SMALL_COMPLEX],
+      COMPLEX_BEATS: result[COMPLEX_BEATS],
     }
   };
 
