@@ -59,6 +59,89 @@ async function getDirectoriesWithPaths(dirPath: string) {
   }
   return entries;
 }
+function filterBeatmap(meta: any){
+  if (!target_data.includes(meta.status))
+    return;
+  if (meta.audio_offset !== 0) {
+    meta.status = AUDIO_OFFSET;
+    return;
+  }
+  const processedPath = `${meta.beatmap_path}/processed/${meta.beatmap_dat_name}`;
+  const difficultyFile = bsmap.readDifficultyFileSync(processedPath);
+  if (hasBpmFieldWithNonEmptyListRecursive(difficultyFile)) {
+    meta.status = BPM_EVENTS;
+    return meta;
+  }
+  if (meta.editor_offset !== 0) {
+    meta.status = EDITOR_OFFSET;
+    return;
+  }
+  return difficultyFile;
+}
+function updateMeta2(difficultyFileList: IWrapBeatmap[], metaList: any[], process: string, log: boolean = false){
+  const complexBeatsList = difficultyFileList.map(difficultyFile => getComplexBeats(difficultyFile))
+  //log complex beat
+  if(log)
+    complexBeatsList.map(complexBeat=>{
+      console.log(`complex Beats after process${process} (length: ${complexBeat.length})`);
+      console.log(complexBeat);
+    });
+  //update meta in accordance with  complexBeatsList
+  metaList.forEach((item, index) => {
+    if (complexBeatsList[index].length === 0) {
+      item.status = PROCESSED_DATA;
+    } else {
+      item.status = COMPLEX_BEATS;
+    }
+  });
+  if(metaList.every(meta => meta.status === PROCESSED_DATA))
+    return true
+  return false
+}
+
+function handleComplexBeats2(difficultyFileList: IWrapBeatmap[], metaList: any[]){
+  if(updateMeta2(difficultyFileList, metaList, ""))
+    return;
+  //handle slide
+  difficultyFileList.map(difficultyFile => handleSlide(difficultyFile))
+  if(updateMeta2(difficultyFileList, metaList, ""))
+    return;
+  //handle potential offset
+  const offset = handleOffset2(difficultyFileList, metaList[0])
+  updateMeta2(difficultyFileList, metaList, "", true);
+  // // log stats
+  // metaList = metaList.map((item, index) => ({
+  //   ...item,
+  //   process_used: {
+  //     slice: complexBeatsList[index].length - complexBeatsWithoutSlice[index].length, 
+  //     offset: offset},
+  // }));
+
+}
+function processBeatmap2(metaList: any[]){
+  logPath(metaList[0].beatmap_path, "")
+  const difficultyFileList = metaList.map((meta) => filterBeatmap(meta))
+  const foundError = [AUDIO_OFFSET, BPM_EVENTS, EDITOR_OFFSET].find(errorType => 
+    metaList.some(meta => meta.status === errorType)
+  );
+  if(foundError){
+    metaList = metaList.map(item => ({
+      ...item,
+      status: foundError,
+    }));
+    for (const meta of metaList){
+      output_meta.push({...meta});
+      result[foundError].push(meta.id);
+    } 
+    return;
+  }
+  handleComplexBeats2(difficultyFileList, metaList);
+  for (const meta of metaList){
+    output_meta.push({...meta});
+    result[meta.status].push(meta.id);
+  }
+}
+
 const processBeatmap=(metaList: any[]) =>
   Promise.all(metaList.map((meta) => processSingleBeatmap(meta)))
   .then((processedMetaList: any[]) => {
@@ -90,7 +173,7 @@ const processBeatmap=(metaList: any[]) =>
         const diff = Math.abs(firstOffset - offset)
         if(diff > diff_threshold){
           logPath(meta.beatmap_path, "")
-          console.log(`first offset = ${firstOffset}, difference = ${diff}`)
+          console.log(`first offset = ${firstOffset}, current offset = ${offset}, difference = ${diff}`)
           assert(false, `offset difference: > diff_threshold: ${diff_threshold}`)
         }
       }
@@ -208,10 +291,24 @@ function getDifficultyTuples(info: IWrapInfo): [string, string, number, number, 
       difficulty.customData?._editorOffset ?? 0
     ]);
 }
+function isSupportedNote(time: number, tolerance = 0.099): boolean {
+  /**
+   * Checks if the given time is a multiple of 1/6 or 1/8 note within a small tolerance.
+   *
+   * @param time - The time in beats to check.
+   * @param tolerance - Allowed floating-point precision error.
+   * @returns True if the time is a multiple of 1/6 or 1/8, otherwise False.
+   */
+  let scaledTime = time * 8;
+  const isOneEigth = Math.abs(Math.round(scaledTime) - scaledTime) < tolerance;
+  scaledTime = time * 6;
+  const isSixth = Math.abs(Math.round(scaledTime) - scaledTime) < tolerance;
+  return isOneEigth || isSixth
+}
 
 function getComplexBeats(difficultyFile: IWrapBeatmap): number[] {
   const beats = difficultyFile.colorNotes.map(note => note.time);
-  return beats.filter(time => time % complexBeatNumber !== 0);
+  return beats.filter(time => !isSupportedNote(time));
 }
 
 async function copyDifficulty(filePath: string, targetPath: string) {
@@ -250,7 +347,7 @@ async function copyBeatmap(metaList: any[]) {
 }
 
 function handleOffset(difficultyFile: IWrapBeatmap, meta: any){
-  const offsets = difficultyFile.colorNotes.map(note => parseFloat((note.time % complexBeatNumber).toFixed(3)));
+  const offsets = difficultyFile.colorNotes.map(note => parseFloat((note.time % alignmentNote).toFixed(3)));
   //get offset stats
   const countMap = new Map<number, number>();
   for (const num of offsets) {
@@ -297,13 +394,89 @@ function handleOffset(difficultyFile: IWrapBeatmap, meta: any){
   if (countMap.size === 1 || 
     (maxCountNum!==0 && 
       // meet strong condition or lose condition
-      (maxCount/difficultyFile.colorNotes.length > 0.7 || (maxCount/difficultyFile.colorNotes.length > 0.6 && (difficultyFile.colorNotes[0].time - (maxCountNum as number))% complexBeatNumber === 0) ))) {
+      (maxCount/difficultyFile.colorNotes.length > 0.7 || (maxCount/difficultyFile.colorNotes.length > 0.6 && isSupportedNote(difficultyFile.colorNotes[0].time - (maxCountNum as number)) )))) {
     //update offset to meta later in processBeatmap()
     meta.process_used.offset = (maxCountNum as number);
     // remove offset from difficulty.colorNotes
     difficultyFile.colorNotes.map(note => {note.time = note.time - (maxCountNum as number);});
   }
   return countMap
+}
+
+function handleOffset2(difficultyFileList: IWrapBeatmap[], meta: any){
+  const colorNoteList = difficultyFileList.map(difficultyFile => difficultyFile.colorNotes.map(note=>note.time))
+  const noteList = [...new Set(colorNoteList.flat())];
+  const offsets = noteList.map(time => parseFloat((time % alignmentNote).toFixed(3)));
+  //get offset stats
+  const countMap = new Map<number, number>();
+  for (const num of offsets) {
+    countMap.set(num, (countMap.get(num) || 0) + 1);
+  }
+  // 找到出现次数最少的数
+  let minCountNum: number[] = [];
+  let minCount = Infinity;
+  for (const [num, count] of countMap) {
+    if (count < minCount) {
+      minCount = count;
+      minCountNum = [num]; // 重新赋值
+    } else if (count === minCount) {
+      minCountNum.push(num); // 追加
+    }
+  }
+  // 找到出现最多的数
+  let maxCountNum: number | null = null;
+  let maxCount = 0;
+
+  for (const [num, count] of countMap) {
+    if (count > maxCount) {
+      maxCount = count;
+      maxCountNum = num;
+    }
+  }
+  // 找到原列表中等于 minCountNum 的元素及其索引
+  const indices : number[] = [];
+  offsets.forEach((num, index) => {
+    if (minCountNum.includes(num)) {
+      indices.push(index);
+    }
+  });
+  const minElementsWithIndex = indices.map(index => noteList[index]);
+  console.log(`Offsets stats (${countMap.size} unique values):`);
+  console.log(countMap);
+  console.log("min Elements With Index:", minElementsWithIndex);
+  console.log(`max Count Num: ${maxCountNum} (count:${maxCount})`);
+  if(maxCountNum !== 0){
+    console.log("max Count Num != 0:");
+    console.log("max Count /difficultyFile.colorNotes.length:", maxCount/noteList.length);
+  }
+  console.log()
+  let offset = 0
+  if (countMap.size === 1 || 
+    (maxCountNum!==0 && 
+      // meet strong condition or lose condition
+      (maxCount/noteList.length > 0.7 || (maxCount/noteList.length > 0.6 && isSupportedNote(noteList[0] - (maxCountNum as number)) )))) {
+        //set offset
+        offset = (maxCountNum as number)
+        // remove offset from difficulty.colorNotes
+        difficultyFileList.map(difficultyFile=>difficultyFile.colorNotes.map(note => {note.time = note.time - offset;}));
+        // update offset to info.dat
+        const processedPath = `${meta.beatmap_path}/processed`;
+        const info = bsmap.readInfoFileSync(`${processedPath}/${meta.info_name}`);
+        info.difficulties.map(difficulty => {
+          if (difficulty.characteristic === 'Standard') {
+            const offsetInSec = offset * 60 / meta.bpm * 1000
+            difficulty.customData._editorOffset = offsetInSec;
+            difficulty.customData._editorOldOffset = offsetInSec;
+          }
+        });
+        bsmap.writeInfoFile(info, 2, {
+          directory: processedPath,
+          filename: meta.info_name
+        });
+        // TODO: don't update offset to meta for now (change in the future version),
+        // TODO：把更新offset从赋值改成+=
+  }
+  return offset;
 }
 
 function handleSlide(difficultyFile: IWrapBeatmap){
@@ -316,7 +489,7 @@ function handleSlide(difficultyFile: IWrapBeatmap){
     if (currentColor in tempSlideNote){
       const lastNote = tempSlideNote[currentColor].at(-1)
       // check if it is part of slide
-      if (note.time > lastNote.time && note.time - lastNote.time < complexBeatNumber && (lastNote.direction == note.direction || note.direction == 8)){
+      if (note.time > lastNote.time && (note.time - lastNote.time < slideNote) && (lastNote.direction == note.direction || note.direction == 8)){
         tempSlideNote[currentColor].push(note);
       }
       // identify it as a new note. Handle slide in temp
@@ -360,12 +533,12 @@ function handleComplexBeats(meta: any, difficultyFile: IWrapBeatmap) {
 
   meta.process_used = {};
   // handle floating point issue
-  difficultyFile.colorNotes.map(note => {note.time = parseFloat(note.time.toFixed(3));});
-  const complexBeatsRound = getComplexBeats(difficultyFile);
-  meta.process_used.round = complexBeats.length - complexBeatsRound.length
-  if (complexBeatsRound.length === 0) {
-    return false;
-  }
+  // difficultyFile.colorNotes.map(note => {note.time = parseFloat(note.time.toFixed(3));});
+  // const complexBeatsRound = getComplexBeats(difficultyFile);
+  // meta.process_used.round = complexBeats.length - complexBeatsRound.length
+  // if (complexBeatsRound.length === 0) {
+  //   return false;
+  // }
 
   // handle slide
   handleSlide(difficultyFile)
@@ -373,7 +546,7 @@ function handleComplexBeats(meta: any, difficultyFile: IWrapBeatmap) {
   console.log(`complex Beats Without Slice (length: ${complexBeatsWithoutSlice.length})`)
   console.log(complexBeatsWithoutSlice)
   console.log()
-  meta.process_used.slice = complexBeatsRound.length - complexBeatsWithoutSlice.length
+  meta.process_used.slice = complexBeats.length - complexBeatsWithoutSlice.length
   if (complexBeatsWithoutSlice.length === 0) {
     return false;
   }
@@ -383,19 +556,6 @@ function handleComplexBeats(meta: any, difficultyFile: IWrapBeatmap) {
   if(countMap.size === 1){
     return false;
   }
-
-  // handle potential bpm event
-  // if (countMap.size !== 1){
-  //   // check if contain tuplet notes
-  //   const keys = Array.from(countMap.keys());
-  //   const hasOnly = keys.length === 3 && keys.includes(0) && keys.includes(0.042) && keys.includes(0.083);
-  //   if(hasOnly)
-  //     console.log("complex beats are all tuplet notes")
-  //   else if(keys.includes(0.042) && countMap.get(0.042) > 2 && keys.includes(0.083) && countMap.get(0.083) > 2)
-  //     console.log("complex beats has something beyond tuplet note")
-  //   else
-  //     console.log("complex beats has something else")
-  // }
   
   const complexBeatsWithoutOffset = getComplexBeats(difficultyFile);
   console.log(`complex Beats Without offset (length: ${complexBeatsWithoutOffset.length})`)
@@ -456,8 +616,7 @@ const loadJsonl = async (filePath: string) => {
 };
 
 const id_pattern = /^[a-zA-Z0-9]+/;
-const [directory, manifest_directory, pipeline, complex_beat_number, target] = Deno.args;
-const complexBeatNumber = Number(complex_beat_number);
+const [directory, manifest_directory, pipeline, target] = Deno.args;
 
 //count bpm event
 // const pathCount: Record<string, number> = {};
@@ -488,6 +647,8 @@ result[COMPLEX_BEATS] = [];
 result[PROCESSED_DATA] = [];
 
 const target_data: string[] = [target];
+const alignmentNote = 0.25
+const slideNote = 0.125
 
 const start = performance.now();
 if(pipeline === "create_manifest"){
@@ -518,7 +679,7 @@ else{
   const limit = pLimit(5);
   // await Promise.all(Object.entries(input_meta_group).map(([key, value])=>limit(()=>Deno.copyFile(`${value[0].beatmap_path}/${value[0].song_name}`, `${value[0].beatmap_path}/processed/${value[0].song_name}`))));
   // await Promise.all(input_meta.map((meta: any)=> limit(() => copyDifficulty(`${meta.beatmap_path}/${meta.beatmap_dat_name}`, `${meta.beatmap_path}/processed/${meta.beatmap_dat_name}`))));
-  await Promise.all(Object.entries(input_meta_group).map(([key, value])=>processBeatmap(value)));
+  await Promise.all(Object.entries(input_meta_group).map(([key, value])=>processBeatmap2(value)));
   
   // console.log("*****************************result:");
   // console.log("Path count:", pathCount);
