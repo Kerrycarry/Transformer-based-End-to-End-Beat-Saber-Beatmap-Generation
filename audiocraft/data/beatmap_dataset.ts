@@ -83,7 +83,7 @@ function updateMeta2(difficultyFileList: IWrapBeatmap[], metaList: any[], proces
   //log complex beat
   if(log)
     complexBeatsList.map(complexBeat=>{
-      console.log(`complex Beats after process${process} (length: ${complexBeat.length})`);
+      console.log(`complex Beats after process ${process} (length: ${complexBeat.length})`);
       console.log(complexBeat);
     });
   //update meta in accordance with  complexBeatsList
@@ -99,108 +99,55 @@ function updateMeta2(difficultyFileList: IWrapBeatmap[], metaList: any[], proces
   return false
 }
 
-function handleComplexBeats2(difficultyFileList: IWrapBeatmap[], metaList: any[]){
-  if(updateMeta2(difficultyFileList, metaList, ""))
+function handleComplexBeats(difficultyFileList: IWrapBeatmap[], metaList: any[]){
+  if(updateMeta2(difficultyFileList, metaList, "initial"))
     return;
   //handle slide
   difficultyFileList.map(difficultyFile => handleSlide(difficultyFile))
-  if(updateMeta2(difficultyFileList, metaList, ""))
+  if(updateMeta2(difficultyFileList, metaList, "handleSlide", true))
     return;
   //handle potential offset
-  const offset = handleOffset2(difficultyFileList, metaList[0])
-  updateMeta2(difficultyFileList, metaList, "", true);
-  // // log stats
-  // metaList = metaList.map((item, index) => ({
-  //   ...item,
-  //   process_used: {
-  //     slice: complexBeatsList[index].length - complexBeatsWithoutSlice[index].length, 
-  //     offset: offset},
-  // }));
-
+  const offset = handleOffset(difficultyFileList, metaList[0])
+  // log stats
+  metaList.forEach(item => {
+    item.process_used = {offset: offset};
+  });
+  updateMeta2(difficultyFileList, metaList, "handleOffset", true);
 }
-function processBeatmap2(metaList: any[]){
+
+function processBeatmap(metaList: any[]){
   logPath(metaList[0].beatmap_path, "")
-  const difficultyFileList = metaList.map((meta) => filterBeatmap(meta))
-  const foundError = [AUDIO_OFFSET, BPM_EVENTS, EDITOR_OFFSET].find(errorType => 
-    metaList.some(meta => meta.status === errorType)
-  );
-  if(foundError){
-    metaList = metaList.map(item => ({
-      ...item,
-      status: foundError,
-    }));
-    for (const meta of metaList){
-      output_meta.push({...meta});
-      result[foundError].push(meta.id);
-    } 
-    return;
-  }
-  handleComplexBeats2(difficultyFileList, metaList);
-  for (const meta of metaList){
-    output_meta.push({...meta});
-    result[meta.status].push(meta.id);
-  }
-}
-
-const processBeatmap=(metaList: any[]) =>
-  Promise.all(metaList.map((meta) => processSingleBeatmap(meta)))
-  .then((processedMetaList: any[]) => {
-    // handle inconsistent error type
+  try {
+    const difficultyFileList = metaList.map((meta) => filterBeatmap(meta))
     const foundError = [AUDIO_OFFSET, BPM_EVENTS, EDITOR_OFFSET].find(errorType => 
-        processedMetaList.some(meta => meta.status === errorType)
+      metaList.some(meta => meta.status === errorType)
     );
     if(foundError){
-      processedMetaList = processedMetaList.map(item => ({
+      metaList = metaList.map(item => ({
         ...item,
         status: foundError,
       }));
-      for (const meta of processedMetaList){
+      for (const meta of metaList){
         output_meta.push({...meta});
         result[foundError].push(meta.id);
       } 
       return;
     }
-    // handle inconsistent offset
-    const offsetList = processedMetaList.map(meta => meta?.process_used?.offset ?? 0);
-    const firstOffset = offsetList[0]
-    const meta = processedMetaList[0]
-    // check if offset is same among different difficulties
-    if(offsetList.some(offset => offset !== firstOffset) ){
-      // only allow 0.012 difference measured in beat 
-      const diff_threshold = 0.012;
-      
-      for (const offset of offsetList){
-        const diff = Math.abs(firstOffset - offset)
-        if(diff > diff_threshold){
-          logPath(meta.beatmap_path, "")
-          console.log(`first offset = ${firstOffset}, current offset = ${offset}, difference = ${diff}`)
-          assert(false, `offset difference: > diff_threshold: ${diff_threshold}`)
-        }
-      }
-    }
-    // update offset to info.dat
-    if(firstOffset !== 0){
-      const processedPath = `${meta.beatmap_path}/processed`;
-      const info = bsmap.readInfoFileSync(`${processedPath}/${meta.info_name}`);
-      info.difficulties.map(difficulty => {
-        if (difficulty.characteristic === 'Standard') {
-          const offsetInSec = firstOffset * 60 / meta.bpm * 1000
-          difficulty.customData._editorOffset = offsetInSec;
-          difficulty.customData._editorOldOffset = offsetInSec;
-        }
-      });
-      bsmap.writeInfoFile(info, 2, {
-        directory: processedPath,
-        filename: meta.info_name
-      });
-      // TODO: don't update offset to meta for now (change in the future version),
-      // TODO：把更新offset从赋值改成+=
-    }
-    for (const meta of processedMetaList){
-      output_meta.push({...meta});
-      result[meta.status].push(meta.id);
-    }
-  });
+    handleComplexBeats(difficultyFileList, metaList);
+  }
+  catch (_error) {
+    console.error(`Error processing beatmap`, _error);
+    const folderName = basename(metaList[0].beatmap_path);
+    console.log(folderName)
+    metaList.forEach(item => {
+      item.status = UNKNOWN_ERROR;
+    });
+  }
+  for (const meta of metaList){
+    output_meta.push({...meta});
+    result[meta.status].push(meta.id);
+  }
+}
 
 function logPath(beatmapPath: string, difficulty: string){
   // log the changes
@@ -217,48 +164,6 @@ function logPath(beatmapPath: string, difficulty: string){
   console.log(command3); 
   console.log(command4);
 }
-function processSingleBeatmap(meta: any) {
-  //check if meta.status is in target_data
-  if (!target_data.includes(meta.status))
-    return meta;
-  logPath(meta.beatmap_path, meta.difficulty)
-  try {
-    if (meta.audio_offset !== 0) {
-      meta.status = AUDIO_OFFSET;
-      return meta;
-    }
-
-    const processedPath = `${meta.beatmap_path}/processed/${meta.beatmap_dat_name}`;
-    const difficultyFile = bsmap.readDifficultyFileSync(processedPath);
-    
-    if (hasBpmFieldWithNonEmptyListRecursive(difficultyFile)) {
-      meta.status = BPM_EVENTS;
-      return meta;
-    }
-
-    if (meta.editor_offset !== 0) {
-      meta.status = EDITOR_OFFSET;
-      return meta;
-    }
-
-    const is_complex = handleComplexBeats(meta, difficultyFile);
-    if (is_complex) {
-      meta.status = COMPLEX_BEATS;
-      return meta;
-    }
-
-    updateProcessedMeta(meta, difficultyFile);
-    return meta;
-
-  } catch (_error) {
-    console.error(`Error processing beatmap ${meta.id}`, _error);
-    const folderName = basename(meta.beatmap_path);
-    console.log(`${folderName}\\${meta.difficulty}`)
-    meta.status = UNKNOWN_ERROR;
-    return meta
-  }
-}
-
 
 const processDirectory = (dir: { name: string, fullPath: string }) =>
   getInfoPath(dir.fullPath)
@@ -346,135 +251,90 @@ async function copyBeatmap(metaList: any[]) {
   await Deno.copyFile(`${meta.beatmap_path}/${meta.info_name}`, `${processedPath}/${meta.info_name}`);
 }
 
-function handleOffset(difficultyFile: IWrapBeatmap, meta: any){
-  const offsets = difficultyFile.colorNotes.map(note => parseFloat((note.time % alignmentNote).toFixed(3)));
-  //get offset stats
+function getOffset(noteList: number[], alignmentNote: number){
+  const offsets = noteList.map(time => parseFloat((time % alignmentNote).toFixed(3)));
   const countMap = new Map<number, number>();
   for (const num of offsets) {
     countMap.set(num, (countMap.get(num) || 0) + 1);
   }
-  // 找到出现次数最少的数
-  let minCountNum: number[] = [];
-  let minCount = Infinity;
-  for (const [num, count] of countMap) {
-    if (count < minCount) {
-      minCount = count;
-      minCountNum = [num]; // 重新赋值
-    } else if (count === minCount) {
-      minCountNum.push(num); // 追加
-    }
-  }
-  // 找到出现最多的数
+  // 找到出现最多的数将其作为offset
   let maxCountNum: number | null = null;
   let maxCount = 0;
-
   for (const [num, count] of countMap) {
     if (count > maxCount) {
       maxCount = count;
       maxCountNum = num;
     }
   }
-  // 找到原列表中等于 minCountNum 的元素及其索引
-  const indices : number[] = [];
-  offsets.forEach((num, index) => {
-    if (minCountNum.includes(num)) {
-      indices.push(index);
-    }
-  });
-  const minElementsWithIndex = indices.map(index => difficultyFile.colorNotes[index].time);
-  console.log(`Offsets stats (${countMap.size} unique values):`);
-  console.log(countMap);
-  console.log("min Elements With Index:", minElementsWithIndex);
-  console.log(`max Count Num: ${maxCountNum} (count:${maxCount})`);
-  if(maxCountNum !== 0){
-    console.log("max Count Num != 0:");
-    console.log("max Count /difficultyFile.colorNotes.length:", maxCount/difficultyFile.colorNotes.length);
+  //sample
+  //countMap sample: Map(2) {size: 2, 0.172 => 478, 0.047 => 88}
+  //minCountNum: [0.047]
+  //minCount: 88
+  //maxCountNum: 0.172
+  //maxCount: 478
+  let positiveOffset = maxCountNum as number
+  let negativeOffset = alignmentNote - (maxCountNum as number)
+  if(maxCountNum === 0){
+    positiveOffset = alignmentNote
+    negativeOffset = -alignmentNote
   }
-  console.log()
-  if (countMap.size === 1 || 
-    (maxCountNum!==0 && 
-      // meet strong condition or lose condition
-      (maxCount/difficultyFile.colorNotes.length > 0.7 || (maxCount/difficultyFile.colorNotes.length > 0.6 && isSupportedNote(difficultyFile.colorNotes[0].time - (maxCountNum as number)) )))) {
-    //update offset to meta later in processBeatmap()
-    meta.process_used.offset = (maxCountNum as number);
-    // remove offset from difficulty.colorNotes
-    difficultyFile.colorNotes.map(note => {note.time = note.time - (maxCountNum as number);});
-  }
-  return countMap
+  //negative offset has higher priority
+  return [positiveOffset, negativeOffset]
 }
-
-function handleOffset2(difficultyFileList: IWrapBeatmap[], meta: any){
+function handleOffset(difficultyFileList: IWrapBeatmap[], meta: any){
   const colorNoteList = difficultyFileList.map(difficultyFile => difficultyFile.colorNotes.map(note=>note.time))
   const noteList = [...new Set(colorNoteList.flat())];
-  const offsets = noteList.map(time => parseFloat((time % alignmentNote).toFixed(3)));
-  //get offset stats
-  const countMap = new Map<number, number>();
-  for (const num of offsets) {
-    countMap.set(num, (countMap.get(num) || 0) + 1);
-  }
-  // 找到出现次数最少的数
-  let minCountNum: number[] = [];
+  //origin complex beat
+  const complexbeats = noteList.filter(time => !isSupportedNote(time));
+  //bigger alignment note has high priority
+  const alignmentNoteList = [0.125, 0.25, 0.5]
+  let offsetList: number[] = []
+  for (const alignmentNote of alignmentNoteList)
+    offsetList = offsetList.concat(getOffset(noteList, alignmentNote))
+  //complex beat without potential offset
+  const noteListWithoutOffset = offsetList.map(offset=>noteList.map(time=>time-offset))
+  const complexBeatsWithoutOffset = noteListWithoutOffset.map(noteList=>noteList.filter(time => !isSupportedNote(time)))
+  // 找到出现次数最少的数作为offset
+  let minCountNum;
   let minCount = Infinity;
-  for (const [num, count] of countMap) {
-    if (count < minCount) {
+  for (const [index, complexBeat] of complexBeatsWithoutOffset.entries()) {
+    const count = complexBeat.length
+    if (count<=minCount){
       minCount = count;
-      minCountNum = [num]; // 重新赋值
-    } else if (count === minCount) {
-      minCountNum.push(num); // 追加
+      minCountNum = offsetList[index]; // 重新赋值
     }
   }
-  // 找到出现最多的数
-  let maxCountNum: number | null = null;
-  let maxCount = 0;
-
-  for (const [num, count] of countMap) {
-    if (count > maxCount) {
-      maxCount = count;
-      maxCountNum = num;
-    }
-  }
-  // 找到原列表中等于 minCountNum 的元素及其索引
-  const indices : number[] = [];
-  offsets.forEach((num, index) => {
-    if (minCountNum.includes(num)) {
-      indices.push(index);
-    }
-  });
-  const minElementsWithIndex = indices.map(index => noteList[index]);
-  console.log(`Offsets stats (${countMap.size} unique values):`);
-  console.log(countMap);
-  console.log("min Elements With Index:", minElementsWithIndex);
-  console.log(`max Count Num: ${maxCountNum} (count:${maxCount})`);
-  if(maxCountNum !== 0){
-    console.log("max Count Num != 0:");
-    console.log("max Count /difficultyFile.colorNotes.length:", maxCount/noteList.length);
-  }
-  console.log()
+  //show stats
+  const potentialOffsetRatio = (complexbeats.length - minCount) / noteList.length
+  console.log(`origin complex beat length: ${complexbeats.length}`)
+  console.log(`potential offset: ${offsetList}`)
+  console.log(`complex beat length after removing potential:`)
+  console.log(complexBeatsWithoutOffset.map(noteList=>noteList.length))
+  console.log(`min Count number: ${minCountNum} (count: ${minCount})`)
+  console.log(`potentialOffsetRatio: ${potentialOffsetRatio}`)
+  //有offset，其等于minCountNum
   let offset = 0
-  if (countMap.size === 1 || 
-    (maxCountNum!==0 && 
-      // meet strong condition or lose condition
-      (maxCount/noteList.length > 0.7 || (maxCount/noteList.length > 0.6 && isSupportedNote(noteList[0] - (maxCountNum as number)) )))) {
-        //set offset
-        offset = (maxCountNum as number)
-        // remove offset from difficulty.colorNotes
-        difficultyFileList.map(difficultyFile=>difficultyFile.colorNotes.map(note => {note.time = note.time - offset;}));
-        // update offset to info.dat
-        const processedPath = `${meta.beatmap_path}/processed`;
-        const info = bsmap.readInfoFileSync(`${processedPath}/${meta.info_name}`);
-        info.difficulties.map(difficulty => {
-          if (difficulty.characteristic === 'Standard') {
-            const offsetInSec = offset * 60 / meta.bpm * 1000
-            difficulty.customData._editorOffset = offsetInSec;
-            difficulty.customData._editorOldOffset = offsetInSec;
-          }
-        });
-        bsmap.writeInfoFile(info, 2, {
-          directory: processedPath,
-          filename: meta.info_name
-        });
-        // TODO: don't update offset to meta for now (change in the future version),
-        // TODO：把更新offset从赋值改成+=
+  if (minCount < complexbeats.length && potentialOffsetRatio >= 0.1 ){
+    //set offset
+    offset = minCountNum as number
+    // remove offset from difficulty.colorNotes
+    difficultyFileList.map(difficultyFile=>difficultyFile.colorNotes.map(note => {note.time = note.time - offset;}));
+    // update offset to info.dat
+    const processedPath = `${meta.beatmap_path}/processed`;
+    const info = bsmap.readInfoFileSync(`${processedPath}/${meta.info_name}`);
+    info.difficulties.map(difficulty => {
+      if (difficulty.characteristic === 'Standard') {
+        const offsetInSec = offset * 60 / meta.bpm * 1000
+        difficulty.customData._editorOffset = offsetInSec;
+        difficulty.customData._editorOldOffset = offsetInSec;
+      }
+    });
+    bsmap.writeInfoFile(info, 2, {
+      directory: processedPath,
+      filename: meta.info_name
+    });
+    // TODO: don't update offset to meta for now (change in the future version),
+    // TODO：把更新offset从赋值改成+=
   }
   return offset;
 }
@@ -521,48 +381,9 @@ function handleSlide(difficultyFile: IWrapBeatmap){
   });
   // update difficultyFile.colorNotes with note without slide
   difficultyFile.colorNotes = noteWithoutSlide
-  console.log(`Note with slide (length:",${noteWithSlide.length}):`)
-  console.log(noteWithSlide)
+  console.log(`Note with slide (length:,${noteWithSlide.length}):`)
+  // console.log(noteWithSlide)
   console.log()
-}
-function handleComplexBeats(meta: any, difficultyFile: IWrapBeatmap) {
-  const complexBeats = getComplexBeats(difficultyFile);
-  if (complexBeats.length === 0) {
-    return false;
-  }
-
-  meta.process_used = {};
-  // handle floating point issue
-  // difficultyFile.colorNotes.map(note => {note.time = parseFloat(note.time.toFixed(3));});
-  // const complexBeatsRound = getComplexBeats(difficultyFile);
-  // meta.process_used.round = complexBeats.length - complexBeatsRound.length
-  // if (complexBeatsRound.length === 0) {
-  //   return false;
-  // }
-
-  // handle slide
-  handleSlide(difficultyFile)
-  const complexBeatsWithoutSlice = getComplexBeats(difficultyFile);
-  console.log(`complex Beats Without Slice (length: ${complexBeatsWithoutSlice.length})`)
-  console.log(complexBeatsWithoutSlice)
-  console.log()
-  meta.process_used.slice = complexBeats.length - complexBeatsWithoutSlice.length
-  if (complexBeatsWithoutSlice.length === 0) {
-    return false;
-  }
-
-  // handle potential offset
-  const countMap= handleOffset(difficultyFile, meta);
-  if(countMap.size === 1){
-    return false;
-  }
-  
-  const complexBeatsWithoutOffset = getComplexBeats(difficultyFile);
-  console.log(`complex Beats Without offset (length: ${complexBeatsWithoutOffset.length})`)
-  console.log(complexBeatsWithoutOffset)
-  console.log()
-
-  return true;
 }
 
 function updateMeta(info: IWrapInfo, difficultyTuple: [string, string, number, number, number], dir: { name: string, fullPath: string }) {
@@ -679,7 +500,7 @@ else{
   const limit = pLimit(5);
   // await Promise.all(Object.entries(input_meta_group).map(([key, value])=>limit(()=>Deno.copyFile(`${value[0].beatmap_path}/${value[0].song_name}`, `${value[0].beatmap_path}/processed/${value[0].song_name}`))));
   // await Promise.all(input_meta.map((meta: any)=> limit(() => copyDifficulty(`${meta.beatmap_path}/${meta.beatmap_dat_name}`, `${meta.beatmap_path}/processed/${meta.beatmap_dat_name}`))));
-  await Promise.all(Object.entries(input_meta_group).map(([key, value])=>processBeatmap2(value)));
+  await Promise.all(Object.entries(input_meta_group).map(([key, value])=>processBeatmap(value)));
   
   // console.log("*****************************result:");
   // console.log("Path count:", pathCount);
