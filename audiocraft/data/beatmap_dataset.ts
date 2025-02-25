@@ -84,17 +84,18 @@ function updateMeta2(difficultyFileList: IWrapBeatmap[], metaList: any[], proces
   if(log)
     complexBeatsList.map(complexBeat=>{
       console.log(`complex Beats after process ${process} (length: ${complexBeat.length})`);
+      console.log(`length!=0: ${complexBeat.length != 0}, length<10: ${complexBeat.length < 10}`);
       console.log(complexBeat);
     });
-  //update meta in accordance with  complexBeatsList
+  //update meta in accordance with complexBeatsList length
   metaList.forEach((item, index) => {
-    if (complexBeatsList[index].length === 0) {
+    if (complexBeatsList[index].length < processedThreshold)
       item.status = PROCESSED_DATA;
-    } else {
+    else
       item.status = COMPLEX_BEATS;
-    }
   });
-  if(metaList.every(meta => meta.status === PROCESSED_DATA))
+  //early return condition
+  if(complexBeatsList.every(complexBeats => complexBeats.length === 0))
     return true
   return false
 }
@@ -104,7 +105,7 @@ function handleComplexBeats(difficultyFileList: IWrapBeatmap[], metaList: any[])
     return;
   //handle slide
   difficultyFileList.map(difficultyFile => handleSlide(difficultyFile))
-  if(updateMeta2(difficultyFileList, metaList, "handleSlide", true))
+  if(updateMeta2(difficultyFileList, metaList, "handleSlide"))
     return;
   //handle potential offset
   const offset = handleOffset(difficultyFileList, metaList[0])
@@ -134,6 +135,7 @@ function processBeatmap(metaList: any[]){
       return;
     }
     handleComplexBeats(difficultyFileList, metaList);
+    updateProcessedMeta(difficultyFileList, metaList);
   }
   catch (_error) {
     console.error(`Error processing beatmap`, _error);
@@ -314,7 +316,7 @@ function handleOffset(difficultyFileList: IWrapBeatmap[], meta: any){
   console.log(`potentialOffsetRatio: ${potentialOffsetRatio}`)
   //有offset，其等于minCountNum
   let offset = 0
-  if (minCount < complexbeats.length && potentialOffsetRatio >= 0.1 ){
+  if (minCount < complexbeats.length && potentialOffsetRatio >= offsetThreshold ){
     //set offset
     offset = minCountNum as number
     // remove offset from difficulty.colorNotes
@@ -405,19 +407,23 @@ function updateMeta(info: IWrapInfo, difficultyTuple: [string, string, number, n
   });
 }
 
-function updateProcessedMeta(meta: any, difficultyFile: any) {
-  const jsonData = JSON.stringify(difficultyFile);
-  const difficultyPath = meta.beatmap_path+"/"+meta.difficulty+".json"
-  Deno.writeTextFile(difficultyPath, jsonData);
-  meta.beatmap_json_name = meta.difficulty+".json";
-  meta.note_num = {
-    colorNotes: difficultyFile.colorNotes.length,
-    bombNotes: difficultyFile.bombNotes.length,
-    obstacles: difficultyFile.obstacles.length,
-    arcs: difficultyFile.arcs.length,
-    chains: difficultyFile.chains.length,
-  };
-  meta.status = PROCESSED_DATA;
+function updateProcessedMeta(difficultyFileList: any[], metaList: any[]) {
+  metaList.map((meta, index) => {
+    if (meta.status === PROCESSED_DATA){
+      const difficultyFile = difficultyFileList[index];
+      meta.beatmap_json_name = meta.difficulty+".json";
+      meta.note_num = {
+        colorNotes: difficultyFile.colorNotes.length,
+        bombNotes: difficultyFile.bombNotes.length,
+        obstacles: difficultyFile.obstacles.length,
+        arcs: difficultyFile.arcs.length,
+        chains: difficultyFile.chains.length,
+      };
+      const jsonData = JSON.stringify(difficultyFile);
+      const difficultyPath = meta.beatmap_path+"/"+meta.difficulty+".json"
+      Deno.writeTextFile(difficultyPath, jsonData);
+    }
+  });
 }
 const loadJsonl = async (filePath: string) => {
   // 读取 JSONL 文件的内容
@@ -468,8 +474,9 @@ result[COMPLEX_BEATS] = [];
 result[PROCESSED_DATA] = [];
 
 const target_data: string[] = [target];
-const alignmentNote = 0.25
 const slideNote = 0.125
+const offsetThreshold = 0.1
+const processedThreshold = 10
 
 const start = performance.now();
 if(pipeline === "create_manifest"){
