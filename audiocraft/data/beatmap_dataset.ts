@@ -66,7 +66,7 @@ function filterBeatmap(meta: any){
     meta.status = AUDIO_OFFSET;
     return;
   }
-  const processedPath = `${meta.beatmap_path}/processed/${meta.beatmap_dat_name}`;
+  const processedPath = `${meta.beatmap_path}/processed/${meta.beatmap_name}`;
   const difficultyFile = bsmap.readDifficultyFileSync(processedPath);
   if (hasBpmFieldWithNonEmptyListRecursive(difficultyFile)) {
     meta.status = BPM_EVENTS;
@@ -78,7 +78,7 @@ function filterBeatmap(meta: any){
   }
   return difficultyFile;
 }
-function updateMeta2(difficultyFileList: IWrapBeatmap[], metaList: any[], process: string, log: boolean = false){
+function updateComplexMeta(difficultyFileList: IWrapBeatmap[], metaList: any[], process: string, log: boolean = false){
   const complexBeatsList = difficultyFileList.map(difficultyFile => getComplexBeats(difficultyFile))
   //log complex beat
   if(log)
@@ -88,7 +88,7 @@ function updateMeta2(difficultyFileList: IWrapBeatmap[], metaList: any[], proces
       console.log(complexBeat);
     });
   //update meta in accordance with complexBeatsList length
-  metaList.forEach((item, index) => {
+  metaList.map((item, index) => {
     if (complexBeatsList[index].length < processedThreshold)
       item.status = PROCESSED_DATA;
     else
@@ -101,11 +101,11 @@ function updateMeta2(difficultyFileList: IWrapBeatmap[], metaList: any[], proces
 }
 
 function handleComplexBeats(difficultyFileList: IWrapBeatmap[], metaList: any[]){
-  if(updateMeta2(difficultyFileList, metaList, "initial"))
+  if(updateComplexMeta(difficultyFileList, metaList, "initial"))
     return;
   //handle slide
   difficultyFileList.map(difficultyFile => handleSlide(difficultyFile))
-  if(updateMeta2(difficultyFileList, metaList, "handleSlide"))
+  if(updateComplexMeta(difficultyFileList, metaList, "handleSlide"))
     return;
   //handle potential offset
   const offset = handleOffset(difficultyFileList, metaList[0])
@@ -113,7 +113,7 @@ function handleComplexBeats(difficultyFileList: IWrapBeatmap[], metaList: any[])
   metaList.forEach(item => {
     item.process_used = {offset: offset};
   });
-  updateMeta2(difficultyFileList, metaList, "handleOffset", true);
+  updateComplexMeta(difficultyFileList, metaList, "handleOffset", true);
 }
 
 function processBeatmap(metaList: any[]){
@@ -141,7 +141,7 @@ function processBeatmap(metaList: any[]){
     console.error(`Error processing beatmap`, _error);
     const folderName = basename(metaList[0].beatmap_path);
     console.log(folderName)
-    metaList.forEach(item => {
+    metaList.map(item => {
       item.status = UNKNOWN_ERROR;
     });
   }
@@ -167,19 +167,20 @@ function logPath(beatmapPath: string, difficulty: string){
   console.log(command4);
 }
 
-const processDirectory = (dir: { name: string, fullPath: string }) =>
-  getInfoPath(dir.fullPath)
-  .then(infoPath => bsmap.readInfoFileSync(`${dir.fullPath}/${infoPath}`))
-  .then(info => {
+const processDirectory = async (dir: { name: string, fullPath: string }) => {
+  try {
+    const infoPath = await getInfoPath(dir.fullPath);
+    const info = bsmap.readInfoFileSync(`${dir.fullPath}/${infoPath}`);
     const difficultyTuples = getDifficultyTuples(info);
-    difficultyTuples.map(difficultyTuple => updateMeta(info, difficultyTuple, dir));
-  })
-  .catch (_error=>{
-    result[UNKNOWN_ERROR].push(dir.name);
-    logPath(dir.fullPath, "")
-    console.error("Error processing directory:", dir.name, _error);
+    for (const difficultyTuple of difficultyTuples) {
+      updateMeta(infoPath, info, difficultyTuple, dir);
     }
-  )
+  } catch (_error) {
+    result[UNKNOWN_ERROR].push(dir.name);
+    logPath(dir.fullPath, "");
+    console.error("Error processing directory:", dir.name, _error);
+  }
+};
 
 async function getInfoPath(dirPath: string): Promise<string> {
   const filePath = `${dirPath}/info.dat`;
@@ -388,16 +389,16 @@ function handleSlide(difficultyFile: IWrapBeatmap){
   console.log()
 }
 
-function updateMeta(info: IWrapInfo, difficultyTuple: [string, string, number, number, number], dir: { name: string, fullPath: string }) {
+function updateMeta(infoPath: string, info: IWrapInfo, difficultyTuple: [string, string, number, number, number], dir: { name: string, fullPath: string }) {
   const id = dir.name.match(id_pattern)?.[0] || dir.name;
   
   output_meta.push({
     id: `${id}_${difficultyTuple[1]}`,
     beatmap_path: dir.fullPath,
-    info_name: "Info.dat",
+    info_name: infoPath,
     song_name: info.audio.filename,
     bpm: info.audio.bpm,
-    beatmap_dat_name: difficultyTuple[0],
+    beatmap_name: difficultyTuple[0],
     difficulty: difficultyTuple[1],
     njs: difficultyTuple[2],
     njsoffset: difficultyTuple[3],
@@ -411,7 +412,7 @@ function updateProcessedMeta(difficultyFileList: any[], metaList: any[]) {
   metaList.map((meta, index) => {
     if (meta.status === PROCESSED_DATA){
       const difficultyFile = difficultyFileList[index];
-      meta.beatmap_json_name = meta.difficulty+".json";
+      meta.processed_beatmap_json = meta.difficulty+".json";
       meta.note_num = {
         colorNotes: difficultyFile.colorNotes.length,
         bombNotes: difficultyFile.bombNotes.length,
@@ -420,7 +421,7 @@ function updateProcessedMeta(difficultyFileList: any[], metaList: any[]) {
         chains: difficultyFile.chains.length,
       };
       const jsonData = JSON.stringify(difficultyFile);
-      const difficultyPath = meta.beatmap_path+"/"+meta.difficulty+".json"
+      const difficultyPath = meta.beatmap_path+"/processed/"+meta.difficulty+".json"
       Deno.writeTextFile(difficultyPath, jsonData);
     }
   });
@@ -506,7 +507,7 @@ else{
   // copying song and difficulty need much longer time
   const limit = pLimit(5);
   // await Promise.all(Object.entries(input_meta_group).map(([key, value])=>limit(()=>Deno.copyFile(`${value[0].beatmap_path}/${value[0].song_name}`, `${value[0].beatmap_path}/processed/${value[0].song_name}`))));
-  // await Promise.all(input_meta.map((meta: any)=> limit(() => copyDifficulty(`${meta.beatmap_path}/${meta.beatmap_dat_name}`, `${meta.beatmap_path}/processed/${meta.beatmap_dat_name}`))));
+  // await Promise.all(input_meta.map((meta: any)=> limit(() => copyDifficulty(`${meta.beatmap_path}/${meta.beatmap_name}`, `${meta.beatmap_path}/processed/${meta.beatmap_name}`))));
   await Promise.all(Object.entries(input_meta_group).map(([key, value])=>processBeatmap(value)));
   
   // console.log("*****************************result:");

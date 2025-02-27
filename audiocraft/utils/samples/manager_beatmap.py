@@ -225,10 +225,10 @@ class SampleManager:
             json.dump(beatmap, f, ensure_ascii=False, indent=2)
         # use deno api to convert json to dat, and get info
         request_data = {
-            "beatmap_file_path": (save_directory / meta.difficulty).with_suffix('.json'),
+            "processed_beatmap_json": (save_directory / meta.difficulty).with_suffix('.json'),
             "difficulty": meta.difficulty,
             "save_directory": save_directory,
-            "beatmap_info_path": meta.beatmap_info_path,
+            "info_name": meta.info_name,
             "beatmap_name": sample_id,
             "difficulty_version": self.xp.cfg.parser_pipeline.generate_difficulty_version,
             'info_version': self.xp.cfg.parser_pipeline.generate_info_version,

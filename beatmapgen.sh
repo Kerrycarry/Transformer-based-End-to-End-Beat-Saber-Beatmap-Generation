@@ -13,7 +13,7 @@ start_parser_api() {
 beatmap_dataset_load() {
     echo "Starting loading beatmap dataset..."
     nohup deno run --allow-net --allow-read --allow-write audiocraft/data/beatmap_dataset.ts \
-    dataset/$SOURCE_DIR egs/$MANIFEST_DIR/data.jsonl $PIPELINE 0.125 $TARGET_DATA \
+    dataset/$SOURCE_DIR egs/$MANIFEST_DIR/data.jsonl $PIPELINE $TARGET_DATA \
      > "$LOG_FILE" 2>&1 &
     DENO_PID=$!
     wait $DENO_PID
@@ -109,7 +109,7 @@ elif [[ "$FIRST_ARG" == "-3" ]]; then
 elif [[ "$FIRST_ARG" == "-4" ]]; then
     start_parser_api
 elif [[ "$FIRST_ARG" == "-5" ]]; then
-    for PROCESS in deno dora
+    for PROCESS in deno dora python
     do
         kill_process "$PROCESS"
     done
@@ -125,9 +125,20 @@ fi
 # nohup ./beatmapgen.sh -2 CustomLevels2 bs_curated create_manifest RAW_DATA > log/beatmapgen_log.txt 2>&1 &
 # nohup ./beatmapgen.sh -2 CustomLevels2 bs_curated process_beatmap RAW_DATA > log/beatmapgen_log.txt 2>&1 &
 # nohup ./beatmapgen.sh -2 CustomLevels2 bs_curated process_beatmap COMPLEX_BEATS > log/beatmapgen_log.txt 2>&1 &
+
+# nohup ./beatmapgen.sh -2 CustomLevels2 bs_curated2 create_manifest RAW_DATA > log/beatmapgen_log.txt 2>&1 &
+# nohup ./beatmapgen.sh -2 CustomLevels2 bs_curated2 process_beatmap RAW_DATA > log/beatmapgen_log.txt 2>&1 &
+
+# nohup ./beatmapgen.sh -2 CustomLevels3 bs_curated2 create_manifest RAW_DATA > log/beatmapgen_log.txt 2>&1 &
+# nohup ./beatmapgen.sh -2 CustomLevels3 bs_curated2 process_beatmap RAW_DATA > log/beatmapgen_log.txt 2>&1 &
+# nohup ./beatmapgen.sh -2 CustomLevels3 bs_curated2 process_beatmap COMPLEX_BEATS > log/beatmapgen_log.txt 2>&1 &
 # 启动python制作流程
-# nohup ./beatmapgen.sh -3 CustomLevels2 bs_curated config/solver/beatmapgen/beatmapgen_base_32khz.yaml create_manifest > log/beatmapgen_log.txt 2>&1 &
+# nohup ./beatmapgen.sh -3 CustomLevels2 bs_curated config/solver/beatmapgen/beatmapgen_base_32khz.yaml tokenize_audio > log/beatmapgen_log.txt 2>&1 &
 # nohup ./beatmapgen.sh -3 CustomLevels2 bs_curated config/solver/beatmapgen/beatmapgen_base_32khz.yaml tokenize_beatmap > log/beatmapgen_log.txt 2>&1 &
+
+
+# nohup ./beatmapgen.sh -3 CustomLevels3 bs_curated2 config/solver/beatmapgen/beatmapgen_base_32khz.yaml tokenize_audio > log/beatmapgen_log.txt 2>&1 &
+# nohup ./beatmapgen.sh -3 CustomLevels3 bs_curated2 config/solver/beatmapgen/beatmapgen_base_32khz.yaml tokenize_beatmap > log/beatmapgen_log.txt 2>&1 &
 # 启动 api
 # ./beatmapgen.sh -3
 # kill 掉api和dora

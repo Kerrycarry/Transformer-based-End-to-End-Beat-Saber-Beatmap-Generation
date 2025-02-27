@@ -9,7 +9,6 @@ without_origin having to scan again the folders, we precompute some metadata
 """
 import argparse
 import copy
-import requests
 from concurrent.futures import ThreadPoolExecutor, Future
 from dataclasses import dataclass, fields
 from contextlib import ExitStack
@@ -34,7 +33,7 @@ import torch
 import torch.nn.functional as F
 import numpy as np
 
-from .audio import audio_read, audio_info
+from .audio import audio_read, audio_info, audio_write, _av_read
 from .audio_utils import convert_audio
 from .zip import PathInZip
 
@@ -65,42 +64,61 @@ class BaseInfo:
             for field in fields(self)
             }
 
+SONG_NAME = "song_name"
+INFO_NAME = "info_name"
+BEATMAP_PATH = "beatmap_path"
+PROCESSED_BEATMAP_JSON = "processed_beatmap_json"
+TOKENIZED_BEATMAP_JSON = "tokenized_beatmap_json"
+BEATMAP_TOKEN = "beatmap_token"
+AUDIO_TOKEN = "audio_token"
+AUDIO_TOKEN_INDEX = "audio_token_index"
 
 @dataclass(order=True)
 class AudioMeta(BaseInfo):
     id: str
-    beatmap_info_path: str
-    song_path: str # path to song
-    sample_rate: int
-    beatmap_file_path: str # path to beatmap_file
     difficulty: str
     bpm: float
     njs: float
     njsoffset: float
-    note_num: Dict[str, int]
-    supported_file_path: tp.Optional[str] = None # path to supported beatmap_file
-    beatmap_token_path: tp.Optional[str] = None
-    audio_token_path: tp.Optional[str] = None
-    receptive_field_path: tp.Optional[str] = None
+    status: str
+    # path
+    beatmap_path: str
+    song_name: str # path to song
+    info_name: str
+    processed_beatmap_json: tp.Optional[str] = None
+    tokenized_beatmap_json: tp.Optional[str] = None # path to tokenized beatmap_file
+    beatmap_token: tp.Optional[str] = None
+    audio_token: tp.Optional[str] = None
+    audio_token_index: tp.Optional[str] = None
+    # additional information
     duration_in_quaver: tp.Optional[int] = None
-    duration: tp.Optional[float] = None
+    duration: tp.Optional[float] = None # in seconds
+    sample_rate: tp.Optional[int] = None
     duration_in_code: tp.Optional[int] = None
+    note_num: tp.Optional[Dict[str, int]] = None
+
     amplitude: tp.Optional[float] = None
     weight: tp.Optional[float] = None
-    # info_path is used to load additional information about_origin the audio file that is stored in zip files.
-    info_path: tp.Optional[PathInZip] = None
+
 
     @classmethod
     def from_dict(cls, dictionary: dict):
         base = cls._dict2fields(dictionary)
-        if 'info_path' in base and base['info_path'] is not None:
-            base['info_path'] = PathInZip(base['info_path'])
         return cls(**base)
 
     def to_dict(self):
         d = super().to_dict()
-        if d['info_path'] is not None:
-            d['info_path'] = str(d['info_path'])
+        # revert resolve
+        current_dir = os.getcwd()
+        relative_path = os.path.relpath(d[BEATMAP_PATH], current_dir)
+        d[BEATMAP_PATH] = relative_path
+        d[SONG_NAME] = os.path.basename(d[SONG_NAME])
+        d[INFO_NAME] = os.path.basename(d[INFO_NAME])
+        del d[PROCESSED_BEATMAP_JSON]
+        del d[TOKENIZED_BEATMAP_JSON]
+        del d[BEATMAP_TOKEN]
+        del d[AUDIO_TOKEN]
+        del d[AUDIO_TOKEN_INDEX]
         return d
 
 
@@ -725,17 +743,20 @@ def _get_audio_meta(audio_meta: dict) -> AudioMeta:
     Returns:
         AudioMeta: Audio file path and its metadata.
     """
-    info = audio_info(audio_meta['song_path'])
+    info = audio_info(audio_meta['song_name'])
     audio_meta['sample_rate'] = info.sample_rate
     audio_meta['duration'] = info.duration
     amplitude: tp.Optional[float] = None
     if not audio_meta['minimal']:
-        wav, sr = audio_read(audio_meta['song_path'])
+        wav, sr = audio_read(audio_meta['song_name'])
         amplitude = wav.abs().max().item()
         audio_meta['amplitude'] = info.amplitude
     return AudioMeta.from_dict(audio_meta)
 
-
+TOKENIZED = 'tokenized'
+AUDIO_TOKEN_NAME = 'audio_token'
+AUDIO_TOKEN_INDEX_NAME = 'audio_token_index'
+PROCESSED = 'processed'
 def _resolve_audio_meta(m: AudioMeta, fast: bool = True) -> AudioMeta:
     """If Dora is available as a dependency, try to resolve potential relative paths
     in list of AudioMeta. This method is expected to be used when loading meta from file.
@@ -756,26 +777,21 @@ def _resolve_audio_meta(m: AudioMeta, fast: bool = True) -> AudioMeta:
     if not dora:
         return m
 
-    if not is_abs(m.song_path):
-        m.song_path = dora.git_save.to_absolute_path(m.song_path)
-    if not is_abs(m.beatmap_file_path):
-        m.beatmap_file_path = dora.git_save.to_absolute_path(m.beatmap_file_path)
-    if not is_abs(m.beatmap_info_path):
-        m.beatmap_info_path = dora.git_save.to_absolute_path(m.beatmap_info_path)
-    if m.supported_file_path is not None and not is_abs(m.supported_file_path):
-        m.supported_file_path = dora.git_save.to_absolute_path(m.supported_file_path)
-    if m.beatmap_token_path is not None and not is_abs(m.beatmap_token_path):
-        m.beatmap_token_path = dora.git_save.to_absolute_path(m.beatmap_token_path)
-    if m.audio_token_path is not None and not is_abs(m.audio_token_path):
-        m.audio_token_path = dora.git_save.to_absolute_path(m.audio_token_path)
-    if m.receptive_field_path is not None and not is_abs(m.receptive_field_path):
-        m.receptive_field_path = dora.git_save.to_absolute_path(m.receptive_field_path)
-    if m.info_path is not None and not is_abs(m.info_path.zip_path):
-        m.info_path.zip_path = dora.git_save.to_absolute_path(m.song_path)
+    m.beatmap_path = dora.git_save.to_absolute_path(m.beatmap_path)
+    m.song_name = m.beatmap_path+"/"+m.song_name
+    m.info_name = m.beatmap_path+"/"+m.info_name
+    m.processed_beatmap_json = m.beatmap_path+f"/{PROCESSED}/{m.difficulty}.json"
+    difficulty_name = m.id.split("_")[1:]
+    difficulty_name = "_".join(difficulty_name)
+    m.tokenized_beatmap_json = m.beatmap_path+f"/{TOKENIZED}/{difficulty_name}.json"
+    m.beatmap_token =  m.beatmap_path+f"/{TOKENIZED}/{difficulty_name}.bin"
+    m.audio_token = m.beatmap_path+f"/{TOKENIZED}/{AUDIO_TOKEN_NAME}.bin"
+    m.audio_token_index = m.beatmap_path+f"/{TOKENIZED}/{AUDIO_TOKEN_INDEX_NAME}.bin"
+
     return m
 
 
-def find_audio_files(input_meta: tp.List[dict], 
+def find_audio_files(input_meta: tp.List[AudioMeta], 
                      exts: tp.List[str] = DEFAULT_EXTS,
                      resolve: bool = True,
                      minimal: bool = True,
@@ -806,7 +822,8 @@ def find_audio_files(input_meta: tp.List[dict],
         if progress:
             print("Finding audio files...")
         for item in input_meta:
-            file_path = item['song_path']
+            item = item.to_dict()
+            file_path = item['song_name']
             full_path = Path(file_path)
             if full_path.suffix.lower() in exts:
                 item['minimal'] = minimal
@@ -829,13 +846,12 @@ def find_audio_files(input_meta: tp.List[dict],
             except Exception as err:
                 print("Error with", str(item), err, file=sys.stderr)
                 continue            
-            if m.duration > audio_duration_threshold or m.note_num['colorNotes'] / m.duration < nps_threshold or m.bpm < minimum_bpm or m.bpm > maximum_bpm:
+            if m.status != "PROCESSED_DATA" or m.duration > audio_duration_threshold or m.note_num['colorNotes'] / m.duration < nps_threshold or m.bpm < minimum_bpm or m.bpm > maximum_bpm:
                 fail_meta.append(m)
                 continue
             meta.append(m)
             if progress:
                 print(format((1 + idx) / len(audio_files), " 3.1%"), end='\r', file=sys.stderr)
-    meta.sort()
     return meta, fail_meta
 
 
@@ -1113,34 +1129,34 @@ class AudioDataset:
                 origin_sample = None
                 if self.split == 'generate' and self.current_epoch == self.generate_every:
                     # 打开beatmap json
-                    error_path = file_meta.supported_file_path
-                    with open(file_meta.supported_file_path, 'r', encoding = 'utf-8') as f:
+                    error_path = file_meta.tokenized_beatmap_json
+                    with open(file_meta.tokenized_beatmap_json, 'r', encoding = 'utf-8') as f:
                         beatmap_file = json.load(f)
                     beatmap_file = self.beatmap.sample_beatmap_file(beatmap_file, seek_time_in_quaver, seek_time_in_quaver + segment_duration_in_quaver, file_meta.bpm)
                     # 打开audio
-                    error_path = file_meta.song_path
-                    origin_sample, sr = audio_read(file_meta.song_path, seek_time_in_second, segment_duration_in_sec, pad=False)
+                    error_path = file_meta.song_name
+                    origin_sample, sr = audio_read(file_meta.song_name, seek_time_in_second, segment_duration_in_sec, pad=False)
                 # 打开beatmap token
-                error_path = file_meta.beatmap_token_path
+                error_path = file_meta.beatmap_token
                 start = seek_time_in_quaver
                 end = seek_time_in_quaver+segment_duration_in_quaver
                 end = end if end <= file_meta.duration_in_quaver else file_meta.duration_in_quaver
-                beatmap_token = self.read_bin(file_meta.beatmap_token_path, start, end, 12, np.int8, 1)
+                beatmap_token = self.read_bin(file_meta.beatmap_token, start, end, 12, np.int8, 1)
                 n_frames = beatmap_token.shape[0]
                 beatmap_token = F.pad(beatmap_token, (0, 0, 0, segment_duration_in_quaver - n_frames), mode='constant', value=self.token_id_size)
                 # 打开audio_token
-                error_path = file_meta.audio_token_path
+                error_path = file_meta.audio_token
                 start = traditional_round(seek_time_in_second*self.code_rate)
                 total_code = traditional_round(segment_duration_in_sec*self.code_rate)
                 end = start + total_code
                 end = end if end <= file_meta.duration_in_code else file_meta.duration_in_code
-                audio_token = self.read_bin(file_meta.audio_token_path, start, end, 4, np.int16, 2)
+                audio_token = self.read_bin(file_meta.audio_token, start, end, 4, np.int16, 2)
                 pad_values = torch.tensor([83, 2044, 2019, 1770])  # 每一列不同的padding值
                 padded_tensor = torch.stack([torch.full((self.target_code - audio_token.shape[0],), pad_value, dtype=torch.int16) for pad_value in pad_values], dim=1)
                 audio_token = torch.cat((audio_token, padded_tensor), dim=0)
                 # 打开receptive_field
-                error_path = file_meta.receptive_field_path
-                note_code_map = self.read_bin(file_meta.receptive_field_path, 0, 1, segment_duration_in_quaver, np.int16, 2)
+                error_path = file_meta.audio_token_index
+                note_code_map = self.read_bin(file_meta.audio_token_index, 0, 1, segment_duration_in_quaver, np.int16, 2)
                 # 创建info
                 segment_info = SegmentInfo(file_meta, round(seek_time_in_quaver * self.minimum_note), total_code=total_code,
                                                 sample_rate=self.sample_rate, origin_sample=origin_sample, beatmap_file=beatmap_file)
@@ -1239,7 +1255,7 @@ def main():
                         help='out_originput file to store the metadata, ')
     parser.add_argument('beatmapgen_solver',
                         help='beatmapgen configuration file')
-    parser.add_argument('pipeline', help='create_manifest, tokenize_beatmap')
+    parser.add_argument('pipeline', help="tokenize_beatmap, tokenize_audio")
     parser.add_argument('--complete',
                         action='store_false', dest='minimal', default=True,
                         help='Retrieve all metadata, even the one that are expansive '
@@ -1252,31 +1268,12 @@ def main():
                         help='Number of workers.')
     parser.add_argument('--write_parse_switch', default=False, action=argparse.BooleanOptionalAction)
     args = parser.parse_args()
-    # use deno api to parse beatmap
+    assert args.pipeline in ["tokenize_beatmap", "tokenize_audio"]
     cfg = OmegaConf.load(args.beatmapgen_solver)
-    assert args.pipeline in ["create_manifest", "tokenize_beatmap", "tokenize_audio"]
-    if args.pipeline == "create_manifest":
-        request_data = {
-            "directory": args.root, 
-            "complex_beat_number": cfg.dataset.beatmap_kwargs.minimum_note,
-            "write_parse_switch": args.write_parse_switch
-        }
-        response = requests.get(cfg.parser_pipeline.read_url, params=request_data)
-        if response.status_code == 200:
-            data = response.json()
-            out_originput_meta = data.pop('output_meta')  # 提取并删除 out_originput_meta
-        else:
-            print(f"Error: {response.status_code}, {response.text}")
-            return
-        
-        meta, fail_meta = find_audio_files(out_originput_meta, DEFAULT_EXTS, progress=True,
-                                resolve=args.resolve, minimal=args.minimal, workers=args.workers, audio_duration_threshold=cfg.parser_pipeline.audio_duration_threshold, nps_threshold=cfg.parser_pipeline.nps_threshold, minimum_bpm = cfg.dataset.beatmap_kwargs.minimum_bpm, maximum_bpm = cfg.dataset.beatmap_kwargs.maximum_bpm)
-        save_audio_meta(args.out_originput_meta_file, meta)
-        print("request finished, summary:")
-        data['load'] -= len(fail_meta)
-        data['fail_audio_nps_bpm'] = [meta.id for meta in fail_meta]
-        print(data)
-    elif args.pipeline == "tokenize_beatmap":
+    meta_file = Path(args.out_originput_meta_file)
+    # no resolve here or save complete path to meta
+    meta = load_audio_meta(meta_file)
+    if args.pipeline == "tokenize_beatmap":
         # get beatmap class
         beatmap_kwargs = cfg.dataset.beatmap_kwargs
         position_size = beatmap_kwargs.position_size
@@ -1287,8 +1284,6 @@ def main():
         )
         note_type = [key for key, value in beatmap_kwargs["note_type"].items() if value]
         beatmap = Beatmap(minimum_note = minimum_note, token_id_size = token_id_size, position_size = position_size, note_types = note_type)
-        meta_file = Path(args.out_originput_meta_file)
-        meta = load_audio_meta(meta_file, resolve=False)
         fail_meta = []
         supported_meta = []
         for item in tqdm(meta, desc="Processing files"):
@@ -1296,70 +1291,55 @@ def main():
             if item.id.split("_")[-1] == 'mirror':
                 continue
             #load beatmap, tokenize, detokenize, compare difference 
-            with open(item.beatmap_file_path, 'r', encoding = 'utf-8') as f:
+            with open(item.processed_beatmap_json, 'r', encoding = 'utf-8') as f:
                 beatmap_file = json.load(f)
             segment_duration_in_quaver = math.ceil(item.duration / 60 * item.bpm / minimum_note)
-            beatmap_token, unsupported_note, beatmap_file, beatmap_file_supported = beatmap.tokenize(beatmap_file, segment_duration_in_quaver, item.bpm, debug=True)
+            beatmap_token, unsupported_note, beatmap_file, tokenized_json = beatmap.tokenize(beatmap_file, segment_duration_in_quaver, item.bpm, debug=True)
             reconstructed_beatmap_file = beatmap.detokenize(beatmap_token, item.bpm)
             result = beatmap.check_difference(beatmap_file, reconstructed_beatmap_file, unsupported_note)
 
             if all([result[note]['same'] for note in beatmap.note_types]):
-                # cache supported beatmap json
-                file_path = item.beatmap_file_path
-                full_path = Path(file_path)
-                path = full_path.parent
-                filename = full_path.name # Expert.json
-                supported_path = path / 'supported'  #/supported
-                supported_path.mkdir(parents=True, exist_ok=True)
-                supported_file_path = supported_path / filename   # /supported/Expert.json
-                with open(supported_file_path, 'w') as f:
-                    json.dump(beatmap_file_supported, f, indent=4)
-                item.supported_file_path = str(supported_file_path)
+                # cache tokenized beatmap json
+                path = Path(item.beatmap_path)
+                tokenized_path = path / TOKENIZED  #/tokenized
+                with open(item.tokenized_beatmap_json, 'w') as f:
+                    json.dump(tokenized_json, f, indent=4)
                 # cache corresponding beatmap token
                 beatmap_token = beatmap_token.to(torch.int8)
-                filename = os.path.splitext(filename)[0] + ".bin" # Expert.bin
-                beatmap_token_path = supported_path / filename # /supported/Expert.bin
-                with open(beatmap_token_path, 'wb') as f:
+                with open(item.beatmap_token, 'wb') as f:
                     f.write(beatmap_token.numpy().tobytes())
-                item.beatmap_token_path = str(beatmap_token_path)
                 item.duration_in_quaver = segment_duration_in_quaver
                 supported_meta.append(item)
 
-                # mirror the supported beatmap json, tokenize, cache, create mirror meta
-                beatmap_file_mirror = beatmap.mirror(beatmap_file_supported)
-                beatmap_token_mirror, unsupported_note, _, _ = beatmap.tokenize(beatmap_file_mirror, segment_duration_in_quaver, item.bpm)
+                # mirror the tokenized beatmap json, tokenize, cache, create mirror meta
+                tokenized_json_mirror = beatmap.mirror(tokenized_json)
+                beatmap_token_mirror, unsupported_note, _, _ = beatmap.tokenize(tokenized_json_mirror, segment_duration_in_quaver, item.bpm)
                 assert all([len(unsupported_note[note]) == 0 for note in beatmap.note_types])
-                filename_mirror = os.path.splitext(filename)[0] + "_mirror.json" # Expert_mirror.json
-                mirror_file_path = supported_path / filename_mirror #/supported/Expert_mirror.json
-                with open(mirror_file_path, 'w') as f:
-                    json.dump(beatmap_file_mirror, f, indent=4)
+                filename_mirror = f"{item.difficulty}_mirror.json" # Expert_mirror.json
+                mirror_json_path = tokenized_path / filename_mirror #/tokenized/Expert_mirror.json
+                with open(mirror_json_path, 'w') as f:
+                    json.dump(tokenized_json_mirror, f, indent=4)
                 #update id, json path, token path
                 item_mirror = copy.deepcopy(item)
                 item_mirror.id = item_mirror.id + "_mirror"
-                item_mirror.supported_file_path = str(mirror_file_path)
                 beatmap_token_mirror = beatmap_token_mirror.to(torch.int8)
                 filename_mirror = os.path.splitext(filename_mirror)[0] + ".bin" # Expert_mirror.bin
-                mirror_token_path = supported_path / filename_mirror # /supported/Expert_mirror.bin
+                mirror_token_path = tokenized_path / filename_mirror # /tokenized/Expert_mirror.bin
                 with open(mirror_token_path, 'wb') as f:
                     f.write(beatmap_token_mirror.numpy().tobytes())
-                item_mirror.beatmap_token_path = str(mirror_token_path)
+                item_mirror.tokenized_beatmap_json = mirror_json_path
+                item_mirror.beatmap_token = mirror_token_path
                 supported_meta.append(item_mirror)
             else:
                 fail_meta.append((item.id, result[COLORNOTE]['not_equal_num']))
-        supported_meta.sort()
         save_audio_meta(args.out_originput_meta_file, supported_meta)
-        print("request finished, summary:")
+        print(f"request finished, summary: fail_meta(length {len(fail_meta)}):")
         for fail in fail_meta:
             print(fail)
     elif args.pipeline == "tokenize_audio":
-        meta_file = Path(args.out_originput_meta_file)
-        meta = load_audio_meta(meta_file, resolve=False)
         # get compression model and padding size
         from ..solvers import CompressionSolver
         model = CompressionSolver.model_from_checkpoint(cfg.compression_model_checkpoint, device='cuda')
-        max_duration = max([one_meta.duration for one_meta in meta])
-        print(f"**********max_duration is {max_duration}")
-        target_frames = math.ceil(max_duration * cfg.sample_rate)
 
         # get receptive field param
         from ..utils.receptive_field import receptive_field, receptive_field_for_unit, convert_note_code
@@ -1371,28 +1351,44 @@ def main():
         unit_positions = [(i,) for i in range(receptive_field_dict[target_layer]['output_shape'][2])]
         rf_range = receptive_field_for_unit(receptive_field_dict, target_layer, unit_positions)
 
+        fail_meta = []
+        supported_meta = []
         last_id = None
         for one_meta in tqdm(meta, desc="tokenize audio"):
+            # inital check
+            if one_meta.status != "PROCESSED_DATA" or one_meta.bpm < cfg.dataset.beatmap_kwargs.minimum_bpm or one_meta.bpm > cfg.dataset.beatmap_kwargs.maximum_bpm:
+                fail_meta.append(one_meta)
+                continue
+            
             current_id = one_meta.id.split("_")[0]
+            # try to get audio
             if last_id is None or last_id != current_id:
-                # get audio, resample, pad, tokenize, unpad
-                origin_sample, sr = audio_read(one_meta.song_path, pad=False)
+                try:
+                    origin_sample, sr = audio_read(one_meta.song_name, pad=False)
+                except Exception as e:
+                    try:
+                        origin_sample, sr = _av_read(one_meta.song_name)
+                    except Exception as e:
+                        fail_meta.append(one_meta)
+                        continue
+                duration_in_sec = origin_sample.shape[-1] / sr
+            # check duration related
+            if duration_in_sec > cfg.parser_pipeline.audio_duration_threshold or one_meta.note_num['colorNotes'] / duration_in_sec < cfg.parser_pipeline.nps_threshold:
+                fail_meta.append(one_meta)
+                continue
+            # tokenizing audio
+            if last_id is None or last_id != current_id:
+                #resample, pad, tokenize, unpad
                 resample_sample = convert_audio(origin_sample, sr, cfg.sample_rate, cfg.channels)
-                n_frames = resample_sample.shape[-1]
-                resample_sample = F.pad(resample_sample, (0, target_frames - n_frames))
                 resample_sample = resample_sample.unsqueeze(0).cuda()
                 with torch.no_grad():
                     audio_token, scale = model.encode(resample_sample)
-                n_code = math.ceil(n_frames / cfg.audio_token.encodec.stride_rate)
-                audio_token = audio_token[:,:,:n_code]
                 # cache audio token 
-                file_path = one_meta.beatmap_file_path
-                full_path = Path(file_path).parent
-                supported_path = full_path / 'supported'
+                path = Path(one_meta.beatmap_path)
+                tokenized_path = path / TOKENIZED
+                tokenized_path.mkdir(parents=True, exist_ok=True)
                 audio_token = audio_token.squeeze(0).permute(1, 0).short().cpu()
-                filename = "audio_token.bin"
-                audio_token_path = supported_path / filename
-                with open(audio_token_path, 'wb') as f:
+                with open(one_meta.audio_token, 'wb') as f:
                     f.write(audio_token.numpy().tobytes())
                 
                 # calcualte receptive field
@@ -1408,16 +1404,19 @@ def main():
                 # cache receptive field
                 assert max(max(note_code_maps))< 2**15, max(max(note_code_maps))
                 note_code_maps = np.array(note_code_maps, dtype=np.int16)
-                receptive_field_path = supported_path / "rf.bin"
-                with open(receptive_field_path, 'wb') as f:
+                with open(one_meta.audio_token_index, 'wb') as f:
                     f.write(note_code_maps.tobytes())
-            # update meta, same bpm share same update
+            # update meta, same song share same update
+            one_meta.sample_rate = sr
+            one_meta.duration = duration_in_sec
             one_meta.duration_in_code = audio_token.shape[0]
-            one_meta.audio_token_path = str(audio_token_path)
-            one_meta.receptive_field_path = str(receptive_field_path)
+            supported_meta.append(one_meta)
             # record last id
             last_id = current_id
-        save_audio_meta(args.out_originput_meta_file, meta)
+        save_audio_meta(args.out_originput_meta_file, supported_meta)
+        print(f"request finished, summary: fail_meta(length {len(fail_meta)}):")
+        for fail in fail_meta:
+            print(fail)
 
 if __name__ == '__main__':
     main()
