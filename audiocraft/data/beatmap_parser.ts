@@ -9,11 +9,11 @@ export const generate_difficulty = async (
   { request, response }: { request: Request; response: Response },
 ) => {
   const queryParams = request.url.searchParams;
-  const filePath = queryParams.get("processed_beatmap_json")||'';
+  const filePath = queryParams.get("processed_beatmap_json")||''; //directory of .json 
   const difficulty = queryParams.get("difficulty")|| '';
-  const save_directory = queryParams.get("save_directory")|| '';
+  const save_directory = queryParams.get("save_directory")|| ''; //directory to save the files
   const difficulty_version = parseInt(queryParams.get("difficulty_version")||'3');
-  const beatmapInfoPath = queryParams.get("info_name")||'';
+  const beatmapInfoPath = queryParams.get("info_name")||''; //directory of info.dat
   const info_version = parseInt(queryParams.get("info_version")||'2');
   const beatmapName = queryParams.get("beatmap_name")||'';
   const write_info_switch: boolean = queryParams.get("write_info_switch")==="True";

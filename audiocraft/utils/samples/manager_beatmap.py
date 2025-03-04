@@ -221,11 +221,12 @@ class SampleManager:
             song_name = 'song'
             audio_write(save_directory / song_name, audio, meta.sample_rate, format="ogg")
         # save beatmap json file
-        with open((save_directory / meta.difficulty).with_suffix('.json'), 'w', encoding='utf-8') as f:
+        processed_beatmap_json = (save_directory / meta.difficulty).with_suffix('.json')
+        with open(processed_beatmap_json, 'w', encoding='utf-8') as f:
             json.dump(beatmap, f, ensure_ascii=False, indent=2)
         # use deno api to convert json to dat, and get info
         request_data = {
-            "processed_beatmap_json": (save_directory / meta.difficulty).with_suffix('.json'),
+            "processed_beatmap_json": processed_beatmap_json,
             "difficulty": meta.difficulty,
             "save_directory": save_directory,
             "info_name": meta.info_name,

@@ -111,7 +111,7 @@ function handleComplexBeats(difficultyFileList: IWrapBeatmap[], metaList: any[])
   const offset = handleOffset(difficultyFileList, metaList[0])
   // log stats
   metaList.forEach(item => {
-    item.process_used = {offset: offset};
+    item.additional_offset = offset;
   });
   updateComplexMeta(difficultyFileList, metaList, "handleOffset", true);
 }
@@ -276,7 +276,7 @@ function getOffset(noteList: number[], alignmentNote: number){
   //maxCountNum: 0.172
   //maxCount: 478
   let positiveOffset = maxCountNum as number
-  let negativeOffset = alignmentNote - (maxCountNum as number)
+  let negativeOffset = -(alignmentNote - (maxCountNum as number))
   if(maxCountNum === 0){
     positiveOffset = alignmentNote
     negativeOffset = -alignmentNote

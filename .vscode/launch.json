@@ -110,10 +110,9 @@
                 "--allow-all",
             ],
             "args": [
-                "dataset/CustomLevels3",       // directory
+                "dataset/Beatmap2",       // directory
                 "egs/bs_curated2/data.jsonl",        // manifest_directory
                 "create_manifest2",      // create_manifest, create_manifest2
-                "0.125", // complex_beat_number
                 "COMPLEX_BEATS" //COMPLEX_BEATS,  RAW_DATA
             ],
             "attachSimplePort": 9229

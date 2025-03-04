@@ -72,7 +72,7 @@ TOKENIZED_BEATMAP_JSON = "tokenized_beatmap_json"
 BEATMAP_TOKEN = "beatmap_token"
 AUDIO_TOKEN = "audio_token"
 AUDIO_TOKEN_INDEX = "audio_token_index"
-
+PROCESSED_SONG_NAME = "processed_song_name"
 @dataclass(order=True)
 class AudioMeta(BaseInfo):
     id: str
@@ -85,6 +85,7 @@ class AudioMeta(BaseInfo):
     beatmap_path: str
     song_name: str # path to song
     info_name: str
+    processed_song_name: tp.Optional[str] = None
     processed_beatmap_json: tp.Optional[str] = None
     tokenized_beatmap_json: tp.Optional[str] = None # path to tokenized beatmap_file
     beatmap_token: tp.Optional[str] = None
@@ -96,6 +97,7 @@ class AudioMeta(BaseInfo):
     sample_rate: tp.Optional[int] = None
     duration_in_code: tp.Optional[int] = None
     note_num: tp.Optional[Dict[str, int]] = None
+    additional_offset: tp.Optional[float] = None
 
     amplitude: tp.Optional[float] = None
     weight: tp.Optional[float] = None
@@ -114,6 +116,7 @@ class AudioMeta(BaseInfo):
         d[BEATMAP_PATH] = relative_path
         d[SONG_NAME] = os.path.basename(d[SONG_NAME])
         d[INFO_NAME] = os.path.basename(d[INFO_NAME])
+        del d[PROCESSED_SONG_NAME]
         del d[PROCESSED_BEATMAP_JSON]
         del d[TOKENIZED_BEATMAP_JSON]
         del d[BEATMAP_TOKEN]
@@ -778,8 +781,10 @@ def _resolve_audio_meta(m: AudioMeta, fast: bool = True) -> AudioMeta:
         return m
 
     m.beatmap_path = dora.git_save.to_absolute_path(m.beatmap_path)
-    m.song_name = m.beatmap_path+"/"+m.song_name
+    song_name = m.song_name
+    m.song_name = m.beatmap_path+"/"+song_name
     m.info_name = m.beatmap_path+"/"+m.info_name
+    m.processed_song_name = m.beatmap_path+f"/{PROCESSED}/{os.path.splitext(song_name)[0]}.ogg"
     m.processed_beatmap_json = m.beatmap_path+f"/{PROCESSED}/{m.difficulty}.json"
     difficulty_name = m.id.split("_")[1:]
     difficulty_name = "_".join(difficulty_name)
@@ -789,71 +794,6 @@ def _resolve_audio_meta(m: AudioMeta, fast: bool = True) -> AudioMeta:
     m.audio_token_index = m.beatmap_path+f"/{TOKENIZED}/{AUDIO_TOKEN_INDEX_NAME}.bin"
 
     return m
-
-
-def find_audio_files(input_meta: tp.List[AudioMeta], 
-                     exts: tp.List[str] = DEFAULT_EXTS,
-                     resolve: bool = True,
-                     minimal: bool = True,
-                     progress: bool = False,
-                     workers: int = 0,
-                     audio_duration_threshold: float = 1000, nps_threshold: float = 1, minimum_bpm: float = 65, maximum_bpm: float = 260) -> tp.List[AudioMeta]:
-    """Build a list of AudioMeta from a given path,
-    collecting relevant audio files and fetching meta info.
-
-    Args:
-        path (str or Path): Path to folder containing audio files.
-        exts (list of str): List of file extensions to consider for audio files.
-        minimal (bool): Whether to only load the minimal set of metadata (takes longer if not).
-        progress (bool): Whether to log progress on audio files collection.
-        workers (int): number of parallel workers, if 0, use only the current thread.
-    Returns:
-        list of AudioMeta: List of audio file path and its metadata.
-    """
-    audio_files = []
-    futures: tp.List[Future] = []
-    pool: tp.Optional[ThreadPoolExecutor] = None
-    fail_meta = []
-    with ExitStack() as stack:
-        if workers > 0:
-            pool = ThreadPoolExecutor(workers)
-            stack.enter_context(pool)
-
-        if progress:
-            print("Finding audio files...")
-        for item in input_meta:
-            item = item.to_dict()
-            file_path = item['song_name']
-            full_path = Path(file_path)
-            if full_path.suffix.lower() in exts:
-                item['minimal'] = minimal
-                audio_files.append(item)
-                if pool is not None:
-                    futures.append(pool.submit(_get_audio_meta, audio_files[-1]))
-                if progress:
-                    print(format(len(audio_files), " 8d"), end='\r', file=sys.stderr)
-        if progress:
-            print("Getting audio metadata...")
-        meta: tp.List[AudioMeta] = []
-        for idx, item in enumerate(audio_files):
-            try:
-                if pool is None:
-                    m = _get_audio_meta(item)
-                else:
-                    m = futures[idx].result()
-                if resolve:
-                    m = _resolve_audio_meta(m)
-            except Exception as err:
-                print("Error with", str(item), err, file=sys.stderr)
-                continue            
-            if m.status != "PROCESSED_DATA" or m.duration > audio_duration_threshold or m.note_num['colorNotes'] / m.duration < nps_threshold or m.bpm < minimum_bpm or m.bpm > maximum_bpm:
-                fail_meta.append(m)
-                continue
-            meta.append(m)
-            if progress:
-                print(format((1 + idx) / len(audio_files), " 3.1%"), end='\r', file=sys.stderr)
-    return meta, fail_meta
-
 
 def load_audio_meta(path: tp.Union[str, Path],
                     resolve: bool = True, fast: bool = True) -> tp.List[AudioMeta]:
@@ -1134,8 +1074,8 @@ class AudioDataset:
                         beatmap_file = json.load(f)
                     beatmap_file = self.beatmap.sample_beatmap_file(beatmap_file, seek_time_in_quaver, seek_time_in_quaver + segment_duration_in_quaver, file_meta.bpm)
                     # 打开audio
-                    error_path = file_meta.song_name
-                    origin_sample, sr = audio_read(file_meta.song_name, seek_time_in_second, segment_duration_in_sec, pad=False)
+                    error_path = file_meta.processed_song_name
+                    origin_sample, sr = audio_read(file_meta.processed_song_name, seek_time_in_second, segment_duration_in_sec, pad=False)
                 # 打开beatmap token
                 error_path = file_meta.beatmap_token
                 start = seek_time_in_quaver
@@ -1357,7 +1297,7 @@ def main():
         for one_meta in tqdm(meta, desc="tokenize audio"):
             # inital check
             if one_meta.status != "PROCESSED_DATA" or one_meta.bpm < cfg.dataset.beatmap_kwargs.minimum_bpm or one_meta.bpm > cfg.dataset.beatmap_kwargs.maximum_bpm:
-                fail_meta.append(one_meta)
+                fail_meta.append(one_meta.id)
                 continue
             
             current_id = one_meta.id.split("_")[0]
@@ -1369,15 +1309,25 @@ def main():
                     try:
                         origin_sample, sr = _av_read(one_meta.song_name)
                     except Exception as e:
-                        fail_meta.append(one_meta)
+                        fail_meta.append(one_meta.id)
                         continue
                 duration_in_sec = origin_sample.shape[-1] / sr
             # check duration related
             if duration_in_sec > cfg.parser_pipeline.audio_duration_threshold or one_meta.note_num['colorNotes'] / duration_in_sec < cfg.parser_pipeline.nps_threshold:
-                fail_meta.append(one_meta)
+                fail_meta.append(one_meta.id)
                 continue
             # tokenizing audio
             if last_id is None or last_id != current_id:
+                # handle offset first
+                if one_meta.additional_offset is not None and one_meta.additional_offset != 0:
+                    offset = abs(round(one_meta.additional_offset / one_meta.bpm * 60 * sr))
+                    if one_meta.additional_offset > 0:
+                        origin_sample = origin_sample[:, offset:]
+                    if one_meta.additional_offset < 0:
+                        origin_sample = F.pad(origin_sample, (0, offset), mode='constant', value=0)
+                    duration_in_sec = origin_sample.shape[-1] / sr
+                # save audio
+                audio_write(os.path.splitext(one_meta.processed_song_name)[0], origin_sample, sr, format="ogg")
                 #resample, pad, tokenize, unpad
                 resample_sample = convert_audio(origin_sample, sr, cfg.sample_rate, cfg.channels)
                 resample_sample = resample_sample.unsqueeze(0).cuda()
