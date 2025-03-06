@@ -98,7 +98,8 @@ class AudioMeta(BaseInfo):
     duration_in_code: tp.Optional[int] = None
     note_num: tp.Optional[Dict[str, int]] = None
     additional_offset: tp.Optional[float] = None
-
+    editor_offset: tp.Optional[float] = None
+    
     amplitude: tp.Optional[float] = None
     weight: tp.Optional[float] = None
 
@@ -1319,13 +1320,14 @@ def main():
             # tokenizing audio
             if last_id is None or last_id != current_id:
                 # handle offset first
-                if one_meta.additional_offset is not None and one_meta.additional_offset != 0:
-                    offset = abs(round(one_meta.additional_offset / one_meta.bpm * 60 * sr))
-                    if one_meta.additional_offset > 0:
-                        origin_sample = origin_sample[:, offset:]
-                    if one_meta.additional_offset < 0:
-                        origin_sample = F.pad(origin_sample, (0, offset), mode='constant', value=0)
-                    duration_in_sec = origin_sample.shape[-1] / sr
+                for offset in [one_meta.editor_offset, one_meta.additional_offset]:
+                    if offset is not None and offset != 0:
+                        offset_frames = abs(round(offset / 1000 * sr))
+                        if offset > 0:
+                            origin_sample = origin_sample[:, offset_frames:]
+                        if offset < 0:
+                            origin_sample = F.pad(origin_sample, (0, offset_frames), mode='constant', value=0)
+                        duration_in_sec = origin_sample.shape[-1] / sr
                 # save audio
                 audio_write(os.path.splitext(one_meta.processed_song_name)[0], origin_sample, sr, format="ogg")
                 #resample, pad, tokenize, unpad

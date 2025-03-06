@@ -125,13 +125,15 @@ fi
 # nohup ./beatmapgen.sh -2 Beatmap bs_curated create_manifest RAW_DATA > log/beatmapgen_log.txt 2>&1 &
 # nohup ./beatmapgen.sh -2 Beatmap bs_curated process_beatmap RAW_DATA > log/beatmapgen_log.txt 2>&1 &
 # nohup ./beatmapgen.sh -2 Beatmap bs_curated process_beatmap COMPLEX_BEATS > log/beatmapgen_log.txt 2>&1 &
-
-# nohup ./beatmapgen.sh -2 Beatmap bs_curated2 create_manifest RAW_DATA > log/beatmapgen_log.txt 2>&1 &
-# nohup ./beatmapgen.sh -2 Beatmap bs_curated2 process_beatmap RAW_DATA > log/beatmapgen_log.txt 2>&1 &
+# nohup ./beatmapgen.sh -2 Beatmap bs_curated process_beatmap EDITOR_OFFSET > log/beatmapgen_log.txt 2>&1 &
 
 # nohup ./beatmapgen.sh -2 Beatmap2 bs_curated2 create_manifest RAW_DATA > log/beatmapgen_log.txt 2>&1 &
 # nohup ./beatmapgen.sh -2 Beatmap2 bs_curated2 process_beatmap RAW_DATA > log/beatmapgen_log.txt 2>&1 &
-# nohup ./beatmapgen.sh -2 Beatmap2 bs_curated2 process_beatmap COMPLEX_BEATS > log/beatmapgen_log.txt 2>&1 &
+
+# nohup ./beatmapgen.sh -2 Beatmap_Debug bs_curated_debug create_manifest RAW_DATA > log/beatmapgen_log.txt 2>&1 &
+# nohup ./beatmapgen.sh -2 Beatmap_Debug bs_curated_debug process_beatmap RAW_DATA > log/beatmapgen_log.txt 2>&1 &
+# nohup ./beatmapgen.sh -2 Beatmap_Debug bs_curated_debug process_beatmap COMPLEX_BEATS > log/beatmapgen_log.txt 2>&1 &
+# nohup ./beatmapgen.sh -2 Beatmap_Debug bs_curated_debug process_beatmap EDITOR_OFFSET > log/beatmapgen_log.txt 2>&1 &
 # 启动python制作流程
 # nohup ./beatmapgen.sh -3 Beatmap bs_curated config/solver/beatmapgen/beatmapgen_base_32khz.yaml tokenize_audio > log/beatmapgen_log.txt 2>&1 &
 # nohup ./beatmapgen.sh -3 Beatmap bs_curated config/solver/beatmapgen/beatmapgen_base_32khz.yaml tokenize_beatmap > log/beatmapgen_log.txt 2>&1 &

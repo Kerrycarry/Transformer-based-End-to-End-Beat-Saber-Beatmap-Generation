@@ -60,8 +60,6 @@ async function getDirectoriesWithPaths(dirPath: string) {
   return entries;
 }
 function filterBeatmap(meta: any){
-  if (!target_data.includes(meta.status))
-    return;
   if (meta.audio_offset !== 0) {
     meta.status = AUDIO_OFFSET;
     return;
@@ -71,10 +69,6 @@ function filterBeatmap(meta: any){
   if (hasBpmFieldWithNonEmptyListRecursive(difficultyFile)) {
     meta.status = BPM_EVENTS;
     return meta;
-  }
-  if (meta.editor_offset !== 0) {
-    meta.status = EDITOR_OFFSET;
-    return;
   }
   return difficultyFile;
 }
@@ -115,39 +109,87 @@ function handleComplexBeats(difficultyFileList: IWrapBeatmap[], metaList: any[])
   });
   updateComplexMeta(difficultyFileList, metaList, "handleOffset", true);
 }
-
-function processBeatmap(metaList: any[]){
-  logPath(metaList[0].beatmap_path, "")
-  try {
-    const difficultyFileList = metaList.map((meta) => filterBeatmap(meta))
-    const foundError = [AUDIO_OFFSET, BPM_EVENTS, EDITOR_OFFSET].find(errorType => 
-      metaList.some(meta => meta.status === errorType)
-    );
-    if(foundError){
-      metaList = metaList.map(item => ({
-        ...item,
-        status: foundError,
-      }));
-      for (const meta of metaList){
-        output_meta.push({...meta});
-        result[foundError].push(meta.id);
-      } 
-      return;
-    }
-    handleComplexBeats(difficultyFileList, metaList);
-    updateProcessedMeta(difficultyFileList, metaList);
+function handleEditorOffset(difficultyFileList: IWrapBeatmap[], metaList: any[]){
+  const editorOffsetList = metaList.map(meta => meta.editor_offset)
+  const foundOffset = editorOffsetList.find(offset => offset !== 0);
+  if(foundOffset){
+    //get unique element in the editorOffsetList
+    const uniqueEditorOffsetList = [...new Set(editorOffsetList)];
+    if (uniqueEditorOffsetList.length > 1)  
+      return false;
+    const editorOffset = uniqueEditorOffsetList.find(offset => offset !== 0);
+    const editorOffsetBeat = editorOffset / 1000 / 60 * metaList[0].bpm;
+    //update editor offset to difficultyFileList
+    difficultyFileList.map(difficultyFile => difficultyFile.colorNotes.map(note => {note.time = note.time - editorOffsetBeat;}));
+    //log editor offset stat
+    console.log(`editorOffsetList: ${editorOffsetList}`);
+    console.log(`uniqueEditorOffsetList: ${uniqueEditorOffsetList} unique length: ${uniqueEditorOffsetList.length}`);
+    console.log(`editor offset chosen: ${editorOffset}`);
   }
-  catch (_error) {
-    console.error(`Error processing beatmap`, _error);
-    const folderName = basename(metaList[0].beatmap_path);
-    console.log(folderName)
-    metaList.map(item => {
-      item.status = UNKNOWN_ERROR;
+  return true;
+}
+function updateMeta2(metaList: any[], status: string = "", difficultyFileList: any[] = []){
+  if(status !== ""){
+    metaList = metaList.map(item => ({
+      ...item,
+      status: status,
+    }));
+  }
+  if(difficultyFileList.length !== 0){
+    assert(status === "", "status should be empty");
+    metaList.map((meta, index) => {
+      if (meta.status === PROCESSED_DATA){
+        const difficultyFile = difficultyFileList[index];
+        meta.processed_beatmap_json = meta.difficulty+".json";
+        meta.note_num = {
+          colorNotes: difficultyFile.colorNotes.length,
+          bombNotes: difficultyFile.bombNotes.length,
+          obstacles: difficultyFile.obstacles.length,
+          arcs: difficultyFile.arcs.length,
+          chains: difficultyFile.chains.length,
+        };
+        const jsonData = JSON.stringify(difficultyFile);
+        const difficultyPath = meta.beatmap_path+"/processed/"+meta.difficulty+".json"
+        Deno.writeTextFile(difficultyPath, jsonData);
+      }
     });
   }
   for (const meta of metaList){
     output_meta.push({...meta});
     result[meta.status].push(meta.id);
+  } 
+}
+function processBeatmap(metaList: any[]){
+  logPath(metaList[0].beatmap_path, "")
+  try {
+    //filter unwanted status
+    const statusList = metaList.map(meta => meta.status);
+    if (statusList.some(status => !target_data.includes(status))){
+      updateMeta2(metaList); 
+      return;
+    }
+    //filter AUDIO_OFFSET, BPM_EVENTS
+    const difficultyFileList = metaList.map((meta) => filterBeatmap(meta))
+    const foundError = [AUDIO_OFFSET, BPM_EVENTS].find(errorType => 
+      metaList.some(meta => meta.status === errorType)
+    );
+    if(foundError){
+      updateMeta2(metaList, foundError);
+      return;
+    }
+    const isOffsetUnique = handleEditorOffset(difficultyFileList, metaList);
+    if(!isOffsetUnique){
+      updateMeta2(metaList, EDITOR_OFFSET);
+      return;
+    }
+    handleComplexBeats(difficultyFileList, metaList);
+    updateMeta2(metaList, "", difficultyFileList);
+  }
+  catch (_error) {
+    console.error(`Error processing beatmap`, _error);
+    const folderName = basename(metaList[0].beatmap_path);
+    console.log(folderName)
+    updateMeta2(metaList, UNKNOWN_ERROR);
   }
 }
 
@@ -156,10 +198,10 @@ function logPath(beatmapPath: string, difficulty: string){
   console.log("*************************");
   console.log("Handling:");
   const folderName = basename(beatmapPath);
-  const command1 = `X:\\Beatmap\\${folderName}`
-  const command2 = `Remove-Item -Path "X:\\Beatmap2\\*" -Recurse -Force`
-  const command3 = `robocopy "X:\\Beatmap\\${folderName}" "X:\\Beatmap2\\${folderName}" /E`;
-  const command4 = `robocopy "X:\\Beatmap\\${folderName}\\processed" "X:\\Beatmap2\\${folderName}_processed" /E`;
+  const command1 = `Z:\\Beatmap\\${folderName}`
+  const command2 = `Remove-Item -Path "Z:\\Beatmap_Debug\\*" -Recurse -Force`
+  const command3 = `robocopy "Z:\\Beatmap\\${folderName}" "Z:\\Beatmap2\\${folderName}" /E`;
+  const command4 = `robocopy "Z:\\Beatmap\\${folderName}\\processed" "Z:\\Beatmap_Debug\\${folderName}\\processed" /E`;
   console.log(command1);
   console.log(difficulty)
   console.log(command2);
@@ -319,25 +361,24 @@ function handleOffset(difficultyFileList: IWrapBeatmap[], meta: any){
   let offset = 0
   if (minCount < complexbeats.length && potentialOffsetRatio >= offsetThreshold ){
     //set offset
-    offset = minCountNum as number
+    offset = (minCountNum as number);
     // remove offset from difficulty.colorNotes
     difficultyFileList.map(difficultyFile=>difficultyFile.colorNotes.map(note => {note.time = note.time - offset;}));
+    offset = offset * 60 / meta.bpm * 1000;
     // update offset to info.dat
-    const processedPath = `${meta.beatmap_path}/processed`;
-    const info = bsmap.readInfoFileSync(`${processedPath}/${meta.info_name}`);
-    info.difficulties.map(difficulty => {
-      if (difficulty.characteristic === 'Standard') {
-        const offsetInSec = offset * 60 / meta.bpm * 1000
-        difficulty.customData._editorOffset = offsetInSec;
-        difficulty.customData._editorOldOffset = offsetInSec;
-      }
-    });
-    bsmap.writeInfoFile(info, 2, {
-      directory: processedPath,
-      filename: meta.info_name
-    });
-    // TODO: don't update offset to meta for now (change in the future version),
-    // TODO：把更新offset从赋值改成+=
+    // if want to update offset, edit it to +=offset
+  //   const processedPath = `${meta.beatmap_path}/processed`;
+  //   const info = bsmap.readInfoFileSync(`${processedPath}/${meta.info_name}`);
+  //   info.difficulties.map(difficulty => {
+  //     if (difficulty.characteristic === 'Standard') {
+  //       difficulty.customData._editorOffset = offset;
+  //       difficulty.customData._editorOldOffset = offset;
+  //     }
+  //   });
+  //   bsmap.writeInfoFile(info, 2, {
+  //     directory: processedPath,
+  //     filename: meta.info_name
+  //   });
   }
   return offset;
 }
@@ -408,24 +449,6 @@ function updateMeta(infoPath: string, info: IWrapInfo, difficultyTuple: [string,
   });
 }
 
-function updateProcessedMeta(difficultyFileList: any[], metaList: any[]) {
-  metaList.map((meta, index) => {
-    if (meta.status === PROCESSED_DATA){
-      const difficultyFile = difficultyFileList[index];
-      meta.processed_beatmap_json = meta.difficulty+".json";
-      meta.note_num = {
-        colorNotes: difficultyFile.colorNotes.length,
-        bombNotes: difficultyFile.bombNotes.length,
-        obstacles: difficultyFile.obstacles.length,
-        arcs: difficultyFile.arcs.length,
-        chains: difficultyFile.chains.length,
-      };
-      const jsonData = JSON.stringify(difficultyFile);
-      const difficultyPath = meta.beatmap_path+"/processed/"+meta.difficulty+".json"
-      Deno.writeTextFile(difficultyPath, jsonData);
-    }
-  });
-}
 const loadJsonl = async (filePath: string) => {
   // 读取 JSONL 文件的内容
   const data = await Deno.readTextFile(filePath);

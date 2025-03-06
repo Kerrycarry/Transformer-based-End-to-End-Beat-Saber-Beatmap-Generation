@@ -53,7 +53,11 @@ export const generate_difficulty = async (
     info.audio.filename = "song.ogg"
     info.difficulties = info.difficulties.filter(difficulties => difficulties.characteristic === 'Standard' && difficulties.difficulty === difficulty)
     info.difficulties[0].filename = difficulty+"Standard.dat"
-
+    //remove editor offset
+    if(info.difficulties[0].customData?._editorOffset ?? 0 !== 0){
+      info.difficulties[0].customData._editorOffset = 0;
+      info.difficulties[0].customData._editorOldOffset = 0;
+    }
     await bsmap.writeInfoFile(info, info_version, {
       directory: save_directory,
       filename: 'Info.dat'
