@@ -1,3 +1,11 @@
 {
-    "deno.enable": true
+    "deno.enable": true,
+    "python.analysis.exclude": [
+        "**/node_modules",
+        "**/__pycache__",
+        "**/build",
+        ".git",
+        "myenv/**",
+        "dataset/**"
+    ]
 }
