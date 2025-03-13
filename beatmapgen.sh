@@ -123,6 +123,7 @@ fi
 # nohup ./beatmapgen.sh -1 default --clear > log/beatmapgen_log.txt 2>&1 &
 # 启动deno manifest制作流程
 # nohup ./beatmapgen.sh -2 Beatmap bs_curated create_manifest RAW_DATA > log/beatmapgen_log.txt 2>&1 &
+# nohup ./beatmapgen.sh -2 Beatmap bs_curated copy_beatmap RAW_DATA > log/beatmapgen_log.txt 2>&1 &
 # nohup ./beatmapgen.sh -2 Beatmap bs_curated process_beatmap RAW_DATA > log/beatmapgen_log.txt 2>&1 &
 # nohup ./beatmapgen.sh -2 Beatmap bs_curated process_beatmap COMPLEX_BEATS > log/beatmapgen_log.txt 2>&1 &
 # nohup ./beatmapgen.sh -2 Beatmap bs_curated process_beatmap EDITOR_OFFSET > log/beatmapgen_log.txt 2>&1 &
@@ -140,6 +141,9 @@ fi
 
 # nohup ./beatmapgen.sh -3 Beatmap2 bs_curated2 config/solver/beatmapgen/beatmapgen_base_32khz.yaml tokenize_audio > log/beatmapgen_log.txt 2>&1 &
 # nohup ./beatmapgen.sh -3 Beatmap2 bs_curated2 config/solver/beatmapgen/beatmapgen_base_32khz.yaml tokenize_beatmap > log/beatmapgen_log.txt 2>&1 &
+
+# nohup ./beatmapgen.sh -3 Beatmap_Debug bs_curated_debug config/solver/beatmapgen/beatmapgen_base_32khz.yaml tokenize_audio > log/beatmapgen_log.txt 2>&1 &
+# nohup ./beatmapgen.sh -3 Beatmap_Debug bs_curated_debug config/solver/beatmapgen/beatmapgen_base_32khz.yaml tokenize_beatmap > log/beatmapgen_log.txt 2>&1 &
 # 启动 api
 # ./beatmapgen.sh -4
 # kill 掉api和dora

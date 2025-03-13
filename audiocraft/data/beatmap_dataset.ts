@@ -251,7 +251,7 @@ function isSupportedNote(time: number, tolerance = 0.099): boolean {
    */
   let scaledTime = time * 8;
   const isOneEigth = Math.abs(Math.round(scaledTime) - scaledTime) < tolerance;
-  scaledTime = time * 6;
+  scaledTime = time * 8;
   const isSixth = Math.abs(Math.round(scaledTime) - scaledTime) < tolerance;
   return isOneEigth || isSixth
 }
@@ -264,6 +264,7 @@ function getComplexBeats(difficultyFile: IWrapBeatmap): number[] {
 async function copyDifficulty(filePath: string, targetPath: string) {
   const targetString: string[] = ["_version","version"];    
   try {
+      console.log(`Copying ${filePath} to ${targetPath}`);
       const data = await Deno.readTextFile(filePath);
       const json = JSON.parse(data);
       const keysList: string[] = Object.keys(json);
@@ -277,9 +278,8 @@ async function copyDifficulty(filePath: string, targetPath: string) {
               }
           }
       }
-      
       await Deno.writeTextFile(targetPath, JSON.stringify(json, null, 2));
-      
+      console.log(`Copied ${filePath} to ${targetPath}`);
   } catch (_error) {
       console.error("Error reading or parsing JSON:", _error);
   }
@@ -292,8 +292,10 @@ async function copyBeatmap(metaList: any[]) {
   const fileExists = await exists(processedPath); 
   if (!fileExists)
     await Deno.mkdir(processedPath);
+  console.log('create processed folder:', processedPath);
   //copy info.dat processed folder
-  await Deno.copyFile(`${meta.beatmap_path}/${meta.info_name}`, `${processedPath}/${meta.info_name}`);
+  // await Deno.copyFile(`${meta.beatmap_path}/${meta.info_name}`, `${processedPath}/${meta.info_name}`);
+  
 }
 
 function getOffset(noteList: number[], alignmentNote: number){
@@ -431,10 +433,8 @@ function handleSlide(difficultyFile: IWrapBeatmap){
 }
 
 function updateMeta(infoPath: string, info: IWrapInfo, difficultyTuple: [string, string, number, number, number], dir: { name: string, fullPath: string }) {
-  const id = dir.name.match(id_pattern)?.[0] || dir.name;
-  
   output_meta.push({
-    id: `${id}_${difficultyTuple[1]}`,
+    id: `${dir.name}_${difficultyTuple[1]}`,
     beatmap_path: dir.fullPath,
     info_name: infoPath,
     song_name: info.audio.filename,
@@ -518,53 +518,58 @@ if(pipeline === "create_manifest"){
   };
   console.log(summary);
 }
-else{
+else {
   const input_meta: JSON[] = await loadJsonl(manifest_directory)
   const input_meta_group: Record<string, any[]> = {};
   for (const meta of input_meta) {
     const currentPath: string = (meta as any).beatmap_path;
     (input_meta_group[currentPath] ||= []).push(meta);
   }
-  // copy beatmap files to processed folder, and save all beatmap changes there
-  await Promise.all(Object.entries(input_meta_group).map(([key, value])=>copyBeatmap(value)));
-  // copying song and difficulty need much longer time
-  const limit = pLimit(5);
-  // await Promise.all(Object.entries(input_meta_group).map(([key, value])=>limit(()=>Deno.copyFile(`${value[0].beatmap_path}/${value[0].song_name}`, `${value[0].beatmap_path}/processed/${value[0].song_name}`))));
-  // await Promise.all(input_meta.map((meta: any)=> limit(() => copyDifficulty(`${meta.beatmap_path}/${meta.beatmap_name}`, `${meta.beatmap_path}/processed/${meta.beatmap_name}`))));
-  await Promise.all(Object.entries(input_meta_group).map(([key, value])=>processBeatmap(value)));
+  if (pipeline === "copy_beatmap"){
+    // copy beatmap files to processed folder, and save all beatmap changes there
+    await Promise.all(Object.entries(input_meta_group).map(([key, value])=>copyBeatmap(value)));
+    const limit = pLimit(1);
+    await Promise.all(input_meta.map((meta: any)=> limit(() => copyDifficulty(`${meta.beatmap_path}/${meta.beatmap_name}`, `${meta.beatmap_path}/processed/${meta.beatmap_name}`))));
+    output_meta.push(...input_meta)
+  }
+  else if (pipeline === "process_beatmap"){
+    await Promise.all(Object.entries(input_meta_group).map(([key, value])=>processBeatmap(value)));
+    
+    // console.log("*****************************result:");
+    // console.log("Path count:", pathCount);
   
-  // console.log("*****************************result:");
-  // console.log("Path count:", pathCount);
-
-  // Summary
-  const summary = {
-    total_num: input_meta.length,
-    error_num: {
-      PROCESSED_DATA: result[PROCESSED_DATA].length,
-      UNKNOWN_ERROR: result[UNKNOWN_ERROR].length,
-      AUDIO_OFFSET: result[AUDIO_OFFSET].length,
-      EDITOR_OFFSET: result[EDITOR_OFFSET].length,
-      BPM_EVENTS: result[BPM_EVENTS].length,
-      FLOATING_ERROR: result[FLOATING_ERROR].length,
-      MISSING_OFFSET: result[MISSING_OFFSET].length,
-      SMALL_COMPLEX: result[SMALL_COMPLEX].length,
-      COMPLEX_BEATS: result[COMPLEX_BEATS].length,
-    },
-    error_type:{
-      PROCESSED_DATA: result[PROCESSED_DATA],
-      UNKNOWN_ERROR: result[UNKNOWN_ERROR],
-      AUDIO_OFFSET: result[AUDIO_OFFSET],
-      EDITOR_OFFSET: result[EDITOR_OFFSET],
-      BPM_EVENTS: result[BPM_EVENTS],
-      FLOATING_ERROR: result[FLOATING_ERROR],
-      MISSING_OFFSET: result[MISSING_OFFSET],
-      SMALL_COMPLEX: result[SMALL_COMPLEX],
-      COMPLEX_BEATS: result[COMPLEX_BEATS],
-    }
-  };
-
-  console.log(summary);
+    // Summary
+    const summary = {
+      total_num: input_meta.length,
+      error_num: {
+        PROCESSED_DATA: result[PROCESSED_DATA].length,
+        UNKNOWN_ERROR: result[UNKNOWN_ERROR].length,
+        AUDIO_OFFSET: result[AUDIO_OFFSET].length,
+        EDITOR_OFFSET: result[EDITOR_OFFSET].length,
+        BPM_EVENTS: result[BPM_EVENTS].length,
+        FLOATING_ERROR: result[FLOATING_ERROR].length,
+        MISSING_OFFSET: result[MISSING_OFFSET].length,
+        SMALL_COMPLEX: result[SMALL_COMPLEX].length,
+        COMPLEX_BEATS: result[COMPLEX_BEATS].length,
+      },
+      error_type:{
+        PROCESSED_DATA: result[PROCESSED_DATA],
+        UNKNOWN_ERROR: result[UNKNOWN_ERROR],
+        AUDIO_OFFSET: result[AUDIO_OFFSET],
+        EDITOR_OFFSET: result[EDITOR_OFFSET],
+        BPM_EVENTS: result[BPM_EVENTS],
+        FLOATING_ERROR: result[FLOATING_ERROR],
+        MISSING_OFFSET: result[MISSING_OFFSET],
+        SMALL_COMPLEX: result[SMALL_COMPLEX],
+        COMPLEX_BEATS: result[COMPLEX_BEATS],
+      }
+    };
+  
+    console.log(summary);
+  }
 }
+
+
 
 const end = performance.now();
 console.log(`代码执行时间: ${((end - start)/1000).toFixed(2)} 秒`);
