@@ -28,6 +28,7 @@ from typing import Dict
 import itertools
 from omegaconf import OmegaConf
 from tqdm import tqdm
+import time
 
 import torch
 import torch.nn.functional as F
@@ -1235,48 +1236,57 @@ def main():
             # this avoids repetitve generation for mirror meta
             if item.id.split("_")[-1] == 'mirror':
                 continue
-            #load beatmap, tokenize, detokenize, compare difference 
-            with open(item.processed_beatmap_json, 'r', encoding = 'utf-8') as f:
-                beatmap_file = json.load(f)
-            segment_duration_in_quaver = math.ceil(item.duration / 60 * item.bpm / minimum_note)
-            beatmap_token, unsupported_note, beatmap_file, tokenized_json = beatmap.tokenize(beatmap_file, segment_duration_in_quaver, item.bpm, debug=True)
-            reconstructed_beatmap_file = beatmap.detokenize(beatmap_token, item.bpm)
-            result = beatmap.check_difference(beatmap_file, reconstructed_beatmap_file, unsupported_note)
-            
-            if all([result[note]['same'] for note in beatmap.note_types]):
-                # cache tokenized beatmap json
-                path = Path(item.beatmap_path)
-                tokenized_path = path / TOKENIZED  #/tokenized
-                with open(item.tokenized_beatmap_json, 'w') as f:
-                    json.dump(tokenized_json, f, indent=4)
-                # cache corresponding beatmap token
-                beatmap_token = beatmap_token.to(torch.int8)
-                with open(item.beatmap_token, 'wb') as f:
-                    f.write(beatmap_token.numpy().tobytes())
-                item.duration_in_quaver = segment_duration_in_quaver
-                supported_meta.append(item)
+            max_read_retry = 10
+            for retry in range(max_read_retry):
+                try:
+                    #load beatmap, tokenize, detokenize, compare difference 
+                    with open(item.processed_beatmap_json, 'r', encoding = 'utf-8') as f:
+                        beatmap_file = json.load(f)
+                    segment_duration_in_quaver = math.ceil(item.duration / 60 * item.bpm / minimum_note)
+                    beatmap_token, unsupported_note, beatmap_file, tokenized_json = beatmap.tokenize(beatmap_file, segment_duration_in_quaver, item.bpm, debug=True)
+                    reconstructed_beatmap_file = beatmap.detokenize(beatmap_token, item.bpm)
+                    result = beatmap.check_difference(beatmap_file, reconstructed_beatmap_file, unsupported_note)
+                    
+                    if all([result[note]['same'] for note in beatmap.note_types]):
+                        # cache tokenized beatmap json
+                        path = Path(item.beatmap_path)
+                        tokenized_path = path / TOKENIZED  #/tokenized
+                        with open(item.tokenized_beatmap_json, 'w') as f:
+                            json.dump(tokenized_json, f, indent=4)
+                        # cache corresponding beatmap token
+                        beatmap_token = beatmap_token.to(torch.int8)
+                        with open(item.beatmap_token, 'wb') as f:
+                            f.write(beatmap_token.numpy().tobytes())
+                        item.duration_in_quaver = segment_duration_in_quaver
+                        supported_meta.append(item)
 
-                # mirror the tokenized beatmap json, tokenize, cache, create mirror meta
-                tokenized_json_mirror = beatmap.mirror(tokenized_json)
-                beatmap_token_mirror, unsupported_note, _, _ = beatmap.tokenize(tokenized_json_mirror, segment_duration_in_quaver, item.bpm)
-                assert all([len(unsupported_note[note]) == 0 for note in beatmap.note_types])
-                filename_mirror = f"{item.difficulty}_mirror.json" # Expert_mirror.json
-                mirror_json_path = tokenized_path / filename_mirror #/tokenized/Expert_mirror.json
-                with open(mirror_json_path, 'w') as f:
-                    json.dump(tokenized_json_mirror, f, indent=4)
-                #update id, json path, token path
-                item_mirror = copy.deepcopy(item)
-                item_mirror.id = item_mirror.id + "_mirror"
-                beatmap_token_mirror = beatmap_token_mirror.to(torch.int8)
-                filename_mirror = os.path.splitext(filename_mirror)[0] + ".bin" # Expert_mirror.bin
-                mirror_token_path = tokenized_path / filename_mirror # /tokenized/Expert_mirror.bin
-                with open(mirror_token_path, 'wb') as f:
-                    f.write(beatmap_token_mirror.numpy().tobytes())
-                item_mirror.tokenized_beatmap_json = mirror_json_path
-                item_mirror.beatmap_token = mirror_token_path
-                supported_meta.append(item_mirror)
-            else:
-                fail_meta.append((item.id, result[COLORNOTE]['not_equal_num']))
+                        # mirror the tokenized beatmap json, tokenize, cache, create mirror meta
+                        tokenized_json_mirror = beatmap.mirror(tokenized_json)
+                        beatmap_token_mirror, unsupported_note, _, _ = beatmap.tokenize(tokenized_json_mirror, segment_duration_in_quaver, item.bpm)
+                        assert all([len(unsupported_note[note]) == 0 for note in beatmap.note_types])
+                        filename_mirror = f"{item.difficulty}_mirror.json" # Expert_mirror.json
+                        mirror_json_path = tokenized_path / filename_mirror #/tokenized/Expert_mirror.json
+                        with open(mirror_json_path, 'w') as f:
+                            json.dump(tokenized_json_mirror, f, indent=4)
+                        #update id, json path, token path
+                        item_mirror = copy.deepcopy(item)
+                        item_mirror.id = item_mirror.id + "_mirror"
+                        beatmap_token_mirror = beatmap_token_mirror.to(torch.int8)
+                        filename_mirror = os.path.splitext(filename_mirror)[0] + ".bin" # Expert_mirror.bin
+                        mirror_token_path = tokenized_path / filename_mirror # /tokenized/Expert_mirror.bin
+                        with open(mirror_token_path, 'wb') as f:
+                            f.write(beatmap_token_mirror.numpy().tobytes())
+                        item_mirror.tokenized_beatmap_json = mirror_json_path
+                        item_mirror.beatmap_token = mirror_token_path
+                        supported_meta.append(item_mirror)
+                    else:
+                        fail_meta.append((item.id, result[COLORNOTE]['not_equal_num']))
+                    break
+                except Exception as e:
+                    if retry == max_read_retry - 1:
+                        fail_meta.append((item.id, e))
+                        break
+                    time.sleep(1)
         save_audio_meta(args.out_originput_meta_file, supported_meta)
         print(f"request finished, summary: fail_meta(length {len(fail_meta)}):")
         for fail in fail_meta:
@@ -1299,6 +1309,7 @@ def main():
         fail_meta = []
         supported_meta = []
         last_id = None
+        is_fail = False
         for one_meta in tqdm(meta, desc="tokenize audio"):
             # inital check
             if one_meta.status != "PROCESSED_DATA" or one_meta.bpm < cfg.dataset.beatmap_kwargs.minimum_bpm or one_meta.bpm > cfg.dataset.beatmap_kwargs.maximum_bpm:
@@ -1332,36 +1343,49 @@ def main():
                         if offset < 0:
                             origin_sample = F.pad(origin_sample, (0, offset_frames), mode='constant', value=0)
                         duration_in_sec = origin_sample.shape[-1] / sr
-                # save audio
-                audio_write(os.path.splitext(one_meta.processed_song_name)[0], origin_sample, sr, format="ogg")
-                #resample, pad, tokenize, unpad
-                resample_sample = convert_audio(origin_sample, sr, cfg.sample_rate, cfg.channels)
-                resample_sample = resample_sample.unsqueeze(0).cuda()
-                with torch.no_grad():
-                    audio_token, scale = model.encode(resample_sample)
-                # cache audio token 
-                path = Path(one_meta.beatmap_path)
-                tokenized_path = path / TOKENIZED
-                tokenized_path.mkdir(parents=True, exist_ok=True)
-                audio_token = audio_token.squeeze(0).permute(1, 0).short().cpu()
-                with open(one_meta.audio_token, 'wb') as f:
-                    f.write(audio_token.numpy().tobytes())
-                
-                # calcualte receptive field
-                segment_duration_in_quaver = cfg.dataset.segment_duration
-                minimum_note = cfg.dataset.beatmap_kwargs.minimum_note
-                bpm_list = [one_meta.bpm]
-                segment_duration_in_sec = segment_duration_in_quaver * minimum_note / one_meta.bpm * 60
-                total_code = traditional_round(segment_duration_in_sec*cfg.audio_token.encodec.code_rate)
-                total_frames = total_code*cfg.audio_token.encodec.stride_rate
-                total_code = [total_code]
-                total_frames = [total_frames]
-                note_code_maps = convert_note_code(rf_range, segment_duration_in_quaver, minimum_note, bpm_list, cfg.sample_rate, total_frames, total_code)
-                # cache receptive field
-                assert max(max(note_code_maps))< 2**15, max(max(note_code_maps))
-                note_code_maps = np.array(note_code_maps, dtype=np.int16)
-                with open(one_meta.audio_token_index, 'wb') as f:
-                    f.write(note_code_maps.tobytes())
+                max_read_retry = 10
+                for retry in range(max_read_retry):
+                    try:
+                        # save audio
+                        audio_write(os.path.splitext(one_meta.processed_song_name)[0], origin_sample, sr, format="ogg")
+                        #resample, pad, tokenize, unpad
+                        resample_sample = convert_audio(origin_sample, sr, cfg.sample_rate, cfg.channels)
+                        resample_sample = resample_sample.unsqueeze(0).cuda()
+                        with torch.no_grad():
+                            audio_token, scale = model.encode(resample_sample)
+                        # cache audio token 
+                        path = Path(one_meta.beatmap_path)
+                        tokenized_path = path / TOKENIZED
+                        tokenized_path.mkdir(parents=True, exist_ok=True)
+                        audio_token = audio_token.squeeze(0).permute(1, 0).short().cpu()
+                        with open(one_meta.audio_token, 'wb') as f:
+                            f.write(audio_token.numpy().tobytes())
+                        
+                        # calcualte receptive field
+                        segment_duration_in_quaver = cfg.dataset.segment_duration
+                        minimum_note = cfg.dataset.beatmap_kwargs.minimum_note
+                        bpm_list = [one_meta.bpm]
+                        segment_duration_in_sec = segment_duration_in_quaver * minimum_note / one_meta.bpm * 60
+                        total_code = traditional_round(segment_duration_in_sec*cfg.audio_token.encodec.code_rate)
+                        total_frames = total_code*cfg.audio_token.encodec.stride_rate
+                        total_code = [total_code]
+                        total_frames = [total_frames]
+                        note_code_maps = convert_note_code(rf_range, segment_duration_in_quaver, minimum_note, bpm_list, cfg.sample_rate, total_frames, total_code)
+                        # cache receptive field
+                        assert max(max(note_code_maps))< 2**15, max(max(note_code_maps))
+                        note_code_maps = np.array(note_code_maps, dtype=np.int16)
+                        with open(one_meta.audio_token_index, 'wb') as f:
+                            f.write(note_code_maps.tobytes())
+                        break
+                    except Exception as e:
+                        if retry == max_read_retry - 1:
+                            fail_meta.append((one_meta.id, e))
+                            is_fail = True
+                            break
+                        time.sleep(1)
+                if is_fail:
+                    is_fail = False
+                    continue
             # update meta, same song share same update
             one_meta.sample_rate = sr
             one_meta.duration = duration_in_sec
