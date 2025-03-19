@@ -138,6 +138,7 @@ fi
 # 启动python制作流程
 # nohup ./beatmapgen.sh -3 Beatmap bs_curated config/solver/beatmapgen/beatmapgen_base_32khz.yaml tokenize_audio > log/beatmapgen_log.txt 2>&1 &
 # nohup ./beatmapgen.sh -3 Beatmap bs_curated config/solver/beatmapgen/beatmapgen_base_32khz.yaml tokenize_beatmap > log/beatmapgen_log.txt 2>&1 &
+# nohup ./beatmapgen.sh -3 Beatmap bs_curated config/solver/beatmapgen/beatmapgen_base_32khz.yaml data_partition > log/beatmapgen_log.txt 2>&1 &
 
 # nohup ./beatmapgen.sh -3 Beatmap2 bs_curated2 config/solver/beatmapgen/beatmapgen_base_32khz.yaml tokenize_audio > log/beatmapgen_log.txt 2>&1 &
 # nohup ./beatmapgen.sh -3 Beatmap2 bs_curated2 config/solver/beatmapgen/beatmapgen_base_32khz.yaml tokenize_beatmap > log/beatmapgen_log.txt 2>&1 &

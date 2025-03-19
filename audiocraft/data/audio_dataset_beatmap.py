@@ -29,6 +29,7 @@ import itertools
 from omegaconf import OmegaConf
 from tqdm import tqdm
 import time
+import random
 
 import torch
 import torch.nn.functional as F
@@ -1214,7 +1215,7 @@ def main():
                         help='Number of workers.')
     parser.add_argument('--write_parse_switch', default=False, action=argparse.BooleanOptionalAction)
     args = parser.parse_args()
-    assert args.pipeline in ["tokenize_beatmap", "tokenize_audio"]
+    assert args.pipeline in ["tokenize_beatmap", "tokenize_audio", "data_partition"]
     cfg = OmegaConf.load(args.beatmapgen_solver)
     meta_file = Path(args.out_originput_meta_file)
     # no resolve here or save complete path to meta
@@ -1397,6 +1398,37 @@ def main():
         print(f"request finished, summary: fail_meta(length {len(fail_meta)}):")
         for fail in fail_meta:
             print(fail)
-
+    elif args.pipeline == "data_partition":
+        last_id = None
+        meta_json = {}
+        for one_meta in tqdm(meta, desc="data partition"):
+            current_id = one_meta.id.split("_")[0]
+            if last_id is None or last_id != current_id:
+                meta_json[current_id] = [one_meta]
+            else:
+                meta_json[current_id].append(one_meta)
+            last_id = current_id
+        key_list = list(meta_json.keys())
+        random.shuffle(key_list)
+        train_size = int(len(key_list) * 0.8)
+        train_keys = key_list[:train_size]
+        val_keys = key_list[train_size:]
+        train_data = {k: meta_json[k] for k in train_keys}
+        val_data = {k: meta_json[k] for k in val_keys}
+        train_meta = []
+        val_meta = []
+        for key, value in train_data.items():
+            train_meta.extend(value)
+        for key, value in val_data.items():
+            val_meta.extend(value)
+        save_audio_meta(args.out_originput_meta_file, train_meta)
+        path_parts = args.out_originput_meta_file.split(os.sep)
+        path_parts[-2] = path_parts[-2] + "_test"
+        val_path = os.sep.join(path_parts)
+        new_dir = os.path.dirname(val_path)
+        if not os.path.exists(new_dir):
+            os.makedirs(new_dir)
+        save_audio_meta(val_path, val_meta)
+        
 if __name__ == '__main__':
     main()

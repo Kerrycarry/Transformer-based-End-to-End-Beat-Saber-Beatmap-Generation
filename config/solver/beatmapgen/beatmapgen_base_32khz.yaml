@@ -8,7 +8,7 @@ defaults:
   - /model: lm/musicgen_lm
   # - override /dset: audio/default
   # - override /model/lm/model_scale: xsmall
-  - override /dset: audio/bs_rank
+  - override /dset: audio/beatmap
   - _self_
 
 autocast: true
@@ -96,9 +96,9 @@ logging:
 schedule:
   lr_scheduler: cosine
   cosine:
-    warmup: 100
+    warmup: 1000
     lr_min_ratio: 1e-5
-    cycle_length: 0.5
+    cycle_length: 1
 
 tensorboard:
   name: debug_test
