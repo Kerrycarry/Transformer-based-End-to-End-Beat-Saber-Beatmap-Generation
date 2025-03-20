@@ -264,9 +264,9 @@ class SampleManager:
         
         for index, (sample_id, audio, meta, ground_truth_beatmap, gen_beatmap) in enumerate(zip(sample_ids, audios, metas, ground_truth_beatmaps, gen_beatmaps)):
             reference_path = self.base_folder / 'reference' / sample_id
-            generated_path = self.base_folder / 'generated' / f"{epoch}-{index}_{sample_id}"
+            generated_path = self.base_folder / epoch / sample_id
             reference_path_zip = self.base_folder / 'reference_zip' / sample_id
-            generated_path_zip = self.base_folder / 'generated_zip' / f"{epoch}-{index}_{sample_id}"
+            generated_path_zip = self.base_folder / f'{epoch}_zip' / sample_id
             # generate every for reference
             if ground_truth_beatmap is not None:
                 self.add_sample(reference_path, audio, meta, ground_truth_beatmap, reference_path_zip, sample_id, True)
