@@ -354,45 +354,45 @@ class BeatmapLMModel(StreamingModule):
     def num_codebooks(self) -> int:
         return self.n_q
 
-    def forward(self, sequence: torch.Tensor,
-                src_mask: tp.Optional[torch.Tensor] = None,
-                # note_code_maps: list,
-                # conditions: tp.List[ConditioningAttributes],
-                # condition_tensors: tp.Optional[ConditionTensors] = None,
-                stage: int = -1) -> torch.Tensor:
-        """Apply language model on sequence and conditions.
-        Given a tensor of sequence of shape [B, K, S] with K the number of codebooks and
-        S the sequence steps, a tensor of beatmap of shape [B, S, P] with S the sequence steps and
-        P the number of beatmap positions, difficulty with shape [B]
-        return the logits with shape [B, S, P, card].
+    # def forward(self, sequence: torch.Tensor,
+    #             src_mask: tp.Optional[torch.Tensor] = None,
+    #             # note_code_maps: list,
+    #             # conditions: tp.List[ConditioningAttributes],
+    #             # condition_tensors: tp.Optional[ConditionTensors] = None,
+    #             stage: int = -1) -> torch.Tensor:
+    #     """Apply language model on sequence and conditions.
+    #     Given a tensor of sequence of shape [B, K, S] with K the number of codebooks and
+    #     S the sequence steps, a tensor of beatmap of shape [B, S, P] with S the sequence steps and
+    #     P the number of beatmap positions, difficulty with shape [B]
+    #     return the logits with shape [B, S, P, card].
         
-        Args:
-            indices (torch.Tensor): Indices of the codes to model.
-            conditions (list of ConditioningAttributes): Conditions to use when modeling
-                the given codes. Note that when evaluating multiple time with the same conditioning
-                you should pre-compute those and pass them as `condition_tensors`.
-            condition_tensors (dict[str, ConditionType], optional): Pre-computed conditioning
-                tensors, see `conditions`.
-            stage (int): The codebook level that is being predicted. Relevant for MAGNeT
-                in which prediction is done in a codebook-by-codebook manner.
-                Takes values in range(n_q), and ignored by default.
-        Returns:
-            torch.Tensor: Logits.
-        """
-        set_efficient_attention_backend("xformers")
-        B, K, T = sequence.shape
-        assert K == self.num_codebooks, "Sequence shape must match the specified number of codebooks"
-        input_ = sum([self.emb[k](sequence[:, k]) for k in range(K)]) # batch, sequence, dim
-        # if self.use_mask:
-        #     mask_positions = [[pos + 4 for pos in positions] for positions in note_code_maps]
-        #     for i, positions in enumerate(mask_positions):
-        #         input_[i, positions, :] += self.mask_token_embedding
-        out = self.transformer(input_, cross_attention_src=None,
-                               src_mask = src_mask)
-        if self.out_norm:
-            out = self.out_norm(out)
+    #     Args:
+    #         indices (torch.Tensor): Indices of the codes to model.
+    #         conditions (list of ConditioningAttributes): Conditions to use when modeling
+    #             the given codes. Note that when evaluating multiple time with the same conditioning
+    #             you should pre-compute those and pass them as `condition_tensors`.
+    #         condition_tensors (dict[str, ConditionType], optional): Pre-computed conditioning
+    #             tensors, see `conditions`.
+    #         stage (int): The codebook level that is being predicted. Relevant for MAGNeT
+    #             in which prediction is done in a codebook-by-codebook manner.
+    #             Takes values in range(n_q), and ignored by default.
+    #     Returns:
+    #         torch.Tensor: Logits.
+    #     """
+    #     set_efficient_attention_backend("xformers")
+    #     B, K, T = sequence.shape
+    #     assert K == self.num_codebooks, "Sequence shape must match the specified number of codebooks"
+    #     input_ = sum([self.emb[k](sequence[:, k]) for k in range(K)]) # batch, sequence, dim
+    #     # if self.use_mask:
+    #     #     mask_positions = [[pos + 4 for pos in positions] for positions in note_code_maps]
+    #     #     for i, positions in enumerate(mask_positions):
+    #     #         input_[i, positions, :] += self.mask_token_embedding
+    #     out = self.transformer(input_, cross_attention_src=None,
+    #                            src_mask = src_mask)
+    #     if self.out_norm:
+    #         out = self.out_norm(out)
 
-        return out  #[B, S, dim]
+    #     return out  #[B, S, dim]
 
     def compute_representation(self, codes: torch.Tensor) -> torch.Tensor:
         B, K, T = codes.shape
@@ -482,10 +482,11 @@ class BeatmapLMModel(StreamingModule):
             beatmap = beatmap[:, :-1] # [B, (S-1), P]
             input_ = sum([self.beatmap_emb[p](beatmap[:, :, p]) for p in range(self.position_size)]) # [B, (S-1), dim]
             input_ = torch.cat((self.difficulty_emb(difficulty).unsqueeze(1), input_), dim=1) #[B, S, dim]
-        logits = self.transfer_lm_forward(input_ = input_, cross_attention_input = cross_attention_input, src_mask = self.attn_mask_for_sa, cross_src_mask = self.attn_mask_for_ca) # [1, S*P, card]
+        model = self if self._fsdp is None else self._fsdp
+        logits = model(input_ = input_, cross_attention_input = cross_attention_input, src_mask = self.attn_mask_for_sa, cross_src_mask = self.attn_mask_for_ca) # [1, S*P, card]
         return logits
     
-    def transfer_lm_forward(self, input_: torch.Tensor, # [B, S*P, card]
+    def forward(self, input_: torch.Tensor, # [B, S*P, card]
                 cross_attention_input: torch.Tensor,
                 src_mask: torch.Tensor = None,
                 cross_src_mask: torch.Tensor = None,
@@ -530,7 +531,8 @@ class BeatmapLMModel(StreamingModule):
         Returns:
             next_token (torch.Tensor): Next token tensor of shape [B, K, 1].
         """
-        logit = self.transfer_lm_forward(input_ = input, cross_attention_input = cross_attention_input) # [1, 1, card]
+        model = self if self._fsdp is None else self._fsdp
+        logit = model(input_ = input, cross_attention_input = cross_attention_input) # [1, 1, card]
 
         # Apply softmax for sampling if temp > 0. Else, do greedy sampling to avoid zero division error.
         if use_sampling and temp > 0.0:

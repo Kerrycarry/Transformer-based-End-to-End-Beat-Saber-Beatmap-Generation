@@ -32,9 +32,9 @@ dataset:
   sample_on_weight: false  # Uniform sampling all the way
   sample_on_duration: false  # Uniform sampling all the way
   valid:
-    num_samples: 1
+    num_samples: 2
   generate:
-    num_samples: 1
+    num_samples: 2
   evaluate:
     num_samples: 0
   num_workers: 2
@@ -66,7 +66,7 @@ optim:
   ema:
     use: true
     updates: 10
-    device: cpu
+    device: cuda
 
 logging:
   log_tensorboard: true

@@ -1074,6 +1074,9 @@ class AudioDataset:
             try:
                 beatmap_file = None
                 origin_sample = None
+                # run this step only in first generate stage because reference is same accross all generate stages and manager_beatmap copy generation from first generate stage for following generate stage
+                # for example, if epoch = 84, every=6, run this step on 6th epoch generate stage.
+                # if epoch = 1, every =6, run this step on 1st epoch generate stage.
                 if self.split == 'generate' and self.current_epoch == self.generate_every:
                     # 打开beatmap json
                     error_path = file_meta.tokenized_beatmap_json

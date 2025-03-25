@@ -32,7 +32,7 @@ dataset:
   sample_on_weight: false  # Uniform sampling all the way
   sample_on_duration: false  # Uniform sampling all the way
   valid:
-    num_samples: 2
+    num_samples: 400
   generate:
     num_samples: 4
   evaluate:
@@ -81,8 +81,7 @@ generate:
   
 
 optim:
-  epochs: 48
-  updates_per_epoch: 200
+  epochs: 84
   optimizer: dadam
   lr: 0.1
   ema:

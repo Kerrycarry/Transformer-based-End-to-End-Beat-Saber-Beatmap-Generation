@@ -23,6 +23,7 @@
             "justMyCode": false,
             "args": [
                 "run",
+                "-d",
                 "solver=musicgen/musicgen_base_32khz_test",
                 "model/lm/model_scale=xsmall",
                 "conditioner=none",
@@ -69,10 +70,10 @@
             "justMyCode": false,
             "args": [
                 "run",
+                "-d",
                 "solver=beatmapgen/beatmapgen_base_32khz",
                 "model/lm/model_scale=xsmall",
                 "conditioner=none",
-                "dataset.segment_duration=64",
                 "optim.epochs=1",
                 "optim.updates_per_epoch=2",
                 "--clear",
@@ -87,6 +88,7 @@
             "justMyCode": false,
             "args": [
                 "run",
+                "-d",
                 "solver=beatmapgen/beatmapgen_base_32khz",
                 "model/lm/model_scale=small",
                 "conditioner=none",

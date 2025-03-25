@@ -22,7 +22,7 @@ beatmap_dataset_load() {
 #
 run_dora_process() {
     echo "Running beatmapgen without caching"
-    nohup dora run \
+    nohup dora run -d \
         solver=beatmapgen/beatmapgen_base_32khz \
         model/lm/model_scale=small \
         conditioner=none \

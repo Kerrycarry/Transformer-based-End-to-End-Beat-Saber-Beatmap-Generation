@@ -234,7 +234,10 @@ class BeatmapGenSolver(base.StandardSolver):
         self.cfg.beatmapgen_lm.segment_duration = segment_duration
         self.maximum_duration = segment_duration * minimum_note * 60 / minimum_bpm * self.cfg.sample_rate
         self.cfg.dataset.maximum_duration = self.maximum_duration
-        self.cfg.dataset.generate_every = self.cfg.generate.every
+        if self.cfg.optim.epochs < self.cfg.generate.every:
+            self.cfg.dataset.generate_every = self.cfg.optim.epochs
+        else:
+            self.cfg.dataset.generate_every = self.cfg.generate.every
         note_type = [key for key, value in beatmap_kwargs["note_type"].items() if value]
         self.beatmap = Beatmap(minimum_note = minimum_note, token_id_size = token_id_size, position_size = position_size, note_types = note_type)
         self.cfg.dataset.beatmap = self.beatmap
