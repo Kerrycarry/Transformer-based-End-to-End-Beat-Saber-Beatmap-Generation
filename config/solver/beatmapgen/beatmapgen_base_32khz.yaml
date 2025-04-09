@@ -27,7 +27,7 @@ deadlock:
   use: true  # deadlock detection
 
 dataset:
-  batch_size: 2  # 32 GPUs
+  batch_size: 16  # 32 GPUs
   segment_duration: 512 # 1536个八分音符
   sample_on_weight: false  # Uniform sampling all the way
   sample_on_duration: false  # Uniform sampling all the way
@@ -113,6 +113,12 @@ beatmapgen_lm:
 
   pad_kv: True
   use_mask: False
+  lora_kwargs: 
+    use_lora: False
+    lora_r: 16
+    lora_alpha: 16
+
+transformer_lm:
   lora_kwargs: 
     use_lora: False
     lora_r: 16

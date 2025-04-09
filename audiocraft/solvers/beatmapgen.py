@@ -139,8 +139,29 @@ class BeatmapGenSolver(base.StandardSolver):
         delattr(self.representation_model, 'linears')
         if 'representation_model' in self.cfg:
             state_dict = torch.load(self.cfg.representation_model)
-            self.representation_model.load_state_dict(state_dict['best_state']['model'])
+            self.representation_model.load_state_dict(state_dict['best_state']['model'], strict=False)
         self.model: models.BeatmapLMModel = models.builders.get_beatmapgen_lm_model(self.cfg).to(self.device)
+        self.model.representation_model = self.representation_model
+
+        #transfer learning
+        trainable = []
+        if self.cfg.transformer_lm.lora_kwargs.use_lora:
+            trainable.extend(['lora_in_proj_a','lora_in_proj_b', 'lora_a', 'lora_b'])
+        # if self.cfg.beatmapgen_lm.use_mask:
+        #     trainable.append('mask_token_embedding')
+        # # 冻结模型中的所有参数
+        for name,param in self.model.representation_model.named_parameters():
+            if name.split('.')[-1] not in trainable:  # 非LOra部分不计算梯度
+                param.requires_grad=False
+            else:
+                param.requires_grad=True
+        
+        # # Iterate over each module and unfreeze its parameters
+        # modules_to_unfreeze = [self.model.difficulty_emb, self.model.linear_transfer, self.model.transfer_lm, self.model.linear_out, self.model.out_norm2, self.model.beatmap_emb]
+        # for module in modules_to_unfreeze:
+        #     for param in module.parameters():
+        #         param.requires_grad = True
+        
         if self.cfg.fsdp.use:
             assert not self.cfg.autocast, "Cannot use autocast with fsdp"
             self.model = self.wrap_with_fsdp(self.model)
@@ -171,24 +192,6 @@ class BeatmapGenSolver(base.StandardSolver):
         with open('model_architecture2.txt', 'w') as f:
             for n, m in self.model.named_modules():
                 f.write(f'{n}: {type(m).__name__}\n')
-        #transfer learning
-        # trainable = []
-        # if self.cfg.beatmapgen_lm.lora_kwargs.use_lora:
-        #     trainable.extend(['lora_in_proj_a','lora_in_proj_b', 'lora_a', 'lora_b'])
-        # if self.cfg.beatmapgen_lm.use_mask:
-        #     trainable.append('mask_token_embedding')
-        # # 冻结模型中的所有参数
-        # for name,param in self.model.named_parameters():
-        #     if name.split('.')[-1] not in trainable:  # 非LOra部分不计算梯度
-        #         param.requires_grad=False
-        #     else:
-        #         param.requires_grad=True
-        
-        # # Iterate over each module and unfreeze its parameters
-        # modules_to_unfreeze = [self.model.difficulty_emb, self.model.linear_transfer, self.model.transfer_lm, self.model.linear_out, self.model.out_norm2, self.model.beatmap_emb]
-        # for module in modules_to_unfreeze:
-        #     for param in module.parameters():
-        #         param.requires_grad = True
 
         # calculate receptive field in advanced
         # input_size = [1, math.ceil(self.maximum_duration)]
@@ -363,7 +366,7 @@ class BeatmapGenSolver(base.StandardSolver):
         if representation == "musicgen":
             with self.autocast:
                 window_size = self.cfg.audio_token.musicgen.training_sequence_length
-                tokens = self.representation_model.compute_representation(tokens)
+                tokens = self.model.representation_model.compute_representation(tokens)
         
         dim = tokens.shape[-1]
         B = tokens.shape[0]

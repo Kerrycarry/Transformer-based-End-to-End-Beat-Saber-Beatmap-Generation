@@ -148,6 +148,7 @@ class LMModel(StreamingModule):
                  weight_init: tp.Optional[str] = None, depthwise_init: tp.Optional[str] = None,
                  zero_bias_init: bool = False, cfg_dropout: float = 0, cfg_coef: float = 1.0,
                  attribute_dropout: tp.Dict[str, tp.Dict[str, float]] = {}, two_step_cfg: bool = False,
+                 lora_kwargs: dict = {}, 
                  **kwargs):
         super().__init__()
         self.cfg_coef = cfg_coef
@@ -166,7 +167,7 @@ class LMModel(StreamingModule):
             kwargs['activation'] = get_activation_fn(kwargs['activation'])
         self.transformer = StreamingTransformer(
             d_model=dim, num_heads=num_heads, dim_feedforward=int(hidden_scale * dim),
-            norm=norm, norm_first=norm_first, **kwargs)
+            norm=norm, norm_first=norm_first, lora_kwargs=lora_kwargs, **kwargs)
         self.out_norm: tp.Optional[nn.Module] = None
         if norm_first:
             self.out_norm = create_norm_fn(norm, dim)
@@ -547,7 +548,6 @@ class LMModel(StreamingModule):
         return out_codes
 
 
-    @torch.no_grad()
     def compute_representation(self, codes: torch.Tensor) -> torch.Tensor:
         B, K, T = codes.shape
         codes = codes.contiguous()
