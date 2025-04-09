@@ -212,8 +212,6 @@ class BeatmapLMModel(StreamingModule):
 
         self.attn_mask_for_sa = self.get_mask_transfer_lm(causal = True)
         self.attn_mask_for_ca = self.get_mask_transfer_lm(causal = False)
-
-        self.representation_model = None
         
     def get_mask_transfer_lm(self, causal):
         # N = self.position_size

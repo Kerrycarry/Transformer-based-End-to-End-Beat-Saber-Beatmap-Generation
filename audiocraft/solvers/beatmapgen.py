@@ -141,7 +141,6 @@ class BeatmapGenSolver(base.StandardSolver):
             state_dict = torch.load(self.cfg.representation_model)
             self.representation_model.load_state_dict(state_dict['best_state']['model'], strict=False)
         self.model: models.BeatmapLMModel = models.builders.get_beatmapgen_lm_model(self.cfg).to(self.device)
-        self.model.representation_model = self.representation_model
 
         #transfer learning
         trainable = []
@@ -150,11 +149,12 @@ class BeatmapGenSolver(base.StandardSolver):
         # if self.cfg.beatmapgen_lm.use_mask:
         #     trainable.append('mask_token_embedding')
         # # 冻结模型中的所有参数
-        for name,param in self.model.representation_model.named_parameters():
+        for name,param in self.representation_model.named_parameters():
             if name.split('.')[-1] not in trainable:  # 非LOra部分不计算梯度
                 param.requires_grad=False
             else:
                 param.requires_grad=True
+                self.model.register_parameter(name.replace(".","/"), param)
         
         # # Iterate over each module and unfreeze its parameters
         # modules_to_unfreeze = [self.model.difficulty_emb, self.model.linear_transfer, self.model.transfer_lm, self.model.linear_out, self.model.out_norm2, self.model.beatmap_emb]
@@ -366,7 +366,7 @@ class BeatmapGenSolver(base.StandardSolver):
         if representation == "musicgen":
             with self.autocast:
                 window_size = self.cfg.audio_token.musicgen.training_sequence_length
-                tokens = self.model.representation_model.compute_representation(tokens)
+                tokens = self.representation_model.compute_representation(tokens).detach()
         
         dim = tokens.shape[-1]
         B = tokens.shape[0]
