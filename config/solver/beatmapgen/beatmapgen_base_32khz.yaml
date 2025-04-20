@@ -88,6 +88,8 @@ optim:
     use: true
     updates: 10
     device: cuda
+  adam:
+    weight_decay: 0.1
 
 logging:
   log_tensorboard: true
@@ -117,6 +119,7 @@ beatmapgen_lm:
     use_lora: False
     lora_r: 16
     lora_alpha: 16
+  positional_embedding: sin
 
 transformer_lm:
   lora_kwargs: 
