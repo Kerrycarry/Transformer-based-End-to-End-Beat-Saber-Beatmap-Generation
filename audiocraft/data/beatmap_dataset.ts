@@ -102,12 +102,12 @@ function handleComplexBeats(difficultyFileList: IWrapBeatmap[], metaList: any[])
   if(updateComplexMeta(difficultyFileList, metaList, "handleSlide"))
     return;
   //handle potential offset
-  const offset = handleOffset(difficultyFileList, metaList[0])
+  // const offset = handleOffset(difficultyFileList, metaList[0])
   // log stats
-  metaList.forEach(item => {
-    item.additional_offset = offset;
-  });
-  updateComplexMeta(difficultyFileList, metaList, "handleOffset", true);
+  // metaList.forEach(item => {
+  //   item.additional_offset = offset;
+  // });
+  // updateComplexMeta(difficultyFileList, metaList, "handleOffset", true);
 }
 function handleEditorOffset(difficultyFileList: IWrapBeatmap[], metaList: any[]){
   const editorOffsetList = metaList.map(meta => meta.editor_offset)
@@ -150,7 +150,8 @@ function updateMeta2(metaList: any[], status: string = "", difficultyFileList: a
         };
         const jsonData = JSON.stringify(difficultyFile);
         const difficultyPath = meta.beatmap_path+"/processed/"+meta.difficulty+".json"
-        Deno.writeTextFile(difficultyPath, jsonData);
+        difficulty_cache.push([difficultyPath, jsonData])
+        // Deno.writeTextFile(difficultyPath, jsonData);
       }
     });
   }
@@ -502,6 +503,8 @@ const slideNote = 0.125
 const offsetThreshold = 0.1
 const processedThreshold = 10
 
+const difficulty_cache: [string, string][] = []
+
 const start = performance.now();
 if(pipeline === "create_manifest"){
   const directories = await getDirectoriesWithPaths(directory || '');
@@ -533,7 +536,18 @@ else {
     output_meta.push(...input_meta)
   }
   else if (pipeline === "process_beatmap"){
-    await Promise.all(Object.entries(input_meta_group).map(([key, value])=>processBeatmap(value)));
+    // await Promise.all(Object.entries(input_meta_group).map(([key, value])=>processBeatmap(value)));
+    const input_meta_list = Object.values(input_meta_group);
+    const batchSize = 1000;
+    for (let i = 0; i < input_meta_list.length; i += batchSize) {
+      const sub_list = input_meta_list.slice(i, i + batchSize);
+      await Promise.all(sub_list.map(element => processBeatmap(element)));
+      for (const [difficultyPath, jsonData] of difficulty_cache)
+        await Deno.writeTextFile(difficultyPath, jsonData);
+      difficulty_cache.length = 0;
+
+    }
+    
     
     // console.log("*****************************result:");
     // console.log("Path count:", pathCount);
