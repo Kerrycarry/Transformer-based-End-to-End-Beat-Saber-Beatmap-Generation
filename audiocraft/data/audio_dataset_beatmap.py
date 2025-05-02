@@ -1314,90 +1314,104 @@ def main():
         supported_meta = []
         last_id = None
         is_fail = False
-        for one_meta in tqdm(meta, desc="tokenize audio"):
-            # inital check
-            if one_meta.status != "PROCESSED_DATA" or one_meta.bpm < cfg.dataset.beatmap_kwargs.minimum_bpm or one_meta.bpm > cfg.dataset.beatmap_kwargs.maximum_bpm:
-                fail_meta.append((one_meta.id, one_meta.status, f"bpm={one_meta.bpm}"))
-                continue
-            
-            current_id = one_meta.id.split("_")[0]
-            # try to get audio
-            if last_id is None or last_id != current_id:
-                try:
-                    origin_sample, sr = audio_read(one_meta.song_name, pad=False)
-                except Exception as e:
-                    try:
-                        origin_sample, sr = _av_read(one_meta.song_name)
-                    except Exception as e:
-                        fail_meta.append((one_meta.id, e))
-                        continue
-                duration_in_sec = origin_sample.shape[-1] / sr
-            # check duration related
-            if duration_in_sec > cfg.parser_pipeline.audio_duration_threshold or one_meta.note_num['colorNotes'] / duration_in_sec < cfg.parser_pipeline.nps_threshold:
-                fail_meta.append((one_meta.id, f"duration_in_sec={duration_in_sec}", f"nps={one_meta.note_num['colorNotes'] / duration_in_sec}"))
-                continue
-            # tokenizing audio
-            if last_id is None or last_id != current_id:
-                # handle offset first
-                for offset in [one_meta.editor_offset, one_meta.additional_offset]:
-                    if offset is not None and offset != 0:
-                        offset_frames = abs(round(offset / 1000 * sr))
-                        if offset > 0:
-                            origin_sample = origin_sample[:, offset_frames:]
-                        if offset < 0:
-                            origin_sample = F.pad(origin_sample, (0, offset_frames), mode='constant', value=0)
-                        duration_in_sec = origin_sample.shape[-1] / sr
-                max_read_retry = 10
-                for retry in range(max_read_retry):
-                    try:
-                        # save audio
-                        audio_write(os.path.splitext(one_meta.processed_song_name)[0], origin_sample, sr, format="ogg")
-                        #resample, pad, tokenize, unpad
-                        resample_sample = convert_audio(origin_sample, sr, cfg.sample_rate, cfg.channels)
-                        resample_sample = resample_sample.unsqueeze(0).cuda()
-                        with torch.no_grad():
-                            audio_token, scale = model.encode(resample_sample)
-                        # cache audio token 
-                        path = Path(one_meta.beatmap_path)
-                        tokenized_path = path / TOKENIZED
-                        tokenized_path.mkdir(parents=True, exist_ok=True)
-                        audio_token = audio_token.squeeze(0).permute(1, 0).short().cpu()
-                        with open(one_meta.audio_token, 'wb') as f:
-                            f.write(audio_token.numpy().tobytes())
-                        
-                        # calcualte receptive field
-                        segment_duration_in_quaver = cfg.dataset.segment_duration
-                        minimum_note = cfg.dataset.beatmap_kwargs.minimum_note
-                        bpm_list = [one_meta.bpm]
-                        segment_duration_in_sec = segment_duration_in_quaver * minimum_note / one_meta.bpm * 60
-                        total_code = traditional_round(segment_duration_in_sec*cfg.audio_token.encodec.code_rate)
-                        total_frames = total_code*cfg.audio_token.encodec.stride_rate
-                        total_code = [total_code]
-                        total_frames = [total_frames]
-                        note_code_maps = convert_note_code(rf_range, segment_duration_in_quaver, minimum_note, bpm_list, cfg.sample_rate, total_frames, total_code)
-                        # cache receptive field
-                        assert max(max(note_code_maps))< 2**15, max(max(note_code_maps))
-                        note_code_maps = np.array(note_code_maps, dtype=np.int16)
-                        with open(one_meta.audio_token_index, 'wb') as f:
-                            f.write(note_code_maps.tobytes())
-                        break
-                    except Exception as e:
-                        if retry == max_read_retry - 1:
-                            fail_meta.append((one_meta.id, e))
-                            is_fail = True
-                            break
-                        time.sleep(1)
-                if is_fail:
-                    is_fail = False
+        # for one_meta in tqdm(meta, desc="tokenize audio"):
+        batchSize = 1000
+        for i in tqdm(range(0, len(meta), batchSize), desc="tokenize audio"):
+            sub_list = meta[i:i+batchSize]
+            for one_meta in tqdm(sub_list, desc=f"batch: {i}-{i+batchSize}"):
+                # first check if processed
+                if one_meta.status == "PROCESSED_AUDIO_DATA":
+                    supported_meta.append(one_meta)
+                    last_id = current_id
+                    sr = one_meta.sample_rate
+                    duration_in_sec = one_meta.duration
+                    duration_in_code = one_meta.duration_in_code
                     continue
-            # update meta, same song share same update
-            one_meta.sample_rate = sr
-            one_meta.duration = duration_in_sec
-            one_meta.duration_in_code = audio_token.shape[0]
-            supported_meta.append(one_meta)
-            # record last id
-            last_id = current_id
-        save_audio_meta(args.out_originput_meta_file, supported_meta)
+                # inital check
+                if one_meta.status != "PROCESSED_DATA" or one_meta.bpm < cfg.dataset.beatmap_kwargs.minimum_bpm or one_meta.bpm > cfg.dataset.beatmap_kwargs.maximum_bpm:
+                    fail_meta.append((one_meta.id, one_meta.status, f"bpm={one_meta.bpm}"))
+                    continue
+                
+                current_id = one_meta.id.split("_")[0]
+                # try to get audio
+                if last_id is None or last_id != current_id:
+                    try:
+                        origin_sample, sr = audio_read(one_meta.song_name, pad=False)
+                    except Exception as e:
+                        try:
+                            origin_sample, sr = _av_read(one_meta.song_name)
+                        except Exception as e:
+                            fail_meta.append((one_meta.id, e))
+                            continue
+                    duration_in_sec = origin_sample.shape[-1] / sr
+                # check duration related
+                if duration_in_sec > cfg.parser_pipeline.audio_duration_threshold or one_meta.note_num['colorNotes'] / duration_in_sec < cfg.parser_pipeline.nps_threshold:
+                    fail_meta.append((one_meta.id, f"duration_in_sec={duration_in_sec}", f"nps={one_meta.note_num['colorNotes'] / duration_in_sec}"))
+                    continue
+                # tokenizing audio
+                if last_id is None or last_id != current_id:
+                    # handle offset first
+                    for offset in [one_meta.editor_offset, one_meta.additional_offset]:
+                        if offset is not None and offset != 0:
+                            offset_frames = abs(round(offset / 1000 * sr))
+                            if offset > 0:
+                                origin_sample = origin_sample[:, offset_frames:]
+                            if offset < 0:
+                                origin_sample = F.pad(origin_sample, (0, offset_frames), mode='constant', value=0)
+                            duration_in_sec = origin_sample.shape[-1] / sr
+                    max_read_retry = 10
+                    for retry in range(max_read_retry):
+                        try:
+                            # save audio
+                            audio_write(os.path.splitext(one_meta.processed_song_name)[0], origin_sample, sr, format="ogg")
+                            #resample, pad, tokenize, unpad
+                            resample_sample = convert_audio(origin_sample, sr, cfg.sample_rate, cfg.channels)
+                            resample_sample = resample_sample.unsqueeze(0).cuda()
+                            with torch.no_grad():
+                                audio_token, scale = model.encode(resample_sample)
+                            # cache audio token 
+                            path = Path(one_meta.beatmap_path)
+                            tokenized_path = path / TOKENIZED
+                            tokenized_path.mkdir(parents=True, exist_ok=True)
+                            audio_token = audio_token.squeeze(0).permute(1, 0).short().cpu()
+                            with open(one_meta.audio_token, 'wb') as f:
+                                f.write(audio_token.numpy().tobytes())
+                            
+                            # calcualte receptive field
+                            segment_duration_in_quaver = cfg.dataset.segment_duration
+                            minimum_note = cfg.dataset.beatmap_kwargs.minimum_note
+                            bpm_list = [one_meta.bpm]
+                            segment_duration_in_sec = segment_duration_in_quaver * minimum_note / one_meta.bpm * 60
+                            total_code = traditional_round(segment_duration_in_sec*cfg.audio_token.encodec.code_rate)
+                            total_frames = total_code*cfg.audio_token.encodec.stride_rate
+                            total_code = [total_code]
+                            total_frames = [total_frames]
+                            note_code_maps = convert_note_code(rf_range, segment_duration_in_quaver, minimum_note, bpm_list, cfg.sample_rate, total_frames, total_code)
+                            # cache receptive field
+                            assert max(max(note_code_maps))< 2**15, max(max(note_code_maps))
+                            note_code_maps = np.array(note_code_maps, dtype=np.int16)
+                            with open(one_meta.audio_token_index, 'wb') as f:
+                                f.write(note_code_maps.tobytes())
+                            duration_in_code = audio_token.shape[0]
+                            break
+                        except Exception as e:
+                            if retry == max_read_retry - 1:
+                                fail_meta.append((one_meta.id, e))
+                                is_fail = True
+                                break
+                            time.sleep(1)
+                    if is_fail:
+                        is_fail = False
+                        continue
+                # update meta, same song share same update
+                one_meta.sample_rate = sr
+                one_meta.duration = duration_in_sec
+                one_meta.duration_in_code = duration_in_code
+                one_meta.status = "PROCESSED_AUDIO_DATA"
+                supported_meta.append(one_meta)
+                # record last id
+                last_id = current_id
+            save_audio_meta(args.out_originput_meta_file, supported_meta + meta[i+batchSize:])
         print(f"request finished, summary: fail_meta(length {len(fail_meta)}):")
         for fail in fail_meta:
             print(fail)
@@ -1424,7 +1438,15 @@ def main():
             train_meta.extend(value)
         for key, value in val_data.items():
             val_meta.extend(value)
-        save_audio_meta(args.out_originput_meta_file, train_meta)
+        # save train
+        path_parts = args.out_originput_meta_file.split(os.sep)
+        path_parts[-2] = path_parts[-2] + "_train"
+        train_path = os.sep.join(path_parts)
+        new_dir = os.path.dirname(train_path)
+        if not os.path.exists(new_dir):
+            os.makedirs(new_dir)
+        save_audio_meta(train_path, train_meta)
+        # save val
         path_parts = args.out_originput_meta_file.split(os.sep)
         path_parts[-2] = path_parts[-2] + "_test"
         val_path = os.sep.join(path_parts)
