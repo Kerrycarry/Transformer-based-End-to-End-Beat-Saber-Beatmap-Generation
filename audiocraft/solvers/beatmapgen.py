@@ -366,7 +366,9 @@ class BeatmapGenSolver(base.StandardSolver):
         if representation == "musicgen":
             with self.autocast:
                 window_size = self.cfg.audio_token.musicgen.training_sequence_length
-                tokens = self.representation_model.compute_representation(tokens).detach()
+                tokens = self.representation_model.compute_representation(tokens)
+            if not self.cfg.transformer_lm.lora_kwargs.use_lora:
+                tokens = tokens.detach()
         
         dim = tokens.shape[-1]
         B = tokens.shape[0]
