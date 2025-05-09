@@ -106,7 +106,7 @@ tensorboard:
 
 beatmapgen_lm:
   transfer_efficient_backend: xformers # can be torch or xformers.
-  transfer_lr: null
+  lr: null # transfer learning lr
   blockwise_attention_kwargs:
     use_transfer_lm: True
     block_self_attention: True

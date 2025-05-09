@@ -150,7 +150,7 @@ class BeatmapLMModel(StreamingModule):
                  zero_bias_init: bool = False, cfg_dropout: float = 0, cfg_coef: float = 1.0,
                  attribute_dropout: tp.Dict[str, tp.Dict[str, float]] = {}, two_step_cfg: bool = False, difficulty_num: int = 5, 
                  transfer_dim: int = 64, transfer_num_heads: int = 4, transfer_num_layers: int = 1,
-                 use_mask: bool = False, lora_kwargs: dict = {}, blockwise_attention_kwargs: dict = {}, transfer_lr: tp.Optional[float] = None,
+                 use_mask: bool = False, lora_kwargs: dict = {}, blockwise_attention_kwargs: dict = {}, 
                  transfer_efficient_backend: str = 'torch', representation_dim: int = 128, representation: str = "spectrogram", segment_duration: int = 512, 
                  use_receptive_field: bool = False, ca_window_size: int = 3,
                  **kwargs):
@@ -179,12 +179,12 @@ class BeatmapLMModel(StreamingModule):
         self.use_receptive_field = use_receptive_field
         self.ca_window_size = ca_window_size
         if self.block_self_attention:
-            self.difficulty_emb = ScaledEmbedding(self.difficulty_num, transfer_dim * position_size, lr=transfer_lr)
-            self.beatmap_emb = ScaledEmbedding(self.token_id_size, transfer_dim, lr=transfer_lr)
+            self.difficulty_emb = ScaledEmbedding(self.difficulty_num, transfer_dim * position_size)
+            self.beatmap_emb = ScaledEmbedding(self.token_id_size, transfer_dim)
             self.linear_out = nn.Linear(transfer_dim, self.token_id_size, bias=bias_proj)
         else:
-            self.difficulty_emb = ScaledEmbedding(self.difficulty_num, transfer_dim, lr=transfer_lr)
-            self.beatmap_emb = nn.ModuleList([ScaledEmbedding(self.token_id_size, transfer_dim, lr=transfer_lr) for _ in range(self.position_size)])
+            self.difficulty_emb = ScaledEmbedding(self.difficulty_num, transfer_dim)
+            self.beatmap_emb = nn.ModuleList([ScaledEmbedding(self.token_id_size, transfer_dim) for _ in range(self.position_size)])
             self.linear_out = nn.ModuleList([nn.Linear(transfer_dim, self.token_id_size, bias=bias_proj) for _ in range(self.position_size)])
         self.transfer_dim = transfer_dim
         self.local_cross_attention = blockwise_attention_kwargs['local_cross_attention']
@@ -200,7 +200,7 @@ class BeatmapLMModel(StreamingModule):
             self.out_norm2 = create_norm_fn(norm, transfer_dim)
         self.transfer_lm = StreamingTransformer(
             d_model=transfer_dim, num_heads=transfer_num_heads, dim_feedforward=int(hidden_scale * transfer_dim), num_layers = transfer_num_layers,
-            norm=norm, norm_first=norm_first, position_size = position_size, blockwise_attention_kwargs = blockwise_attention_kwargs, block_self_attention = self.block_self_attention, lr = transfer_lr, **kwargs)
+            norm=norm, norm_first=norm_first, position_size = position_size, blockwise_attention_kwargs = blockwise_attention_kwargs, block_self_attention = self.block_self_attention, **kwargs)
         representation_dim = self.dim if self.representation == "musicgen" else representation_dim
         self.linear_transfer = nn.Linear(representation_dim, self.transfer_dim, bias=bias_proj)
         self._init_weights(weight_init, depthwise_init, zero_bias_init)
@@ -213,6 +213,7 @@ class BeatmapLMModel(StreamingModule):
         self.attn_mask_for_sa = self.get_mask_transfer_lm(causal = True)
         self.attn_mask_for_ca = self.get_mask_transfer_lm(causal = False)
         
+        self.representation_model = None
     def get_mask_transfer_lm(self, causal):
         # N = self.position_size
         # query_length = query.shape[1]

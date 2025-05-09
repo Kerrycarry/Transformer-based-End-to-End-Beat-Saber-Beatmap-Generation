@@ -16,6 +16,8 @@ import torch
 from torch.nn import functional as F
 import torchaudio.transforms as T
 
+from ..modules.lora import inject_lora
+
 from . import base, builders
 from .compression import CompressionSolver
 from .. import metrics as eval_metrics
@@ -145,6 +147,14 @@ class BeatmapGenSolver(base.StandardSolver):
         #transfer learning
         trainable = []
         if self.cfg.transformer_lm.lora_kwargs.use_lora:
+            # 向nn.Linear层注入Lora
+            for name,layer in self.representation_model.named_modules():
+                name_cols=name.split('.')
+                # 过滤出cross attention使用的linear权重
+                filter_names=['out_proj']
+                # filter_names=['out_proj', 'linear1', 'linear2']
+                if any(n in name_cols for n in filter_names) and isinstance(layer, torch.nn.Linear):
+                    inject_lora(self.representation_model, name, layer, self.cfg.transformer_lm.lora_kwargs.lora_r, self.cfg.transformer_lm.lora_kwargs.lora_alpha)
             trainable.extend(['lora_in_proj_a','lora_in_proj_b', 'lora_a', 'lora_b'])
         # if self.cfg.beatmapgen_lm.use_mask:
         #     trainable.append('mask_token_embedding')
@@ -154,8 +164,7 @@ class BeatmapGenSolver(base.StandardSolver):
                 param.requires_grad=False
             else:
                 param.requires_grad=True
-                self.model.register_parameter(name.replace(".","/"), param)
-        
+        self.model.representation_model = self.representation_model
         # # Iterate over each module and unfreeze its parameters
         # modules_to_unfreeze = [self.model.difficulty_emb, self.model.linear_transfer, self.model.transfer_lm, self.model.linear_out, self.model.out_norm2, self.model.beatmap_emb]
         # for module in modules_to_unfreeze:

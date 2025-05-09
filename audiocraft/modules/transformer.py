@@ -110,19 +110,6 @@ def expand_repeated_kv(x: torch.Tensor, n_rep: int, memory_efficient: bool) -> t
             .reshape(bs, slen, n_kv_heads * n_rep, head_dim)
         )
 
-class LoraLayer(nn.Module):
-    def __init__(self, in_features, out_features, r, alpha):
-        super().__init__()
-        self.r = r
-        self.alpha = alpha
-        self.lora_a = nn.Parameter(torch.empty((in_features, r)))
-        self.lora_b = nn.Parameter(torch.zeros((r, out_features)))
-        
-        nn.init.kaiming_uniform_(self.lora_a, a=math.sqrt(5))
-
-    def forward(self, x):
-        return x @ ((self.lora_a @ self.lora_b) * self.alpha / self.r)
-
 class LayerScale(nn.Module):
     """Layer scale from [Touvron et al 2021] (https://arxiv.org/pdf/2103.17239.pdf).
     This rescales diagonally the residual outputs close to 0, with a learnt scale.
@@ -235,7 +222,6 @@ class StreamingMultiheadAttention(StreamingModule):
                 self.lora_in_proj_a = nn.Parameter(torch.empty((embed_dim, self.lora_r)))
                 self.lora_in_proj_b = nn.Parameter(torch.zeros((self.lora_r, out_dim)))
                 nn.init.kaiming_uniform_(self.lora_in_proj_a, a=math.sqrt(5))
-                self.lora_out_proj = LoraLayer(self.out_proj.in_features, self.out_proj.out_features, lora_r, lora_alpha)
 
         else:
             assert not qk_layer_norm
@@ -519,10 +505,7 @@ class StreamingMultiheadAttention(StreamingModule):
                 x = torch.einsum(f"b h t k, {key_layout} -> {layout}", w, v)
             x = x.to(dtype)
             x = rearrange(x, f"{layout} -> b t (h d)", h=self.num_heads)
-            if self.use_lora:
-                x = self.out_proj(x) + self.lora_out_proj(x)
-            else:
-                x = self.out_proj(x)
+            x = self.out_proj(x)
 
         else:
             key, value = self._complete_kv(key, value)
