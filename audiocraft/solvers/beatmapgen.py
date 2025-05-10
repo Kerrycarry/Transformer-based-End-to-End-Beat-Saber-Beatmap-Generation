@@ -156,6 +156,7 @@ class BeatmapGenSolver(base.StandardSolver):
                 if any(n in name_cols for n in filter_names) and isinstance(layer, torch.nn.Linear):
                     inject_lora(self.representation_model, name, layer, self.cfg.transformer_lm.lora_kwargs.lora_r, self.cfg.transformer_lm.lora_kwargs.lora_alpha)
             trainable.extend(['lora_in_proj_a','lora_in_proj_b', 'lora_a', 'lora_b'])
+            self.model.representation_model = self.representation_model
         # if self.cfg.beatmapgen_lm.use_mask:
         #     trainable.append('mask_token_embedding')
         # # 冻结模型中的所有参数
@@ -164,7 +165,6 @@ class BeatmapGenSolver(base.StandardSolver):
                 param.requires_grad=False
             else:
                 param.requires_grad=True
-        self.model.representation_model = self.representation_model
         # # Iterate over each module and unfreeze its parameters
         # modules_to_unfreeze = [self.model.difficulty_emb, self.model.linear_transfer, self.model.transfer_lm, self.model.linear_out, self.model.out_norm2, self.model.beatmap_emb]
         # for module in modules_to_unfreeze:

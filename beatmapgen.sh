@@ -121,6 +121,8 @@ fi
 # 启动主流程
 # nohup ./beatmapgen.sh -1 default > log/beatmapgen_log.txt 2>&1 &
 # nohup ./beatmapgen.sh -1 default --clear > log/beatmapgen_log.txt 2>&1 &
+# lora learning config
+# nohup ./beatmapgen.sh -1 default dataset.batch_size=8 transformer_lm.lora_kwargs.use_lora=True transformer_lm.lr=0.01 optim.optimizer=adamw optim.lr=1e-3 transformer_lm.lr=1e-4 --clear > log/beatmapgen_log.txt 2>&1 &
 # 启动deno manifest制作流程
 # nohup ./beatmapgen.sh -2 Beatmap bs_curated create_manifest RAW_DATA > log/beatmapgen_log.txt 2>&1 &
 # nohup ./beatmapgen.sh -2 Beatmap bs_curated copy_beatmap RAW_DATA > log/beatmapgen_log.txt 2>&1 &
