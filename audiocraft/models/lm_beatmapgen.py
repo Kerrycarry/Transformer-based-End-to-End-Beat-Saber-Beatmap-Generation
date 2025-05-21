@@ -152,7 +152,7 @@ class BeatmapLMModel(StreamingModule):
                  transfer_dim: int = 64, transfer_num_heads: int = 4, transfer_num_layers: int = 1,
                  use_mask: bool = False, lora_kwargs: dict = {}, blockwise_attention_kwargs: dict = {}, 
                  transfer_efficient_backend: str = 'torch', representation_dim: int = 128, representation: str = "spectrogram", segment_duration: int = 512, 
-                 use_receptive_field: bool = False, ca_window_size: int = 3,
+                 use_receptive_field: bool = False, ca_window_size: int = 3, sa_window_size: int = 4,
                  **kwargs):
         super().__init__()
         self.cfg_coef = cfg_coef
@@ -178,6 +178,7 @@ class BeatmapLMModel(StreamingModule):
         self.segment_duration = segment_duration
         self.use_receptive_field = use_receptive_field
         self.ca_window_size = ca_window_size
+        self.sa_window_size = sa_window_size
         if self.block_self_attention:
             self.difficulty_emb = ScaledEmbedding(self.difficulty_num, transfer_dim * position_size)
             self.beatmap_emb = ScaledEmbedding(self.token_id_size, transfer_dim)
@@ -188,6 +189,7 @@ class BeatmapLMModel(StreamingModule):
             self.linear_out = nn.ModuleList([nn.Linear(transfer_dim, self.token_id_size, bias=bias_proj) for _ in range(self.position_size)])
         self.transfer_dim = transfer_dim
         self.local_cross_attention = blockwise_attention_kwargs['local_cross_attention']
+        self.local_self_attention = blockwise_attention_kwargs['local_self_attention']
         if 'activation' in kwargs:
             kwargs['activation'] = get_activation_fn(kwargs['activation'])
         # self.transformer = StreamingTransformer(
@@ -289,7 +291,10 @@ class BeatmapLMModel(StreamingModule):
         d = d.view(1, -1, 1)
         dT = dT.view(1, -1, 1).transpose(1, 2)
         if mask_op == ">=":
-            mask = d >= dT
+            if self.local_self_attention:
+                mask = (dT <= d) & ((d - dT) <= self.sa_window_size)
+            else:
+                mask = d >= dT
         elif mask_op == "==":
             mask = d == dT
         zero_tensor = torch.full((1,), 0.0, device = 'cuda', dtype = torch.float16)
@@ -617,6 +622,15 @@ class BeatmapLMModel(StreamingModule):
                 prev_offset = offset
                 if callback is not None:
                     callback(1 + offset - start_offset_sequence, gen_sequence_len - start_offset_sequence)
+                if self.local_self_attention:
+                    state = self.get_streaming_state()
+                    for key, value in state.items():
+                        if len(value.shape) == 4:
+                            length = value.shape[1]
+                            assert length % self.position_size == 0
+                            if length > self.sa_window_size * self.position_size:
+                                state[key] = value[:, self.position_size:]
+                    self.set_streaming_state(state)
         unconditional_state.clear()
         # ensure sequence has been entirely filled
         assert not (gen_sequence == unknown_token).any()
