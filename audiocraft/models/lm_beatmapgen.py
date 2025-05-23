@@ -199,7 +199,7 @@ class BeatmapLMModel(StreamingModule):
         self.out_norm2: tp.Optional[nn.Module] = None
         if norm_first: 
             # self.out_norm = create_norm_fn(norm, dim)
-            self.out_norm2 = create_norm_fn(norm, transfer_dim)
+            self.out_norm2 = create_norm_fn('layer_norm', transfer_dim)
         self.transfer_lm = StreamingTransformer(
             d_model=transfer_dim, num_heads=transfer_num_heads, dim_feedforward=int(hidden_scale * transfer_dim), num_layers = transfer_num_layers,
             norm=norm, norm_first=norm_first, position_size = position_size, blockwise_attention_kwargs = blockwise_attention_kwargs, block_self_attention = self.block_self_attention, **kwargs)

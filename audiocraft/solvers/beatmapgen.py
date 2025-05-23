@@ -139,6 +139,7 @@ class BeatmapGenSolver(base.StandardSolver):
         # instantiate LM model
         self.representation_model: models.LMModel = models.builders.get_lm_model(self.cfg).to(self.device)
         delattr(self.representation_model, 'linears')
+        delattr(self.representation_model, 'out_norm')
         if 'representation_model' in self.cfg:
             state_dict = torch.load(self.cfg.representation_model)
             self.representation_model.load_state_dict(state_dict['best_state']['model'], strict=False)

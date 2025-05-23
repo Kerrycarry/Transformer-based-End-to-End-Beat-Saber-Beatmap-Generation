@@ -65,6 +65,8 @@ def create_norm_fn(norm_type: str, dim: int, **kwargs) -> nn.Module:
     """
     if norm_type == 'layer_norm':
         return nn.LayerNorm(dim, eps=1e-5, **kwargs)
+    elif norm_type == 'res_norm':
+        return RMSNorm(dim, eps=1e-5, **kwargs)
     else:
         raise ValueError(f"Unknown norm type: {norm_type}")
 
@@ -135,6 +137,51 @@ class LayerScale(nn.Module):
         else:
             return self.scale[:, None] * x
 
+class RMSNorm(torch.nn.Module):
+    def __init__(self, dim: int, eps: float = 1e-6, device=None, dtype=None):
+        """
+        Initialize the RMSNorm normalization layer.
+
+        Args:
+            dim (int): The dimension of the input tensor.
+            eps (float, optional): A small value added to the denominator for numerical stability. Default is 1e-6.
+
+        Attributes:
+            eps (float): A small value added to the denominator for numerical stability.
+            weight (nn.Parameter): Learnable scaling parameter.
+
+        """
+        super().__init__()
+        factory_kwargs = {'device': device, 'dtype': dtype}
+        self.eps = eps
+        self.weight = nn.Parameter(torch.ones(dim, **factory_kwargs))
+
+    def _norm(self, x):
+        """
+        Apply the RMSNorm normalization to the input tensor.
+
+        Args:
+            x (torch.Tensor): The input tensor.
+
+        Returns:
+            torch.Tensor: The normalized tensor.
+
+        """
+        return x * torch.rsqrt(x.pow(2).mean(-1, keepdim=True) + self.eps)
+
+    def forward(self, x):
+        """
+        Forward pass through the RMSNorm layer.
+
+        Args:
+            x (torch.Tensor): The input tensor.
+
+        Returns:
+            torch.Tensor: The output tensor after applying RMSNorm.
+
+        """
+        output = self._norm(x.float()).to(x.dtype)
+        return output * self.weight
 
 class StreamingMultiheadAttention(StreamingModule):
     """Similar to `nn.MultiheadAttention` but with support for streaming, causal evaluation.
@@ -589,9 +636,12 @@ class StreamingTransformerLayer(nn.TransformerEncoderLayer):
         if layer_scale is None:
             self.layer_scale_1 = nn.Identity()
             self.layer_scale_2 = nn.Identity()
-        else:
+        elif layer_scale == 'layer_scale':
             self.layer_scale_1 = LayerScale(d_model, layer_scale, **factory_kwargs)
             self.layer_scale_2 = LayerScale(d_model, layer_scale, **factory_kwargs)
+        else:
+            self.layer_scale_1 = create_norm_fn(layer_scale, d_model, **factory_kwargs)
+            self.layer_scale_2 = create_norm_fn(layer_scale, d_model, **factory_kwargs)
 
         self.cross_attention: tp.Optional[nn.Module] = None
         # musicgen case cross_attention = False, manually set it true for beatmapgen
@@ -604,12 +654,14 @@ class StreamingTransformerLayer(nn.TransformerEncoderLayer):
             # Norm and dropout
             self.dropout_cross = nn.Dropout(dropout)
             # eps value matching that used in PyTorch reference implementation.
-            self.norm_cross = nn.LayerNorm(d_model, eps=1e-5, **factory_kwargs)
+            self.norm_cross = create_norm_fn(norm, d_model, **factory_kwargs)
             self.layer_scale_cross: nn.Module
             if layer_scale is None:
                 self.layer_scale_cross = nn.Identity()
-            else:
+            elif layer_scale == 'layer_scale':
                 self.layer_scale_cross = LayerScale(d_model, layer_scale, **factory_kwargs)
+            else:
+                self.layer_scale_cross = create_norm_fn(layer_scale, d_model, **factory_kwargs)
         self.norm1 = create_norm_fn(norm, d_model, **factory_kwargs)  # type: ignore
         self.norm2 = create_norm_fn(norm, d_model, **factory_kwargs)  # type: ignore
 

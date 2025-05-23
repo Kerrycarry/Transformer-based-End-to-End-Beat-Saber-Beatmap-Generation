@@ -561,9 +561,7 @@ class LMModel(StreamingModule):
         
         max_gen_len = sequence.shape[-1]
         input_ = sum([self.emb[k](sequence[:, k]) for k in range(K)]) # batch, sequence, dim
-        out = self.transformer(input_, cross_attention_src=None,
+        gen_representation = self.transformer(input_, cross_attention_src=None,
                                src_mask = None)
-        if self.out_norm:
-            gen_representation = self.out_norm(out)
         assert gen_representation.shape[1] == max_gen_len
         return gen_representation
