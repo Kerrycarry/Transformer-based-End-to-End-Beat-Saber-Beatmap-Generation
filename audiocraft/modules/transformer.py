@@ -608,7 +608,7 @@ class StreamingTransformerLayer(nn.TransformerEncoderLayer):
                  cross_attention: bool = False, layer_scale: tp.Optional[float] = None,
                  rope: tp.Optional[RotaryEmbedding] = None, attention_dropout: tp.Optional[float] = None,
                  kv_repeat: int = 1, norm: str = 'layer_norm', position_size: int = 12,
-                 device=None, dtype=None, pad_kv: bool = False, **kwargs):
+                 device=None, dtype=None, pad_kv: bool = False, use_swiglu_ffn: bool = False, **kwargs):
         super().__init__(d_model, num_heads, dim_feedforward, dropout,
                          device=device, dtype=dtype, batch_first=True, **kwargs)
         factory_kwargs = {'device': device, 'dtype': dtype}
@@ -630,6 +630,16 @@ class StreamingTransformerLayer(nn.TransformerEncoderLayer):
         # Redefine feedforward layers to expose bias parameter
         self.linear1 = nn.Linear(d_model, dim_feedforward, bias=bias_ff, **factory_kwargs)
         self.linear2 = nn.Linear(dim_feedforward, d_model, bias=bias_ff, **factory_kwargs)
+        self.use_swiglu_ffn = use_swiglu_ffn
+        if use_swiglu_ffn:
+            dim_feedforward = int(d_model * 8 / 3)
+            self.linear1 = nn.Linear(d_model, dim_feedforward, bias=bias_ff, **factory_kwargs) # up_proj
+            self.linear2 = nn.Linear(dim_feedforward, d_model, bias=bias_ff, **factory_kwargs) # down_proj
+            self.linear3 = nn.Linear(d_model, dim_feedforward, bias=bias_ff, **factory_kwargs) # gate_proj
+            for module in [self.linear1, self.linear2, self.linear3]:
+                nn.init.xavier_uniform_(module.weight)
+                if module.bias is not None:
+                    nn.init.zeros_(module.bias)
 
         self.layer_scale_1: nn.Module
         self.layer_scale_2: nn.Module
@@ -664,6 +674,12 @@ class StreamingTransformerLayer(nn.TransformerEncoderLayer):
                 self.layer_scale_cross = create_norm_fn(layer_scale, d_model, **factory_kwargs)
         self.norm1 = create_norm_fn(norm, d_model, **factory_kwargs)  # type: ignore
         self.norm2 = create_norm_fn(norm, d_model, **factory_kwargs)  # type: ignore
+
+    def _ff_block(self, x: torch.Tensor) -> torch.Tensor:
+        if self.use_swiglu_ffn:
+            return self.linear2(F.silu(self.linear3(x)) * self.linear1(x))
+        else:
+            return super()._ff_block(x) 
 
     def _cross_attention_block(self, src: torch.Tensor,
                                cross_attention_src: torch.Tensor, cross_src_mask: torch.Tensor) -> torch.Tensor:

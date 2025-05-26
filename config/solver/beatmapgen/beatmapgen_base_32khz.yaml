@@ -82,6 +82,7 @@ generate:
 
 optim:
   epochs: 84
+  updates_per_epoch: 2000
   optimizer: dadam
   lr: 0.1
   ema:
@@ -105,7 +106,7 @@ tensorboard:
   name: debug_test
 
 beatmapgen_lm:
-  transfer_efficient_backend: torch # can be torch or xformers.
+  transfer_efficient_backend: xformers # can be torch or xformers.
   blockwise_attention_kwargs:
     use_transfer_lm: True
     block_self_attention: True
@@ -120,10 +121,11 @@ beatmapgen_lm:
     lora_r: 16
     lora_alpha: 16
   positional_embedding: sin
-  qk_layer_norm: true
-  qk_layer_norm_cross: true
-  norm: res_norm
-  layer_scale: res_norm
+  qk_layer_norm: false
+  qk_layer_norm_cross: false
+  norm: layer_norm
+  layer_scale: null
+  use_swiglu_ffn: false
 
 transformer_lm:
   lr: null # transfer learning lr
