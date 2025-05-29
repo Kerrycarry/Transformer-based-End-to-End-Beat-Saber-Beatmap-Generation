@@ -158,6 +158,8 @@ class BeatmapGenSolver(base.StandardSolver):
                     inject_lora(self.representation_model, name, layer, self.cfg.transformer_lm.lora_kwargs.lora_r, self.cfg.transformer_lm.lora_kwargs.lora_alpha)
             trainable.extend(['lora_in_proj_a','lora_in_proj_b', 'lora_a', 'lora_b'])
             self.model.representation_model = self.representation_model
+        else:
+            self.representation_model.eval()
         # if self.cfg.beatmapgen_lm.use_mask:
         #     trainable.append('mask_token_embedding')
         # # 冻结模型中的所有参数

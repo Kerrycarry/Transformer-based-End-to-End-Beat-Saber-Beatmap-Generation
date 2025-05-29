@@ -247,7 +247,7 @@ class Beatmap:
         return beatmap
     
     def note_round(self, time):
-        eighth_notes = [i * 0.125 for i in range(9)]  # 生成 [0, 1/8, 2/8, ..., 1]
+        eighth_notes = [i * self.minimum_note for i in range(9)]  # 生成 [0, 1/8, 2/8, ..., 1]
         integer_part = int(time)
         floating_part = time - integer_part
         closest_note = min(eighth_notes, key=lambda x: abs(x - floating_part))  # 找到最近的八分音符
@@ -1299,6 +1299,7 @@ def main():
         # get compression model and padding size
         from ..solvers import CompressionSolver
         model = CompressionSolver.model_from_checkpoint(cfg.compression_model_checkpoint, device='cuda')
+        model.eval()
 
         # get receptive field param
         from ..utils.receptive_field import receptive_field, receptive_field_for_unit, convert_note_code
@@ -1319,6 +1320,7 @@ def main():
         for i in tqdm(range(0, len(meta), batchSize), desc="tokenize audio"):
             sub_list = meta[i:i+batchSize]
             for one_meta in tqdm(sub_list, desc=f"batch: {i}-{i+batchSize}"):
+                current_id = one_meta.id.split("_")[0]
                 # first check if processed
                 if one_meta.status == "PROCESSED_AUDIO_DATA":
                     supported_meta.append(one_meta)
@@ -1327,12 +1329,11 @@ def main():
                     duration_in_sec = one_meta.duration
                     duration_in_code = one_meta.duration_in_code
                     continue
-                # inital check
+                # inital check if processed data is valid and bpm is in range
                 if one_meta.status != "PROCESSED_DATA" or one_meta.bpm < cfg.dataset.beatmap_kwargs.minimum_bpm or one_meta.bpm > cfg.dataset.beatmap_kwargs.maximum_bpm:
                     fail_meta.append((one_meta.id, one_meta.status, f"bpm={one_meta.bpm}"))
                     continue
                 
-                current_id = one_meta.id.split("_")[0]
                 # try to get audio
                 if last_id is None or last_id != current_id:
                     try:
@@ -1363,20 +1364,24 @@ def main():
                     for retry in range(max_read_retry):
                         try:
                             # save audio
-                            audio_write(os.path.splitext(one_meta.processed_song_name)[0], origin_sample, sr, format="ogg")
+                            if not os.path.exists(one_meta.processed_song_name):
+                                audio_write(os.path.splitext(one_meta.processed_song_name)[0], origin_sample, sr, format="ogg")
                             #resample, pad, tokenize, unpad
                             resample_sample = convert_audio(origin_sample, sr, cfg.sample_rate, cfg.channels)
                             resample_sample = resample_sample.unsqueeze(0).cuda()
-                            with torch.no_grad():
-                                audio_token, scale = model.encode(resample_sample)
-                            # cache audio token 
-                            path = Path(one_meta.beatmap_path)
-                            tokenized_path = path / TOKENIZED
-                            tokenized_path.mkdir(parents=True, exist_ok=True)
-                            audio_token = audio_token.squeeze(0).permute(1, 0).short().cpu()
-                            with open(one_meta.audio_token, 'wb') as f:
-                                f.write(audio_token.numpy().tobytes())
-                            
+                            if os.path.exists(one_meta.audio_token):
+                                duration_in_code = math.ceil(resample_sample.shape[-1]/cfg.audio_token.encodec.stride_rate)
+                            else:
+                                with torch.no_grad():
+                                    audio_token, scale = model.encode(resample_sample)
+                                # cache audio token
+                                path = Path(one_meta.beatmap_path)
+                                tokenized_path = path / TOKENIZED
+                                tokenized_path.mkdir(parents=True, exist_ok=True)
+                                audio_token = audio_token.squeeze(0).permute(1, 0).short().cpu()
+                                with open(one_meta.audio_token, 'wb') as f:
+                                    f.write(audio_token.numpy().tobytes())
+                                duration_in_code = audio_token.shape[0]
                             # calcualte receptive field
                             segment_duration_in_quaver = cfg.dataset.segment_duration
                             minimum_note = cfg.dataset.beatmap_kwargs.minimum_note
@@ -1392,7 +1397,6 @@ def main():
                             note_code_maps = np.array(note_code_maps, dtype=np.int16)
                             with open(one_meta.audio_token_index, 'wb') as f:
                                 f.write(note_code_maps.tobytes())
-                            duration_in_code = audio_token.shape[0]
                             break
                         except Exception as e:
                             if retry == max_read_retry - 1:

@@ -28,7 +28,7 @@ deadlock:
 
 dataset:
   batch_size: 16  # 32 GPUs
-  segment_duration: 512 # 1536个八分音符
+  segment_duration: 256 # 1536个八分音符
   sample_on_weight: false  # Uniform sampling all the way
   sample_on_duration: false  # Uniform sampling all the way
   valid:
@@ -43,8 +43,8 @@ dataset:
   beatmap_kwargs:
     difficulty_num: 5
     position_size: 12
-    beatmap_sample_window: 32 # it must be divisble by minimum note
-    minimum_note: 0.125
+    beatmap_sample_window: 16 # it must be divisble by minimum note
+    minimum_note: 0.25
     minimum_bpm: 65
     maximum_bpm: 260
     note_type:  

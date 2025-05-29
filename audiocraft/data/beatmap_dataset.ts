@@ -250,9 +250,9 @@ function isSupportedNote(time: number, tolerance = 0.099): boolean {
    * @param tolerance - Allowed floating-point precision error.
    * @returns True if the time is a multiple of 1/6 or 1/8, otherwise False.
    */
-  let scaledTime = time * 8;
+  let scaledTime = time * supportedTime1;
   const isOneEigth = Math.abs(Math.round(scaledTime) - scaledTime) < tolerance;
-  scaledTime = time * 8;
+  scaledTime = time * supportedTime2;
   const isSixth = Math.abs(Math.round(scaledTime) - scaledTime) < tolerance;
   return isOneEigth || isSixth
 }
@@ -502,6 +502,8 @@ const target_data: string[] = [target];
 const slideNote = 0.125
 const offsetThreshold = 0.1
 const processedThreshold = 10
+const supportedTime1 = 4
+const supportedTime2 = 4
 
 const difficulty_cache: [string, string][] = []
 
