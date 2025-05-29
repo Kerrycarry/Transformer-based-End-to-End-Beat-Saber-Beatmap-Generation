@@ -126,6 +126,8 @@ beatmapgen_lm:
   norm: layer_norm
   layer_scale: null
   use_swiglu_ffn: false
+  dropout: 0.
+  attention_dropout: null
 
 transformer_lm:
   lr: null # transfer learning lr
