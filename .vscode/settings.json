@@ -6,6 +6,8 @@
         "**/build",
         ".git",
         "myenv/**",
-        "dataset/**"
+        "dataset/**",
+        "egs/**",
+        "log/**"
     ]
 }

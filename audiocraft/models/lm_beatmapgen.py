@@ -152,7 +152,7 @@ class BeatmapLMModel(StreamingModule):
                  transfer_dim: int = 64, transfer_num_heads: int = 4, transfer_num_layers: int = 1,
                  use_mask: bool = False, lora_kwargs: dict = {}, blockwise_attention_kwargs: dict = {}, 
                  transfer_efficient_backend: str = 'torch', representation_dim: int = 128, representation: str = "spectrogram", segment_duration: int = 512, 
-                 use_receptive_field: bool = False, ca_window_size: int = 3, sa_window_size: int = 4,
+                 ca_window_size: int = 0, sa_window_size: int = 4,
                  **kwargs):
         super().__init__()
         self.cfg_coef = cfg_coef
@@ -176,7 +176,6 @@ class BeatmapLMModel(StreamingModule):
         self.transfer_efficient_backend = transfer_efficient_backend
         self.representation = representation
         self.segment_duration = segment_duration
-        self.use_receptive_field = use_receptive_field
         self.ca_window_size = ca_window_size
         self.sa_window_size = sa_window_size
         if self.block_self_attention:
@@ -280,13 +279,9 @@ class BeatmapLMModel(StreamingModule):
                 # else:
                 query_len = self.segment_duration * self.position_size
                 d = torch.arange(self.segment_duration, device = 'cuda').repeat_interleave(self.position_size)
-                if self.use_receptive_field:
-                    windows = self.ca_window_size*1 + 1
-                    dT = torch.arange(self.segment_duration, device = 'cuda').repeat_interleave(windows)
-                    key_len = self.segment_duration * windows
-                else:
-                    dT = torch.arange(self.segment_duration, device = 'cuda')
-                    key_len = self.segment_duration
+                windows = self.ca_window_size*2 + 1
+                dT = torch.arange(self.segment_duration, device = 'cuda').repeat_interleave(windows)
+                key_len = self.segment_duration * windows
                 mask_op = "=="
         d = d.view(1, -1, 1)
         dT = dT.view(1, -1, 1).transpose(1, 2)
@@ -475,11 +470,9 @@ class BeatmapLMModel(StreamingModule):
         """
 
         cross_attention_input = self.linear_transfer(codes)
-        B = cross_attention_input.shape[0]
-        if self.use_receptive_field:
-            B, S, index, D = cross_attention_input.shape
-            assert S == self.segment_duration, "segment duration should be the same as the input"
-            cross_attention_input = cross_attention_input.view(cross_attention_input.shape[0], -1, self.transfer_dim)
+        B, S, index, D = cross_attention_input.shape
+        assert S == self.segment_duration, "segment duration should be the same as the input"
+        cross_attention_input = cross_attention_input.view(B, -1, D)
         if self.block_self_attention:
             beatmap = beatmap[:,:-1].view(B, -1) # [B, (S-1)*P]
             input_ = self.beatmap_emb(beatmap) # [B, (S-1)*P, dim]
@@ -604,8 +597,6 @@ class BeatmapLMModel(StreamingModule):
                 if self.local_cross_attention:
                     index = offset // self.position_size - 1
                     cross_attention_src = cross_attention_input[:, index]
-                    if not self.use_receptive_field:
-                        cross_attention_src = cross_attention_src.unsqueeze(1)
                 else:
                     cross_attention_src = cross_attention_input
                 next_token = self._sample_next_token(

@@ -28,7 +28,7 @@ deadlock:
 
 dataset:
   batch_size: 16  # 32 GPUs
-  segment_duration: 256 # 1536个八分音符
+  segment_duration: 256
   sample_on_weight: false  # Uniform sampling all the way
   sample_on_duration: false  # Uniform sampling all the way
   valid:
@@ -108,12 +108,12 @@ tensorboard:
 beatmapgen_lm:
   transfer_efficient_backend: xformers # can be torch or xformers.
   blockwise_attention_kwargs:
-    use_transfer_lm: True
-    block_self_attention: True
-    local_cross_attention: True
+    use_transfer_lm: True # cannot be false
+    block_self_attention: True # cannot be false
+    local_cross_attention: True # cannot be false
     local_self_attention: False
-  ca_window_size: 3
-  sa_window_size: 4
+  ca_window_size: 0
+  sa_window_size: 4 # only used if local_self_attention is True
   pad_kv: True
   use_mask: False
   lora_kwargs: 
@@ -139,7 +139,6 @@ transformer_lm:
 audio_token:
   representation: musicgen # spectrogram, encodec or  musicgen
   encodec:
-    use_receptive_field: False # use receptive_field to look for representation from encodec
     representation_dim: 128
     target_layer: 27
     code_rate: 50

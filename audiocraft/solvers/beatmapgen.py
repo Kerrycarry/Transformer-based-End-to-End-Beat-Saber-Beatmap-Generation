@@ -240,9 +240,7 @@ class BeatmapGenSolver(base.StandardSolver):
         audio_token = self.cfg.audio_token
         representation = audio_token.representation
         representation_dim = audio_token.encodec.representation_dim
-        use_receptive_field = audio_token.encodec.use_receptive_field
         self.cfg.beatmapgen_lm.representation_dim = representation_dim
-        self.cfg.beatmapgen_lm.use_receptive_field = use_receptive_field
 
         self.cfg.beatmapgen_lm.representation = representation
         segment_duration = self.cfg.dataset.segment_duration
@@ -377,24 +375,25 @@ class BeatmapGenSolver(base.StandardSolver):
         segment_duration_in_quaver = self.cfg.dataset.segment_duration        
         if representation == "musicgen":
             with self.autocast:
-                window_size = self.cfg.audio_token.musicgen.training_sequence_length
                 tokens = self.representation_model.compute_representation(tokens)
             if not self.cfg.transformer_lm.lora_kwargs.use_lora:
                 tokens = tokens.detach()
         
         dim = tokens.shape[-1]
         B = tokens.shape[0]
-        if not self.cfg.audio_token.encodec.use_receptive_field:
-            if representation == "musicgen":
-                tokens = tokens[:,4:]
-            note_code_maps = torch.tensor(note_code_maps, device=self.device)
-            tokens = torch.gather(tokens, dim=1, index=note_code_maps.unsqueeze(-1).expand(B, segment_duration_in_quaver, dim))
-        else:
-            total_code = [info.total_code for info in segment_infos]
-            note_code_trim_list_map = torch.tensor(note_code_trim_list_map, device=self.device)
-            tokens = [F.pad(one_token[:one_code], (0, 0, 2, 2)) for one_token, one_code in zip(tokens, total_code)]
-            window_size = note_code_trim_list_map.shape[2]
-            tokens = torch.stack([torch.gather(one_token.unsqueeze(0).expand(segment_duration_in_quaver, one_token.shape[0], dim), dim=1, index = one_map.unsqueeze(-1).expand(target_sequence, window_size, dim)) for one_token, one_map in zip(tokens, note_code_trim_list_map)])
+        window_size = self.cfg.beatmapgen_lm.ca_window_size
+        total_window_size = window_size * 2 + 1
+        note_code_maps += 4
+        offsets = torch.arange(0-window_size, 1+window_size, device=note_code_maps.device)
+        note_code_maps = note_code_maps.unsqueeze(-1) + offsets.view(1, 1, -1)
+        # 构建 token 序列
+        stacked_tokens = []
+        for one_token, one_map in zip(tokens, note_code_maps):
+            expanded_token = one_token.unsqueeze(0).expand(segment_duration_in_quaver, one_token.shape[0], dim)
+            expanded_index = one_map.unsqueeze(-1).expand(segment_duration_in_quaver, total_window_size, dim)
+            gathered = torch.gather(expanded_token, dim=1, index=expanded_index)
+            stacked_tokens.append(gathered)
+        tokens = torch.stack(stacked_tokens)
         return tokens
     def tokenize_difficulty(self, segment_infos):
         difficulty_map = {'Easy': 0, 'Normal': 1, 'Hard': 2, 'Expert': 3, 'ExpertPlus': 4}
