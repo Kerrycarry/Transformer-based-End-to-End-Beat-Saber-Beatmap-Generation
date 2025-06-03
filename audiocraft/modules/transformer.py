@@ -23,6 +23,7 @@ from torch.utils.checkpoint import checkpoint as torch_checkpoint
 from xformers import ops
 
 from .rope import RotaryEmbedding
+from .rope_ca import RotaryEmbeddingCrossAttention
 from .streaming import StreamingModule
 from xformers.ops import LowerTriangularMask
 
@@ -212,7 +213,7 @@ class StreamingMultiheadAttention(StreamingModule):
     def __init__(self, embed_dim: int, num_heads: int, dropout: float = 0.0, bias: bool = True,
                  causal: bool = False, past_context: tp.Optional[int] = None, custom: bool = False,
                  memory_efficient: bool = False, attention_as_float32: bool = False,
-                 rope: tp.Optional[RotaryEmbedding] = None, cross_attention: bool = False,
+                 rope: tp.Optional[RotaryEmbedding] = None, rope_ca: tp.Optional[RotaryEmbeddingCrossAttention] = None, cross_attention: bool = False,
                  safe_streaming: bool = True, qk_layer_norm: bool = False, kv_repeat: int = 1,
                  use_lora: bool = False, lora_r: int = 8, lora_alpha: int = 16, 
                  position_size: int = 12, pad_kv: bool = False,
@@ -228,6 +229,7 @@ class StreamingMultiheadAttention(StreamingModule):
         self.memory_efficient = memory_efficient
         self.attention_as_float32 = attention_as_float32
         self.rope = rope
+        self.rope_ca = rope_ca
         self.cross_attention = cross_attention
         self.safe_streaming = safe_streaming
         self.num_heads = num_heads
@@ -376,6 +378,21 @@ class StreamingMultiheadAttention(StreamingModule):
         streaming_offset = past_context_offset + past_keys_offset
         return self.rope.rotate_qk(query, key, start=streaming_offset, time_dim=time_dim)
 
+    def _apply_rope_ca(self, query: torch.Tensor, key: torch.Tensor):
+        time_dim = _get_attention_time_dimension(self.memory_efficient)
+        # Apply rope embeddings to query and key tensors.
+        assert self.rope_ca is not None
+        if 'past_keys' in self._streaming_state:
+            past_keys_offset = self._streaming_state['past_keys'].shape[1]
+        else:
+            past_keys_offset = 0
+        if 'offset' in self._streaming_state:
+            past_context_offset = int(self._streaming_state['offset'].item())
+        else:
+            past_context_offset = 0
+        streaming_offset = past_context_offset + past_keys_offset
+        return self.rope_ca.rotate_qk(query, key, start=streaming_offset, time_dim=time_dim)
+
     def forward(self, query: torch.Tensor, key: torch.Tensor, value: torch.Tensor,
                 key_padding_mask=None, need_weights=False, attn_mask=None,
                 average_attn_weights=True, is_causal=False):
@@ -433,6 +450,8 @@ class StreamingMultiheadAttention(StreamingModule):
                     q = self.q_layer_norm(q)
                     k = self.k_layer_norm(k)
                 q, k, v = [rearrange(x, f"b t (h d) -> {layout}", h=self.num_heads) for x in [q, k, v]]
+                if self.rope_ca:
+                    q, k = self._apply_rope_ca(q, k)
             else:
                 if not _is_profiled():
                     # profiling breaks that propertysomehow.
@@ -606,7 +625,7 @@ class StreamingTransformerLayer(nn.TransformerEncoderLayer):
                  memory_efficient: bool = False, attention_as_float32: bool = False,
                  qk_layer_norm: bool = False, qk_layer_norm_cross: bool = False,
                  cross_attention: bool = False, layer_scale: tp.Optional[float] = None,
-                 rope: tp.Optional[RotaryEmbedding] = None, attention_dropout: tp.Optional[float] = None,
+                 rope: tp.Optional[RotaryEmbedding] = None, rope_ca: tp.Optional[RotaryEmbeddingCrossAttention] = None, attention_dropout: tp.Optional[float] = None,
                  kv_repeat: int = 1, norm: str = 'layer_norm', position_size: int = 12,
                  device=None, dtype=None, pad_kv: bool = False, use_swiglu_ffn: bool = False, **kwargs):
         super().__init__(d_model, num_heads, dim_feedforward, dropout,
@@ -659,7 +678,7 @@ class StreamingTransformerLayer(nn.TransformerEncoderLayer):
             cross_attention = True
         if cross_attention:
             self.cross_attention = StreamingMultiheadAttention(
-                cross_attention=True, qk_layer_norm=qk_layer_norm_cross, **blockwise_attention_kwargs,
+                cross_attention=True, rope_ca=rope_ca, qk_layer_norm=qk_layer_norm_cross, **blockwise_attention_kwargs,
                 **attn_kwargs, **factory_kwargs)
             # Norm and dropout
             self.dropout_cross = nn.Dropout(dropout)
@@ -758,10 +777,10 @@ class StreamingTransformer(StreamingModule):
                  causal: bool = False, past_context: tp.Optional[int] = None,
                  custom: bool = False, memory_efficient: bool = False, attention_as_float32: bool = False,
                  cross_attention: bool = False, layer_scale: tp.Optional[float] = None,
-                 positional_embedding: str = 'sin', max_period: float = 10_000, positional_scale: float = 1.,
+                 positional_embedding: str = 'sin', positional_embedding_ca: tp.Optional[int] = None,  max_period: float = 10_000, positional_scale: float = 1.,
                  xpos: bool = False, lr: tp.Optional[float] = None, weight_decay: tp.Optional[float] = None,
                  layer_class: tp.Type[StreamingTransformerLayer] = StreamingTransformerLayer,
-                 checkpointing: str = 'none', position_size: int = 12, block_self_attention: bool = False, device=None, dtype=None, **kwargs):
+                 checkpointing: str = 'none', position_size: int = 12, block_self_attention: bool = False, unique_steps: int = 9, device=None, dtype=None, **kwargs):
         super().__init__()
         assert d_model % num_heads == 0
 
@@ -777,12 +796,18 @@ class StreamingTransformer(StreamingModule):
             self.local_pos_embedding = nn.Embedding(position_size, d_model)
         assert positional_embedding in ['sin', 'rope', 'sin_rope']
         self.rope: tp.Optional[RotaryEmbedding] = None
+        self.rope_ca: tp.Optional[RotaryEmbeddingCrossAttention] = None
         if self.positional_embedding in ['rope', 'sin_rope']:
             assert _is_custom(custom, memory_efficient)
             shared_steps = self.position_size if self.block_self_attention else 1
             self.rope = RotaryEmbedding(d_model // num_heads, max_period=max_period,
                                         xpos=xpos, scale=positional_scale, shared_steps=shared_steps, device=device)
-
+        if positional_embedding_ca in ['rope']:
+            assert _is_custom(custom, memory_efficient)
+            shared_steps = self.position_size if self.block_self_attention else 1
+            unique_steps = unique_steps
+            self.rope_ca = RotaryEmbeddingCrossAttention(d_model // num_heads, max_period=max_period,
+                                        xpos=xpos, scale=positional_scale, shared_steps=shared_steps, unique_steps=unique_steps, device=device)
         self.checkpointing = checkpointing
 
         assert checkpointing in ['none', 'torch', 'xformers_default', 'xformers_mm']
@@ -798,7 +823,7 @@ class StreamingTransformer(StreamingModule):
                     dropout=dropout, bias_ff=bias_ff, bias_attn=bias_attn,
                     causal=causal, past_context=past_context, custom=custom,
                     memory_efficient=memory_efficient, attention_as_float32=attention_as_float32,
-                    cross_attention=cross_attention, layer_scale=layer_scale, rope=self.rope,
+                    cross_attention=cross_attention, layer_scale=layer_scale, rope=self.rope, rope_ca=self.rope_ca,
                     device=device, dtype=dtype, position_size = position_size, **kwargs))
 
         if self.checkpointing != 'none':

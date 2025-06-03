@@ -201,7 +201,7 @@ class BeatmapLMModel(StreamingModule):
             self.out_norm2 = create_norm_fn('layer_norm', transfer_dim)
         self.transfer_lm = StreamingTransformer(
             d_model=transfer_dim, num_heads=transfer_num_heads, dim_feedforward=int(hidden_scale * transfer_dim), num_layers = transfer_num_layers,
-            norm=norm, norm_first=norm_first, position_size = position_size, blockwise_attention_kwargs = blockwise_attention_kwargs, block_self_attention = self.block_self_attention, **kwargs)
+            norm=norm, norm_first=norm_first, position_size = position_size, blockwise_attention_kwargs = blockwise_attention_kwargs, block_self_attention = self.block_self_attention, unique_steps=self.ca_window_size*2+1, **kwargs)
         representation_dim = self.dim if self.representation == "musicgen" else representation_dim
         self.linear_transfer = nn.Linear(representation_dim, self.transfer_dim, bias=bias_proj)
         self._init_weights(weight_init, depthwise_init, zero_bias_init)
