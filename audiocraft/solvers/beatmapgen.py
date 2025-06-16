@@ -138,6 +138,7 @@ class BeatmapGenSolver(base.StandardSolver):
         #                  self.compression_model.frame_rate)
         # instantiate LM model
         self.representation_model: models.LMModel = models.builders.get_lm_model(self.cfg).to(self.device)
+        self.representation_autocast = torch.autocast(device_type='cuda', dtype=torch.float16, enabled=True)
         delattr(self.representation_model, 'linears')
         delattr(self.representation_model, 'out_norm')
         if 'representation_model' in self.cfg:
@@ -231,6 +232,7 @@ class BeatmapGenSolver(base.StandardSolver):
         self.cfg.beatmapgen_lm.difficulty_num = difficulty_num
         self.cfg.beatmapgen_lm.position_size = position_size
         self.cfg.beatmapgen_lm.token_id_size = token_id_size
+        self.cfg.beatmapgen_lm.autocast = self.cfg.autocast
         self.cfg.dataset.token_id_size = token_id_size
         self.cfg.dataset.beatmap_sample_window = beatmap_sample_window
         self.cfg.dataset.minimum_note = minimum_note
@@ -374,7 +376,7 @@ class BeatmapGenSolver(base.StandardSolver):
         representation = self.cfg.audio_token.representation
         segment_duration_in_quaver = self.cfg.dataset.segment_duration        
         if representation == "musicgen":
-            with self.autocast:
+            with self.representation_autocast:
                 tokens = self.representation_model.compute_representation(tokens)
             if not self.cfg.transformer_lm.lora_kwargs.use_lora:
                 tokens = tokens.detach()

@@ -152,7 +152,7 @@ class BeatmapLMModel(StreamingModule):
                  transfer_dim: int = 64, transfer_num_heads: int = 4, transfer_num_layers: int = 1,
                  use_mask: bool = False, lora_kwargs: dict = {}, blockwise_attention_kwargs: dict = {}, 
                  transfer_efficient_backend: str = 'torch', representation_dim: int = 128, representation: str = "spectrogram", segment_duration: int = 512, 
-                 ca_window_size: int = 0, sa_window_size: int = 4,
+                 ca_window_size: int = 0, sa_window_size: int = 4, autocast: bool = False,
                  **kwargs):
         super().__init__()
         self.cfg_coef = cfg_coef
@@ -211,11 +211,11 @@ class BeatmapLMModel(StreamingModule):
         self._fsdp: tp.Optional[nn.Module]
         self.__dict__['_fsdp'] = None
 
-        self.attn_mask_for_sa = self.get_mask_transfer_lm(causal = True)
-        self.attn_mask_for_ca = self.get_mask_transfer_lm(causal = False)
+        self.attn_mask_for_sa = self.get_mask_transfer_lm(causal = True, autocast = autocast)
+        self.attn_mask_for_ca = self.get_mask_transfer_lm(causal = False, autocast = autocast)
         
         self.representation_model = None
-    def get_mask_transfer_lm(self, causal):
+    def get_mask_transfer_lm(self, causal, autocast: bool = True) -> tp.Optional[torch.Tensor]:
         # N = self.position_size
         # query_length = query.shape[1]
         # if self.block_self_attention:
@@ -295,6 +295,8 @@ class BeatmapLMModel(StreamingModule):
         zero_tensor = torch.full((1,), 0.0, device = 'cuda', dtype = torch.float16)
         neg_inf_tensor = torch.full((1,), float('-inf'), device = 'cuda', dtype = torch.float16)
         attn_mask = torch.where(mask, zero_tensor, neg_inf_tensor).reshape(1, 1, query_len, key_len)
+        if not autocast:
+            attn_mask = attn_mask.to(dtype=torch.float32)
         return attn_mask
 
     def _init_weights(self, weight_init: tp.Optional[str], depthwise_init: tp.Optional[str], zero_bias_init: bool):
