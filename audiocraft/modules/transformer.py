@@ -889,7 +889,7 @@ class StreamingTransformer(StreamingModule):
                 pos_emb = pos_emb.repeat_interleave(self.position_size, dim=1)
             x = x + self.positional_scale * pos_emb
         
-        if self.block_self_attention:
+        if self.block_self_attention and self.rope_xy is None:
             indices = torch.arange(self.position_size, device=x.device).unsqueeze(0).repeat(B, 1)
             local_pos_emb = self.local_pos_embedding(indices)
             local_pos_emb = local_pos_emb.repeat(1, T, 1)
