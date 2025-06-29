@@ -24,6 +24,7 @@ from xformers import ops
 
 from .rope import RotaryEmbedding
 from .rope_ca import RotaryEmbeddingCrossAttention
+from .rope_xy import compute_axial_cis, apply_rotary_emb
 from .streaming import StreamingModule
 from xformers.ops import LowerTriangularMask
 
@@ -213,7 +214,7 @@ class StreamingMultiheadAttention(StreamingModule):
     def __init__(self, embed_dim: int, num_heads: int, dropout: float = 0.0, bias: bool = True,
                  causal: bool = False, past_context: tp.Optional[int] = None, custom: bool = False,
                  memory_efficient: bool = False, attention_as_float32: bool = False,
-                 rope: tp.Optional[RotaryEmbedding] = None, rope_ca: tp.Optional[RotaryEmbeddingCrossAttention] = None, cross_attention: bool = False,
+                 rope: tp.Optional[RotaryEmbedding] = None, rope_ca: tp.Optional[RotaryEmbeddingCrossAttention] = None, rope_xy: tp.Optional[torch.Tensor] = None, cross_attention: bool = False,
                  safe_streaming: bool = True, qk_layer_norm: bool = False, kv_repeat: int = 1,
                  use_lora: bool = False, lora_r: int = 8, lora_alpha: int = 16, 
                  position_size: int = 12, pad_kv: bool = False,
@@ -230,6 +231,7 @@ class StreamingMultiheadAttention(StreamingModule):
         self.attention_as_float32 = attention_as_float32
         self.rope = rope
         self.rope_ca = rope_ca
+        self.rope_xy = rope_xy
         self.cross_attention = cross_attention
         self.safe_streaming = safe_streaming
         self.num_heads = num_heads
@@ -489,6 +491,8 @@ class StreamingMultiheadAttention(StreamingModule):
                     q, k = [rearrange(x, f"b t (h d) -> {layout}", h=self.num_heads) for x in [q, k]]
                 if self.rope:
                     q, k = self._apply_rope(q, k)
+                if self.rope_xy is not None:
+                    q, k=apply_rotary_emb(q,k,freqs_cis=self.rope_xy)
                 k, v = self._complete_kv(k, v)
                 if self.kv_repeat > 1:
                     k = expand_repeated_kv(k, self.kv_repeat, self.memory_efficient)
@@ -625,7 +629,7 @@ class StreamingTransformerLayer(nn.TransformerEncoderLayer):
                  memory_efficient: bool = False, attention_as_float32: bool = False,
                  qk_layer_norm: bool = False, qk_layer_norm_cross: bool = False,
                  cross_attention: bool = False, layer_scale: tp.Optional[float] = None,
-                 rope: tp.Optional[RotaryEmbedding] = None, rope_ca: tp.Optional[RotaryEmbeddingCrossAttention] = None, attention_dropout: tp.Optional[float] = None,
+                 rope: tp.Optional[RotaryEmbedding] = None, rope_ca: tp.Optional[RotaryEmbeddingCrossAttention] = None, rope_xy: tp.Optional[torch.Tensor] = None, attention_dropout: tp.Optional[float] = None,
                  kv_repeat: int = 1, norm: str = 'layer_norm', position_size: int = 12,
                  device=None, dtype=None, pad_kv: bool = False, use_swiglu_ffn: bool = False, **kwargs):
         super().__init__(d_model, num_heads, dim_feedforward, dropout,
@@ -645,7 +649,7 @@ class StreamingTransformerLayer(nn.TransformerEncoderLayer):
 
         self.self_attn: StreamingMultiheadAttention = StreamingMultiheadAttention(
             causal=causal, past_context=past_context, rope=rope, qk_layer_norm=qk_layer_norm,
-            kv_repeat=kv_repeat, position_size = position_size, **blockwise_attention_kwargs, **lora_kwargs, **attn_kwargs, **factory_kwargs)  # type: ignore
+            kv_repeat=kv_repeat, position_size = position_size, rope_xy = rope_xy, **blockwise_attention_kwargs, **lora_kwargs, **attn_kwargs, **factory_kwargs)  # type: ignore
         # Redefine feedforward layers to expose bias parameter
         self.linear1 = nn.Linear(d_model, dim_feedforward, bias=bias_ff, **factory_kwargs)
         self.linear2 = nn.Linear(dim_feedforward, d_model, bias=bias_ff, **factory_kwargs)
@@ -678,7 +682,7 @@ class StreamingTransformerLayer(nn.TransformerEncoderLayer):
             cross_attention = True
         if cross_attention:
             self.cross_attention = StreamingMultiheadAttention(
-                cross_attention=True, rope_ca=rope_ca, qk_layer_norm=qk_layer_norm_cross, **blockwise_attention_kwargs,
+                cross_attention=True, rope_ca=rope_ca, rope_xy=rope_xy, qk_layer_norm=qk_layer_norm_cross, **blockwise_attention_kwargs,
                 **attn_kwargs, **factory_kwargs)
             # Norm and dropout
             self.dropout_cross = nn.Dropout(dropout)
@@ -777,7 +781,7 @@ class StreamingTransformer(StreamingModule):
                  causal: bool = False, past_context: tp.Optional[int] = None,
                  custom: bool = False, memory_efficient: bool = False, attention_as_float32: bool = False,
                  cross_attention: bool = False, layer_scale: tp.Optional[float] = None,
-                 positional_embedding: str = 'sin', positional_embedding_ca: tp.Optional[int] = None,  max_period: float = 10_000, positional_scale: float = 1.,
+                 positional_embedding: str = 'sin', positional_embedding_ca: tp.Optional[int] = None, positional_embedding_xy: tp.Optional[int] = None,  max_period: float = 10_000, positional_scale: float = 1.,
                  xpos: bool = False, lr: tp.Optional[float] = None, weight_decay: tp.Optional[float] = None,
                  layer_class: tp.Type[StreamingTransformerLayer] = StreamingTransformerLayer,
                  checkpointing: str = 'none', position_size: int = 12, block_self_attention: bool = False, unique_steps: int = 9, device=None, dtype=None, **kwargs):
@@ -808,6 +812,9 @@ class StreamingTransformer(StreamingModule):
             unique_steps = unique_steps
             self.rope_ca = RotaryEmbeddingCrossAttention(d_model // num_heads, max_period=max_period,
                                         xpos=xpos, scale=positional_scale, shared_steps=shared_steps, unique_steps=unique_steps, device=device)
+        self.rope_xy = None
+        if positional_embedding_xy in ['rope']:
+            self.rope_xy = compute_axial_cis(d_model // num_heads, theta=10000, normalize=64).to(device)
         self.checkpointing = checkpointing
 
         assert checkpointing in ['none', 'torch', 'xformers_default', 'xformers_mm']
@@ -823,7 +830,7 @@ class StreamingTransformer(StreamingModule):
                     dropout=dropout, bias_ff=bias_ff, bias_attn=bias_attn,
                     causal=causal, past_context=past_context, custom=custom,
                     memory_efficient=memory_efficient, attention_as_float32=attention_as_float32,
-                    cross_attention=cross_attention, layer_scale=layer_scale, rope=self.rope, rope_ca=self.rope_ca,
+                    cross_attention=cross_attention, layer_scale=layer_scale, rope=self.rope, rope_ca=self.rope_ca, rope_xy=self.rope_xy,
                     device=device, dtype=dtype, position_size = position_size, **kwargs))
 
         if self.checkpointing != 'none':

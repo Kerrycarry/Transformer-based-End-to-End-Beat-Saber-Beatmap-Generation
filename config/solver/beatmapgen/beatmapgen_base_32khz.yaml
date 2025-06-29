@@ -121,7 +121,8 @@ beatmapgen_lm:
     lora_r: 16
     lora_alpha: 16
   positional_embedding: sin
-  positional_embedding_ca: null # rope or None
+  positional_embedding_ca: null # rope or null
+  positional_embedding_xy: null # rope or null
   qk_layer_norm: false
   qk_layer_norm_cross: false
   norm: layer_norm
