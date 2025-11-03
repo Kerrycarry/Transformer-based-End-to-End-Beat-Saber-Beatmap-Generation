@@ -453,7 +453,7 @@ class BeatmapLMModel(StreamingModule):
             self, codes: torch.Tensor,
             beatmap: torch.Tensor,
             difficulty: torch.Tensor,
-            idx_to_mask_list: list,
+            idx_to_mask: tp.Optional[torch.Tensor],
             
             stage: int = -1,
             keep_only_valid_steps: bool = True):
@@ -491,8 +491,7 @@ class BeatmapLMModel(StreamingModule):
             beatmap_autoregressive_input = beatmap[:,:-1].view(B, -1) # [B, (S-1)*P]
             input_ = self.beatmap_emb(beatmap_autoregressive_input) # [B, (S-1)*P, dim]
             input_ = torch.cat((self.difficulty_emb(difficulty).reshape(B, self.position_size, -1), input_), dim=1) #[B, S*P, dim]
-            if self.use_mask_prediction and idx_to_mask_list:
-                idx_to_mask = torch.cat(idx_to_mask_list, dim=0)
+            if self.use_mask_prediction:
                 beatmap_mask_input = beatmap.view(B, -1)
                 mask_input = self.beatmap_emb_mask(beatmap_mask_input)
                 mask_input[:, idx_to_mask, :] = self.mask_embed(
@@ -621,8 +620,12 @@ class BeatmapLMModel(StreamingModule):
                     cross_attention_src = cross_attention_input[:, index]
                 else:
                     cross_attention_src = cross_attention_input
+                if self.use_mask_prediction:
+                    mask_input = input + self.mask_embed(torch.tensor(0, device=device, dtype=torch.int)).expand(B, self.position_size, -1)
+                else:
+                    mask_input = input
                 next_token, logit = self._sample_next_token(
-                    input, cross_attention_src, unconditional_state, use_sampling, temp, top_k, top_p,
+                    mask_input, cross_attention_src, unconditional_state, use_sampling, temp, top_k, top_p,
                     cfg_coef=cfg_coef, two_step_cfg=two_step_cfg)
                 next_token = next_token.view(B, -1)
                 if self.use_mask_prediction:

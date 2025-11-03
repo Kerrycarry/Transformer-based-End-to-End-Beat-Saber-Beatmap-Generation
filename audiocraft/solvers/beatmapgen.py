@@ -305,7 +305,7 @@ class BeatmapGenSolver(base.StandardSolver):
         return state
 
     def _compute_cross_entropy(
-        self, logits: torch.Tensor, targets: torch.Tensor, idx_to_mask_list: list
+        self, logits: torch.Tensor, targets: torch.Tensor, idx_to_mask: tp.Optional[torch.Tensor]
     ) -> tp.Tuple[torch.Tensor, tp.List[torch.Tensor]]:
         """Compute cross entropy between multi-codebook targets and model's logits.
         The cross entropy is computed per codebook to provide codebook-level cross entropy.
@@ -323,8 +323,7 @@ class BeatmapGenSolver(base.StandardSolver):
         B, S, P = targets.shape
         assert logits.shape[:-1] == targets.view(B, -1).shape
         targets = targets.view(B, -1)
-        if idx_to_mask_list:
-            idx_to_mask = torch.cat(idx_to_mask_list, dim=0)
+        if idx_to_mask is not None:
             targets = targets[:, idx_to_mask]
             logits = logits[:, idx_to_mask]
         logits_k = logits.contiguous().view(-1,logits.size(-1))
@@ -475,18 +474,19 @@ class BeatmapGenSolver(base.StandardSolver):
         B = beatmap_tokens.shape[0]
         SN = beatmap_tokens.shape[1]
         position_size = beatmap_tokens.shape[2]
-        n_tokens_mask = random.randint(0, position_size-1)
-        
+        n_tokens_mask = random.randint(1, position_size)
+        print(f"n_tokens_mask={n_tokens_mask}")
         idx_to_mask = []
         cur_l = 0
         for si in range(SN):
-            if n_tokens_mask != 0:
-                idx_to_mask_si = torch.multinomial(
-                    torch.ones(position_size), n_tokens_mask, replacement=False
-                ).to(beatmap_tokens.device)
-                idx_to_mask_si += cur_l
-                idx_to_mask.append(idx_to_mask_si)
-                cur_l += position_size
+            idx_to_mask_si = torch.multinomial(
+                torch.ones(position_size), n_tokens_mask, replacement=False
+            ).to(beatmap_tokens.device)
+            idx_to_mask_si += cur_l
+            idx_to_mask.append(idx_to_mask_si)
+            cur_l += position_size
+        
+        idx_to_mask = torch.cat(idx_to_mask, dim=0)
         
         return idx_to_mask
 
@@ -506,14 +506,14 @@ class BeatmapGenSolver(base.StandardSolver):
         # assert (beatmap_tokens <= self.model.token_id_size).all(), f"beatmap_tokens contains invalid class indices! Max target: {beatmap_tokens.max()}"
         
         if self.model.use_mask_prediction:
-            idx_to_mask_list = self.get_mask(beatmap_tokens=beatmap_tokens)
+            idx_to_mask = self.get_mask(beatmap_tokens=beatmap_tokens)
         else:
-            idx_to_mask_list = []
+            idx_to_mask = None
 
         with self.autocast:
-            logits = self.model.compute_predictions(audio_tokens, beatmap_tokens, difficulty, idx_to_mask_list)  # type: ignore # [B, S, P, card]
+            logits = self.model.compute_predictions(audio_tokens, beatmap_tokens, difficulty, idx_to_mask)  # type: ignore # [B, S, P, card]
             # ce, rhythm_loss = self._compute_cross_entropy(logits, beatmap_tokens)
-            ce = self._compute_cross_entropy(logits, beatmap_tokens, idx_to_mask_list)
+            ce = self._compute_cross_entropy(logits, beatmap_tokens, idx_to_mask)
             # loss = ce + rhythm_loss
             # ce = self._compute_cross_entropy(logits, beatmap_tokens)
             loss = ce
