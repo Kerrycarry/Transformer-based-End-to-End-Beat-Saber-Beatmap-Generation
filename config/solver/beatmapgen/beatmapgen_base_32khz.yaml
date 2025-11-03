@@ -130,6 +130,8 @@ beatmapgen_lm:
   use_swiglu_ffn: false
   dropout: 0.
   attention_dropout: null
+  use_mask_prediction: false
+  mask_schedule: [1, 1, 2, 3, 5]
 
 transformer_lm:
   lr: null # transfer learning lr

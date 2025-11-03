@@ -153,6 +153,7 @@ class BeatmapLMModel(StreamingModule):
                  use_mask: bool = False, lora_kwargs: dict = {}, blockwise_attention_kwargs: dict = {}, 
                  transfer_efficient_backend: str = 'torch', representation_dim: int = 128, representation: str = "spectrogram", segment_duration: int = 512, 
                  ca_window_size: int = 0, sa_window_size: int = 4, autocast: bool = False,
+                 mask_schedule: tp.List[int] = [1, 1, 2, 3, 5], use_mask_prediction: bool = False,
                  **kwargs):
         super().__init__()
         self.cfg_coef = cfg_coef
@@ -173,6 +174,7 @@ class BeatmapLMModel(StreamingModule):
         self.token_id_size = token_id_size + 1
         self.position_size = position_size
         self.use_mask = use_mask
+        self.use_mask_prediction = use_mask_prediction
         self.transfer_efficient_backend = transfer_efficient_backend
         self.representation = representation
         self.segment_duration = segment_duration
@@ -186,6 +188,9 @@ class BeatmapLMModel(StreamingModule):
             self.difficulty_emb = ScaledEmbedding(self.difficulty_num, transfer_dim)
             self.beatmap_emb = nn.ModuleList([ScaledEmbedding(self.token_id_size, transfer_dim) for _ in range(self.position_size)])
             self.linear_out = nn.ModuleList([nn.Linear(transfer_dim, self.token_id_size, bias=bias_proj) for _ in range(self.position_size)])
+        if self.use_mask_prediction:
+            self.beatmap_emb_mask = ScaledEmbedding(self.token_id_size, transfer_dim)
+            self.mask_embed = nn.Embedding(1, transfer_dim)
         self.transfer_dim = transfer_dim
         self.local_cross_attention = blockwise_attention_kwargs['local_cross_attention']
         self.local_self_attention = blockwise_attention_kwargs['local_self_attention']
@@ -215,6 +220,7 @@ class BeatmapLMModel(StreamingModule):
         self.attn_mask_for_ca = self.get_mask_transfer_lm(causal = False, autocast = autocast)
         
         self.representation_model = None
+        self.mask_schedule = mask_schedule
     def get_mask_transfer_lm(self, causal, autocast: bool = True) -> tp.Optional[torch.Tensor]:
         # N = self.position_size
         # query_length = query.shape[1]
@@ -329,6 +335,11 @@ class BeatmapLMModel(StreamingModule):
 
         if self.block_self_attention:
             init_layer(self.transfer_lm.local_pos_embedding, method=weight_init, init_depth=None, zero_bias_init=zero_bias_init)
+        if self.use_mask_prediction:
+            init_layer(self.beatmap_emb_mask, method=weight_init, init_depth=None, zero_bias_init=zero_bias_init)
+            init_std = math.sqrt(1 / self.transfer_dim / 3)
+            nn.init.trunc_normal_(self.mask_embed.weight.data, mean=0, std=init_std)
+            
 
         # transformer_to_initialize = [self.transformer.layers, self.transfer_lm.layers]
         transformer_to_initialize = [self.transfer_lm.layers]
@@ -442,6 +453,7 @@ class BeatmapLMModel(StreamingModule):
             self, codes: torch.Tensor,
             beatmap: torch.Tensor,
             difficulty: torch.Tensor,
+            idx_to_mask_list: list,
             
             stage: int = -1,
             keep_only_valid_steps: bool = True):
@@ -476,9 +488,17 @@ class BeatmapLMModel(StreamingModule):
         assert S == self.segment_duration, "segment duration should be the same as the input"
         cross_attention_input = cross_attention_input.view(B, -1, D)
         if self.block_self_attention:
-            beatmap = beatmap[:,:-1].view(B, -1) # [B, (S-1)*P]
-            input_ = self.beatmap_emb(beatmap) # [B, (S-1)*P, dim]
+            beatmap_autoregressive_input = beatmap[:,:-1].view(B, -1) # [B, (S-1)*P]
+            input_ = self.beatmap_emb(beatmap_autoregressive_input) # [B, (S-1)*P, dim]
             input_ = torch.cat((self.difficulty_emb(difficulty).reshape(B, self.position_size, -1), input_), dim=1) #[B, S*P, dim]
+            if self.use_mask_prediction and idx_to_mask_list:
+                idx_to_mask = torch.cat(idx_to_mask_list, dim=0)
+                beatmap_mask_input = beatmap.view(B, -1)
+                mask_input = self.beatmap_emb_mask(beatmap_mask_input)
+                mask_input[:, idx_to_mask, :] = self.mask_embed(
+                    torch.tensor(0, device=beatmap.device, dtype=torch.long)
+                )
+                input_ += mask_input
         else:
             beatmap = beatmap[:, :-1] # [B, (S-1), P]
             input_ = sum([self.beatmap_emb[p](beatmap[:, :, p]) for p in range(self.position_size)]) # [B, (S-1), dim]
@@ -547,7 +567,7 @@ class BeatmapLMModel(StreamingModule):
         else:
             next_token = torch.argmax(logit, dim=-1, keepdim=True)
 
-        return next_token
+        return next_token, logit
 
 
     @torch.no_grad()
@@ -584,7 +604,7 @@ class BeatmapLMModel(StreamingModule):
             gen_sequence_len = gen_sequence.shape[-1]  # gen_sequence shape is [B, (S+1) * P]
             for offset in range(start_offset_sequence, gen_sequence_len, self.position_size):
                 # get current sequence (note that the streaming API is providing the caching over previous offsets)
-                curr_sequence = gen_sequence[:, prev_offset:offset]
+                curr_sequence = gen_sequence[:, prev_offset:offset] # [B, 12]
                 # sample next token from the model, next token and curr_sequence shape is [1]
                 if offset == self.position_size:
                     if self.block_self_attention:
@@ -601,10 +621,53 @@ class BeatmapLMModel(StreamingModule):
                     cross_attention_src = cross_attention_input[:, index]
                 else:
                     cross_attention_src = cross_attention_input
-                next_token = self._sample_next_token(
+                next_token, logit = self._sample_next_token(
                     input, cross_attention_src, unconditional_state, use_sampling, temp, top_k, top_p,
                     cfg_coef=cfg_coef, two_step_cfg=two_step_cfg)
                 next_token = next_token.view(B, -1)
+                if self.use_mask_prediction:
+                    n_steps = len(self.mask_schedule)
+                    n_tokens_mask = sum(self.mask_schedule[1:])
+                    probs = torch.nn.functional.softmax(logit, dim=-1)
+                    probs_sampled = torch.gather(probs, 2, next_token.unsqueeze(-1)).squeeze(-1)
+                    idx_to_mask = torch.argsort(probs_sampled, dim=-1)[:, :n_tokens_mask]
+
+                    for step in range(1, n_steps):
+                        mask_input = self.beatmap_emb_mask(next_token)
+                        mask_input = torch.scatter(
+                            mask_input,
+                            1,
+                            idx_to_mask.unsqueeze(-1).expand(-1, -1, self.transfer_dim),
+                            self.mask_embed(
+                                torch.tensor(0, device=device, dtype=torch.int)
+                            ).expand(B, self.position_size, -1),
+                        )
+                        mask_input += input
+                        # 重置kv cache状态到第一次推理前
+                        if offset == self.position_size:
+                            self.set_streaming_state({})
+                        else:
+                            state = self.get_streaming_state()
+                            for key, value in state.items():
+                                if len(value.shape) == 4:
+                                    state[key] = value[:, :-self.position_size]
+                            state['transfer_lm.offsets'] -= 1
+                            self.set_streaming_state(state)
+                        next_token_mask, logit_mask = self._sample_next_token(
+                            mask_input, cross_attention_src, unconditional_state, use_sampling, temp, top_k, top_p,
+                            cfg_coef=cfg_coef, two_step_cfg=two_step_cfg)
+                        next_token_mask = next_token_mask.view(B, -1)
+                        next_token[torch.arange(B).unsqueeze(1), idx_to_mask] = next_token_mask[
+                            torch.arange(B).unsqueeze(1), idx_to_mask
+                        ]
+                        if step != n_steps - 1:
+                            n_tokens_mask = sum(self.mask_schedule[step + 1 :])
+                            probs = torch.softmax(logit_mask, dim=-1)
+                            probs_sampled = torch.gather(probs, 2, next_token.unsqueeze(-1)).squeeze(-1)
+                            probs_sampled_masked = probs_sampled[torch.arange(B).unsqueeze(1), idx_to_mask]
+                            idx_sampled_sorted = torch.argsort(probs_sampled_masked, dim=-1)[:, :n_tokens_mask]
+                            idx_to_mask = idx_to_mask[torch.arange(B).unsqueeze(1), idx_sampled_sorted]
+
                 # ensure we don't overwrite prompt tokens, we only write over unknown tokens
                 # (then mask tokens should be left as is as well, which is correct)
                 assert (gen_sequence[:, offset:offset+self.position_size] == unknown_token).any()
@@ -622,7 +685,7 @@ class BeatmapLMModel(StreamingModule):
                             length = value.shape[1]
                             assert length % self.position_size == 0
                             if length > self.sa_window_size * self.position_size:
-                                state[key] = value[:, self.position_size:]
+                                state[key] = value[:, -(self.sa_window_size * self.position_size):]
                     self.set_streaming_state(state)
         unconditional_state.clear()
         # ensure sequence has been entirely filled
