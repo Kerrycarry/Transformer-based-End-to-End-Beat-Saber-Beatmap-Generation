@@ -494,9 +494,12 @@ class BeatmapLMModel(StreamingModule):
             if self.use_mask_prediction:
                 beatmap_mask_input = beatmap.view(B, -1)
                 mask_input = self.beatmap_emb_mask(beatmap_mask_input)
-                mask_input[:, idx_to_mask, :] = self.mask_embed(
-                    torch.tensor(0, device=beatmap.device, dtype=torch.long)
-                )
+                n_tokens_mask = idx_to_mask.shape[1]
+                batch_idx = torch.arange(B, device=mask_input.device).unsqueeze(1).expand(-1, n_tokens_mask)
+                mask_values = self.mask_embed(
+                    torch.zeros(B * n_tokens_mask, device=mask_input.device, dtype=torch.long)
+                ).view(B, n_tokens_mask, D)
+                mask_input[batch_idx, idx_to_mask, :] = mask_values
                 input_ += mask_input
         else:
             beatmap = beatmap[:, :-1] # [B, (S-1), P]

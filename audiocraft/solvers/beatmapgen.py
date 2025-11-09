@@ -324,8 +324,10 @@ class BeatmapGenSolver(base.StandardSolver):
         assert logits.shape[:-1] == targets.view(B, -1).shape
         targets = targets.view(B, -1)
         if idx_to_mask is not None:
-            targets = targets[:, idx_to_mask]
-            logits = logits[:, idx_to_mask]
+            n_tokens_mask = idx_to_mask.shape[1]
+            batch_idx = torch.arange(B, device=targets.device).unsqueeze(1).expand(-1, n_tokens_mask)
+            targets = targets[batch_idx, idx_to_mask]
+            logits = logits[batch_idx, idx_to_mask, :]
         logits_k = logits.contiguous().view(-1,logits.size(-1))
         targets_k = targets.view(-1)
         ce = F.cross_entropy(logits_k, targets_k)
@@ -475,19 +477,18 @@ class BeatmapGenSolver(base.StandardSolver):
         SN = beatmap_tokens.shape[1]
         position_size = beatmap_tokens.shape[2]
         n_tokens_mask = random.randint(1, position_size)
-        print(f"n_tokens_mask={n_tokens_mask}")
         idx_to_mask = []
-        cur_l = 0
-        for si in range(SN):
+        idx_to_mask_batch = torch.multinomial(
+                torch.ones(SN), B, replacement=False
+            ).to(beatmap_tokens.device)
+        for b in range(B):
             idx_to_mask_si = torch.multinomial(
                 torch.ones(position_size), n_tokens_mask, replacement=False
             ).to(beatmap_tokens.device)
-            idx_to_mask_si += cur_l
+            idx_to_mask_si += idx_to_mask_batch[b] * position_size
             idx_to_mask.append(idx_to_mask_si)
-            cur_l += position_size
         
-        idx_to_mask = torch.cat(idx_to_mask, dim=0)
-        
+        idx_to_mask = torch.stack(idx_to_mask)
         return idx_to_mask
 
     def run_step(self, idx: int, batch: tp.Tuple[tp.List[SegmentInfo], tp.List[torch.Tensor], torch.Tensor], metrics: dict) -> dict:
