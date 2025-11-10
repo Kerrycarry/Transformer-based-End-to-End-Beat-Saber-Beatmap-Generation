@@ -673,6 +673,23 @@ class BeatmapLMModel(StreamingModule):
                             probs_sampled_masked = probs_sampled[torch.arange(B).unsqueeze(1), idx_to_mask]
                             idx_sampled_sorted = torch.argsort(probs_sampled_masked, dim=-1)[:, :n_tokens_mask]
                             idx_to_mask = idx_to_mask[torch.arange(B).unsqueeze(1), idx_sampled_sorted]
+                        else:
+                            mask_input = self.beatmap_emb_mask(next_token)
+                            mask_input += input
+                            if offset == self.position_size:
+                                self.set_streaming_state({})
+                            else:
+                                state = self.get_streaming_state()
+                                for key, value in state.items():
+                                    if len(value.shape) == 4:
+                                        state[key] = value[:, :-self.position_size]
+                                state['transfer_lm.offsets'] -= 1
+                                self.set_streaming_state(state)
+                            self._sample_next_token(
+                                mask_input, cross_attention_src, unconditional_state, use_sampling, temp, top_k, top_p,
+                                cfg_coef=cfg_coef, two_step_cfg=two_step_cfg)
+
+                        
 
                 # ensure we don't overwrite prompt tokens, we only write over unknown tokens
                 # (then mask tokens should be left as is as well, which is correct)
