@@ -132,6 +132,7 @@ beatmapgen_lm:
   attention_dropout: null
   use_mask_prediction: false
   mask_schedule: [1, 1, 2, 3, 5]
+  use_abstract_position: False
 
 transformer_lm:
   lr: null # transfer learning lr
