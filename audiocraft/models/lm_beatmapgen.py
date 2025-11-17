@@ -153,7 +153,7 @@ class BeatmapLMModel(StreamingModule):
                  use_mask: bool = False, lora_kwargs: dict = {}, blockwise_attention_kwargs: dict = {}, 
                  transfer_efficient_backend: str = 'torch', representation_dim: int = 128, representation: str = "spectrogram", segment_duration: int = 512, 
                  ca_window_size: int = 0, sa_window_size: int = 4, autocast: bool = False,
-                 mask_schedule: tp.List[int] = [1, 1, 2, 3, 5], use_mask_prediction: bool = False, use_abstract_position: bool = False, 
+                 mask_schedule: tp.List[int] = [1, 1, 2, 3, 5], use_mask_prediction: bool = False, use_abstract_position: bool = False, use_abstract_position_2: bool = False, 
                  **kwargs):
         super().__init__()
         self.cfg_coef = cfg_coef
@@ -209,6 +209,15 @@ class BeatmapLMModel(StreamingModule):
             norm=norm, norm_first=norm_first, position_size = position_size, blockwise_attention_kwargs = blockwise_attention_kwargs, block_self_attention = self.block_self_attention, unique_steps=self.ca_window_size*2+1, **kwargs)
         representation_dim = self.dim if self.representation == "musicgen" else representation_dim
         self.linear_transfer = nn.Linear(representation_dim, self.transfer_dim, bias=bias_proj)
+        self.use_abstract_position = use_abstract_position
+        self.use_abstract_position_2 = use_abstract_position_2
+        if self.use_abstract_position_2:
+            self.color_emb = ScaledEmbedding(2, transfer_dim)
+            self.direction_emb = ScaledEmbedding(9, transfer_dim)
+            self.empty_emb = ScaledEmbedding(1, transfer_dim)
+            color_note_map = {(0, 0): 0, (0, 1): 1, (0, 2): 2, (0, 3): 3, (0, 4): 4, (0, 5): 5, (0, 6): 6, (0, 7): 7, (0, 8): 8, (1, 0): 9, (1, 1): 10, (1, 2): 11, (1, 3): 12, (1, 4): 13, (1, 5): 14, (1, 6): 15, (1, 7): 16, (1, 8): 17}
+            self.color_note_map_reversed = {value:key for key, value in color_note_map.items()}
+
         self._init_weights(weight_init, depthwise_init, zero_bias_init)
         if self.use_mask:
             self.mask_token_embedding = nn.Parameter(torch.empty((self.dim,)))
@@ -221,7 +230,6 @@ class BeatmapLMModel(StreamingModule):
         
         self.representation_model = None
         self.mask_schedule = mask_schedule
-        self.use_abstract_position = use_abstract_position
 
     def get_mask_transfer_lm(self, causal, autocast: bool = True) -> tp.Optional[torch.Tensor]:
         # N = self.position_size
@@ -361,6 +369,10 @@ class BeatmapLMModel(StreamingModule):
         else:
             for linear in self.linear_out:
                 init_layer(linear, method=weight_init, init_depth=None, zero_bias_init=zero_bias_init)
+        if self.use_abstract_position_2:
+            init_layer(self.color_emb, method=weight_init, init_depth=None, zero_bias_init=zero_bias_init)
+            init_layer(self.direction_emb, method=weight_init, init_depth=None, zero_bias_init=zero_bias_init)
+            init_layer(self.empty_emb, method=weight_init, init_depth=None, zero_bias_init=zero_bias_init)
             
     @property
     def special_token_id(self) -> int:
@@ -457,6 +469,24 @@ class BeatmapLMModel(StreamingModule):
             index = beatmap != (self.token_id_size - 1)
             abstract_pos_emb = beatmap_emb.weight[self.token_id_size-1]   # 或 beatmap_emb(torch.tensor(self.token_id_size))
             res = res + abstract_pos_emb * index.unsqueeze(-1)
+        if self.use_abstract_position_2:
+            empty_mask = (beatmap == (self.token_id_size - 1))    # True 表示 empty
+            note_mask = ~empty_mask
+            if note_mask.any():
+                note_ids = beatmap[note_mask].tolist()
+                colors = []
+                directions = []
+                for tid in note_ids:
+                    c, d = self.color_note_map_reversed[tid]
+                    colors.append(c)
+                    directions.append(d)
+                colors = torch.tensor(colors, device=beatmap.device, dtype=torch.long)
+                directions = torch.tensor(directions, device=beatmap.device, dtype=torch.long)
+                note_emb = self.color_emb(colors) + self.direction_emb(directions)
+                res[note_mask] += note_emb
+            if empty_mask.any():
+                empty_e = self.empty_emb(torch.zeros(empty_mask.sum(), device=beatmap.device, dtype=torch.long))
+                res[empty_mask] += empty_e
         return res
 
     def compute_predictions(
