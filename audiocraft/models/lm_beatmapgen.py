@@ -464,12 +464,14 @@ class BeatmapLMModel(StreamingModule):
         return gen_representation
     
     def get_beatmap_embedding(self, beatmap_emb, beatmap):
-        res = beatmap_emb(beatmap)
-        if self.use_abstract_position:
-            index = beatmap != (self.token_id_size - 1)
-            abstract_pos_emb = beatmap_emb.weight[self.token_id_size-1]   # 或 beatmap_emb(torch.tensor(self.token_id_size))
-            res = res + abstract_pos_emb * index.unsqueeze(-1)
-        if self.use_abstract_position_2:
+        if not self.use_abstract_position_2:
+            res = beatmap_emb(beatmap)
+            if self.use_abstract_position:
+                index = beatmap != (self.token_id_size - 1)
+                abstract_pos_emb = beatmap_emb.weight[self.token_id_size-1]   # 或 beatmap_emb(torch.tensor(self.token_id_size))
+                res = res + abstract_pos_emb * index.unsqueeze(-1)
+        else:
+            res = torch.zeros(size=[beatmap.shape[0], beatmap.shape[1], self.transfer_dim], device = beatmap.device)
             empty_mask = (beatmap == (self.token_id_size - 1))    # True 表示 empty
             note_mask = ~empty_mask
             if note_mask.any():
