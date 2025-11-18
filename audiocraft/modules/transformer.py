@@ -784,7 +784,7 @@ class StreamingTransformer(StreamingModule):
                  positional_embedding: str = 'sin', positional_embedding_ca: tp.Optional[int] = None, positional_embedding_xy: tp.Optional[int] = None,  max_period: float = 10_000, positional_scale: float = 1.,
                  xpos: bool = False, lr: tp.Optional[float] = None, weight_decay: tp.Optional[float] = None,
                  layer_class: tp.Type[StreamingTransformerLayer] = StreamingTransformerLayer,
-                 checkpointing: str = 'none', position_size: int = 12, block_self_attention: bool = False, unique_steps: int = 9, device=None, dtype=None, **kwargs):
+                 checkpointing: str = 'none', position_size: int = 12, block_self_attention: bool = False, unique_steps: int = 9, token_decomposition: bool = False, device=None, dtype=None, **kwargs):
         super().__init__()
         assert d_model % num_heads == 0
 
@@ -796,6 +796,7 @@ class StreamingTransformer(StreamingModule):
 
         self.position_size = position_size
         self.block_self_attention = block_self_attention
+        self.token_decomposition = token_decomposition
         if block_self_attention:
             self.local_pos_embedding = nn.Embedding(position_size, d_model)
         assert positional_embedding in ['sin', 'rope', 'sin_rope']
@@ -889,7 +890,7 @@ class StreamingTransformer(StreamingModule):
                 pos_emb = pos_emb.repeat_interleave(self.position_size, dim=1)
             x = x + self.positional_scale * pos_emb
         
-        if self.block_self_attention and self.rope_xy is None:
+        if self.block_self_attention and self.rope_xy is None and not self.token_decomposition:
             indices = torch.arange(self.position_size, device=x.device).unsqueeze(0).repeat(B, 1)
             local_pos_emb = self.local_pos_embedding(indices)
             local_pos_emb = local_pos_emb.repeat(1, T, 1)

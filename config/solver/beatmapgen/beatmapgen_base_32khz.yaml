@@ -133,7 +133,7 @@ beatmapgen_lm:
   use_mask_prediction: false
   mask_schedule: [1, 1, 2, 3, 5]
   use_abstract_position: False
-  use_abstract_position_2: False
+  token_decomposition: False
 
 transformer_lm:
   lr: null # transfer learning lr
