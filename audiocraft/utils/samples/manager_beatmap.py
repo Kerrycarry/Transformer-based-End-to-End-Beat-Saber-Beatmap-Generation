@@ -215,11 +215,11 @@ class SampleManager:
                     relative_path = os.path.relpath(file_path, source_folder)
                     zipf.write(file_path, relative_path)
 
-    def add_sample(self, save_directory, audio, meta, beatmap, save_directory_zip, sample_id, write_info_switch):
+    def add_sample(self, save_directory, audio, meta, beatmap, save_directory_zip, sample_id, write_info_switch, sample_rate):
         # save audio
         if audio is not None:
             song_name = 'song'
-            audio_write(save_directory / song_name, audio, meta.sample_rate, format="ogg")
+            audio_write(save_directory / song_name, audio, sample_rate, format="ogg")
         # save beatmap json file
         processed_beatmap_json = (save_directory / meta.difficulty).with_suffix('.json')
         with open(processed_beatmap_json, 'w', encoding='utf-8') as f:
@@ -244,6 +244,9 @@ class SampleManager:
     def add_samples(self, sample_ids: list, audios: list, metas: list, epoch: int,
                     ground_truth_beatmaps: list,
                     gen_beatmaps: list,
+                    compressed_audio: list,
+                    compressed_beatmap: list,
+                    rythm_compressed_audio: list,
                     conditioning: tp.Optional[tp.List[tp.Dict[str, tp.Any]]] = None,
                     generation_args: tp.Optional[tp.Dict[str, tp.Any]] = None) -> tp.List[Sample]:
         """Adds a batch of samples.
@@ -262,14 +265,21 @@ class SampleManager:
             generation_args (dict[str, Any], optional): Dictionary of other arguments used during generation.
         """
         
-        for index, (sample_id, audio, meta, ground_truth_beatmap, gen_beatmap) in enumerate(zip(sample_ids, audios, metas, ground_truth_beatmaps, gen_beatmaps)):
+        for index, (sample_id, audio, meta, ground_truth_beatmap, gen_beatmap, each_compressed_audio, each_compressed_beatmap, each_rythm_compressed_audio) in enumerate(zip(sample_ids, audios, metas, ground_truth_beatmaps, gen_beatmaps, compressed_audio, compressed_beatmap, rythm_compressed_audio)):
             reference_path = self.base_folder / 'reference' / sample_id
             generated_path = self.base_folder / str(epoch) / sample_id
+            assert_audio_path = self.base_folder / 'assert_audio' / sample_id
+            assert_audio_rythm_path = self.base_folder / 'assert_audio_rythm' / sample_id
             reference_path_zip = self.base_folder / 'reference_zip' / sample_id
             generated_path_zip = self.base_folder / f'{epoch}_zip' / sample_id
+            assert_audio_path_zip = self.base_folder / 'assert_audio_zip' / sample_id
+            assert_audio_rythm_path_zip = self.base_folder / 'assert_audio_rythm_zip' / sample_id
             # generate every for reference
             if ground_truth_beatmap is not None:
-                self.add_sample(reference_path, audio, meta, ground_truth_beatmap, reference_path_zip, sample_id, True)
+                self.add_sample(reference_path, audio, meta, ground_truth_beatmap, reference_path_zip, sample_id, True, meta.sample_rate)
+                if each_compressed_audio is not None:
+                    self.add_sample(assert_audio_path, each_compressed_audio, meta, each_compressed_beatmap, assert_audio_path_zip, sample_id, True, 32000)
+                    self.add_sample(assert_audio_rythm_path, each_rythm_compressed_audio, meta, ground_truth_beatmap, assert_audio_rythm_path_zip, sample_id, True, 32000)
             # copy song.ogg from reference
             song_name = 'song.ogg'
             os.makedirs(generated_path, exist_ok=True)
@@ -278,7 +288,7 @@ class SampleManager:
             info_name = 'Info.dat'
             shutil.copy(reference_path / info_name, generated_path / info_name)
             # after copy these two, only need to generate beatmap dat file
-            self.add_sample(generated_path, None, meta, gen_beatmap, generated_path_zip, sample_id, False)
+            self.add_sample(generated_path, None, meta, gen_beatmap, generated_path_zip, sample_id, False, meta.sample_rate)
 
     def get_samples(self, epoch: int = -1, max_epoch: int = -1, exclude_prompted: bool = False,
                     exclude_unprompted: bool = False, exclude_conditioned: bool = False,

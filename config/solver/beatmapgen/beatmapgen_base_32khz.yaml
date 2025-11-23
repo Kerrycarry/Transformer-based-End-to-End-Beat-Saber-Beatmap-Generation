@@ -158,3 +158,5 @@ parser_pipeline:
   generate_info_version: 2 # 2,4
   audio_duration_threshold: 1000
   nps_threshold: 1
+
+assert_audio: False

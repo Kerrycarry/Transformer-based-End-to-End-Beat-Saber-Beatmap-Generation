@@ -117,8 +117,9 @@ class BeatmapGenSolver(base.StandardSolver):
         """Instantiate models and optimizer."""
         # we can potentially not use all quantizers with which the EnCodec model was trained
         # (e.g. we trained the model with quantizers dropout)
-        # self.compression_model = CompressionSolver.wrapped_model_from_checkpoint(
-        #     self.cfg, self.cfg.compression_model_checkpoint, device=self.device)
+        if self.cfg.assert_audio:
+            self.compression_model = CompressionSolver.wrapped_model_from_checkpoint(
+                self.cfg, self.cfg.compression_model_checkpoint, device=self.device)
         # assert self.compression_model.sample_rate == self.cfg.sample_rate, (
         #     f"Compression model sample rate is {self.compression_model.sample_rate} but "
         #     f"Solver sample rate is {self.cfg.sample_rate}."
@@ -617,13 +618,32 @@ class BeatmapGenSolver(base.StandardSolver):
         meta = [segment_info.meta for segment_info in segment_infos]
         bench_end = time.time()
 
+        B = resample_samples.shape[0]
+        if self.cfg.assert_audio:
+            compressed_audio = self.compression_model.decode(resample_samples, None)
+            compressed_audio = compressed_audio.squeeze(1)
+            compressed_beatmap = [self.beatmap.detokenize(gen_beatmap_token.squeeze(0), segment_info.meta.bpm) for gen_beatmap_token, segment_info in zip(beatmap_tokens, segment_infos)]
+            rythm_compressed_samples = resample_samples.scatter(
+                dim=2,
+                index=note_code_maps.unsqueeze(1).expand(-1, 4, -1),
+                value=0
+            )
+            rythm_compressed_audio = self.compression_model.decode(rythm_compressed_samples, None)
+            rythm_compressed_audio = rythm_compressed_audio.squeeze(1)
+        else:
+            compressed_audio = [None]*B
+            compressed_beatmap = [None]*B
+            rythm_compressed_audio = [None]*B
         gen_outputs = {
             'rtf': (bench_end - bench_start) / gen_duration,
             'audios': ref_audio,
             'ground_truth_beatmaps': ref_beatmap_file,
             'gen_beatmaps': gen_beatmap_file,
             'sample_ids': sample_id,
-            'metas': meta
+            'metas': meta,
+            'compressed_audio': compressed_audio,
+            'compressed_beatmap': compressed_beatmap,
+            'rythm_compressed_audio': rythm_compressed_audio,
         }   
         return gen_outputs
 
@@ -698,7 +718,7 @@ class BeatmapGenSolver(base.StandardSolver):
                     rtf = gen_unprompted_outputs.pop('rtf')
                 sample_manager.add_samples(
                     epoch=self.epoch,
-                      conditioning=hydrated_conditions, generation_args=sample_generation_params, **gen_unprompted_outputs)            
+                      conditioning=hydrated_conditions, generation_args=sample_generation_params, **gen_unprompted_outputs)
 
             metrics['rtf'] = rtf
             metrics = average(metrics)
