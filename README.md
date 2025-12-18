@@ -39,13 +39,18 @@ From a data modeling perspective, a Beat Saber beatmap can be represented as a *
 ## Dataset Visualization
 
 **Gameplay view (player perspective):**
+https://github.com/Kerrycarry/Transformer-based-End-to-End-Beat-Saber-Beatmap-Generation/blob/main/dataset_visualization/data_video1.mp4
+<!-- <video src="dataset_visualization/data_video1.mp4" controls width="600"></video> -->
 
-<video src="dataset_visualization/data_video1.mp4" controls width="600"></video>
+
+
 **[clip from youtube](https://www.youtube.com/watch?v=LlOlSWnCsQA)**
 
 **Editor view (ground-truth beatmap data):**
+https://github.com/Kerrycarry/Transformer-based-End-to-End-Beat-Saber-Beatmap-Generation/blob/main/dataset_visualization/data_video2.mp4
+<!-- <video src="dataset_visualization/data_video2.mp4" controls width="600"></video> -->
 
-<video src="dataset_visualization/data_video2.mp4" controls width="600"></video>
+
 
 ---
 
