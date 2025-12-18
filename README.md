@@ -1,89 +1,214 @@
-# AudioCraft
-![docs badge](https://github.com/facebookresearch/audiocraft/workflows/audiocraft_docs/badge.svg)
-![linter badge](https://github.com/facebookresearch/audiocraft/workflows/audiocraft_linter/badge.svg)
-![tests badge](https://github.com/facebookresearch/audiocraft/workflows/audiocraft_tests/badge.svg)
 
-AudioCraft is a PyTorch library for deep learning research on audio generation. AudioCraft contains inference and training code
-for two state-of-the-art AI generative models producing high-quality audio: AudioGen and MusicGen.
+---
 
+# Transformer-based End-to-End Beat Saber Beatmap Generation
 
-## Installation
-AudioCraft requires Python 3.9, PyTorch 2.1.0. To install AudioCraft, you can run the following:
+## Introduction
 
-```shell
-# Best to make sure you have torch installed first, in particular before installing xformers.
-# Don't run this if you already have PyTorch installed.
-python -m pip install 'torch==2.1.0'
-# You might need the following before trying to install the packages
-python -m pip install setuptools wheel
-# Then proceed to one of the following
-python -m pip install -U audiocraft  # stable release
-python -m pip install -U git+https://git@github.com/facebookresearch/audiocraft#egg=audiocraft  # bleeding edge
-python -m pip install -e .  # or if you cloned the repo locally (mandatory if you want to train).
-python -m pip install -e '.[wm]'  # if you want to train a watermarking model
+Most existing Beat Saber beatmap generation approaches are **not end-to-end**.
+Representative methods such as *DeepSaber* and *DeepSAGE* rely on multiple independently trained components, for example:
+
+* learning word or note embeddings first,
+* training separate CNN/RNN (or LSTM) models for
+  **when to place notes** and **what notes to place**.
+
+These pipelines are complex, heavily depend on prior heuristics, and often require significant manual tuning, while the final results remain limited.
+
+Unlike previous approaches, this project aims to train an end-to-end model using modern, widely adopted deep learning techniques, resulting in a simpler training pipeline and beatmaps that are visually and structurally comparable to those created by human mappers.
+
+> ⚠️ This project is still under active development and experimentation.
+> The data pipeline, baseline model forward pass, and training code are completed, while ongoing work focuses on improving generation quality beyond the baseline.
+
+---
+
+## Project Goal
+
+Given an input music track, the model automatically generates a corresponding **playable Beat Saber beatmap**.
+
+From a data modeling perspective, a Beat Saber beatmap can be represented as a **time series**:
+
+* Each time step corresponds to a **3 × 4 grid**;
+* Each grid cell is either empty or contains a note;
+* Each note has:
+
+  * **Color** (red / blue), corresponding to left / right hand;
+  * **Direction**, specifying the required swing direction.
+
+---
+
+## Dataset Visualization
+
+**Gameplay view (player perspective):**
+
+<video src="dataset_visualization/data_video1.mp4" controls width="600"></video>
+**[clip from youtube](https://www.youtube.com/watch?v=LlOlSWnCsQA)**
+
+**Editor view (ground-truth beatmap data):**
+
+<video src="dataset_visualization/data_video2.mp4" controls width="600"></video>
+
+---
+
+## Method Overview
+
+The model follows a **Transformer encoder–decoder architecture**.
+
+### Encoder
+
+* Initialized from **pretrained MusicGen / MAGNeT models**.
+* The encoder is **frozen during training** and used purely as a music feature extractor.
+* This significantly stabilizes training and accelerates convergence.
+
+### Decoder
+
+* The decoder autoregressively generates beatmaps **along the time dimension**.
+* The design is inspired by **Visual Autoregressive Modeling (VAR)**:
+
+  * Tokens are organized with block-wise attention masks;
+  * Attention blocks are aligned with generation units (time steps instead of image scales).
+
+Key differences from original VAR:
+
+* VAR autoregresses over **multi-scale image resolutions**;
+* This project autoregresses over **beat-aligned time steps**.
+
+### Token Design
+
+* Each token represents a **(color × direction)** note combination.
+* An additional **empty token** indicates no note at a given grid position.
+* Beatmaps are generated sequentially over time.
+
+---
+
+## Encoder–Decoder Alignment
+
+The encoder and decoder are connected via **local cross-attention**:
+
+* At each beat step, the decoder attends only to the **corresponding temporal window** of encoder features.
+* This ensures locality between music and beatmap generation.
+
+To handle the mismatch between:
+
+* beat-based time steps (e.g., 1/4, 1/8 notes),
+* and second-based audio features,
+
+the alignment is constructed by analyzing the **receptive field of the MusicGen encoder** and mapping beats to encoder feature ranges.
+
+---
+
+## Key Features
+
+* Transformer-based **end-to-end beatmap generation**
+* Pretrained **MusicGen feature extraction**
+* Efficient **offline tokenization pipeline**:
+
+  * audio → Encodec tokens (GPU-intensive, done once)
+  * beatmap → discrete tokens (CPU-intensive)
+* Block-wise Transformer decoder with:
+
+  * Rotary Position Embedding (RoPE)
+  * 2D RoPE variants for grid-based attention
+* LoRA-based fine-tuning for pretrained models
+
+---
+
+## Project Structure
+
+This project is built on top of the **AudioCraft framework** and reuses **MusicGen** components.
+
+```
+audiocraft/
+├── models/
+│   └── lm_beatmapgen.py
+│       # Beatmap generation model (encoder–decoder architecture)
+├── solvers/
+│   └── beatmapgen.py
+│       # Training logic and solver implementation
+├── data/
+│   ├── audio_dataset_beatmap.py
+│   │   # Dataset and tokenizer:
+│   │   # beatmap JSON → tokens
+│   │   # audio → Encodec tokens
+│   ├── beatmap_dataset.ts
+│   │   # Beatmap formatter (Beat Saber → JSON)
+│   └── beatmap_parser.ts
+│       # Beatmap generator (JSON → Beat Saber format)
+├── modules/
+│   ├── transformer.py
+│   │   # Block-wise Transformer (encoder & decoder)
+│   ├── lora.py
+│   │   # LoRA fine-tuning for pretrained models
+│   ├── rope.py
+│   │   # Block-wise RoPE embedding
+│   ├── rope_ca.py
+│   │   # RoPE for cross-attention
+│   └── rope_xy.py
+│       # 2D RoPE for grid-based self-attention
+config/
+└── solver/beatmapgen/
+    └── beatmapgen_base_32khz.yaml
+        # Training configuration
+beatmapgen.sh
+# Script for data preprocessing, training, and inference
 ```
 
-We also recommend having `ffmpeg` installed, either through your system or Anaconda:
-```bash
-sudo apt-get install ffmpeg
-# Or if you are using Anaconda or Miniconda
-conda install "ffmpeg<5" -c conda-forge
-```
+---
 
-## Models
+## Evaluation
 
-At the moment, AudioCraft contains the training code and inference code for:
-* [MusicGen](./docs/MUSICGEN.md): A state-of-the-art controllable text-to-music model.
-* [AudioGen](./docs/AUDIOGEN.md): A state-of-the-art text-to-sound model.
-* [EnCodec](./docs/ENCODEC.md): A state-of-the-art high fidelity neural audio codec.
-* [Multi Band Diffusion](./docs/MBD.md): An EnCodec compatible decoder using diffusion.
-* [MAGNeT](./docs/MAGNET.md): A state-of-the-art non-autoregressive model for text-to-music and text-to-sound.
-* [AudioSeal](./docs/WATERMARKING.md): A state-of-the-art audio watermarking.
+* **Automatic metrics**:
 
-## Training code
+  * BLEU score between generated and reference beatmaps
+* **Human evaluation**:
 
-AudioCraft contains PyTorch components for deep learning research in audio and training pipelines for the developed models.
-For a general introduction of AudioCraft design principles and instructions to develop your own training pipeline, refer to
-the [AudioCraft training documentation](./docs/TRAINING.md).
+  * Visual inspection and playability assessment
 
-For reproducing existing work and using the developed training pipelines, refer to the instructions for each specific model
-that provides pointers to configuration, example grids and model/task-specific information and FAQ.
+Results:
 
+* Generated beatmaps have been visually validated on multiple tracks;
+* **Rhythm alignment accuracy exceeds 70%**.
 
-## API documentation
+---
 
-We provide some [API documentation](https://facebookresearch.github.io/audiocraft/api_docs/audiocraft/index.html) for AudioCraft.
+## What Works Well
 
+* Leveraging **MusicGen encoder features** leads to **very fast convergence**.
+* Heavy preprocessing is performed **before training**:
 
-## FAQ
+  * audio is converted to Encodec tokens once,
+  * beatmaps are tokenized offline.
+* This significantly reduces GPU usage during training and keeps resource consumption low.
 
-#### Is the training code available?
+---
 
-Yes! We provide the training code for [EnCodec](./docs/ENCODEC.md), [MusicGen](./docs/MUSICGEN.md) and [Multi Band Diffusion](./docs/MBD.md).
+## Experiments & Extensions
 
-#### Where are the models stored?
+The following improvements have been explored:
 
-Hugging Face stored the model in a specific location, which can be overridden by setting the `AUDIOCRAFT_CACHE_DIR` environment variable for the AudioCraft models.
-In order to change the cache location of the other Hugging Face models, please check out the [Hugging Face Transformers documentation for the cache setup](https://huggingface.co/docs/transformers/installation#cache-setup).
-Finally, if you use a model that relies on Demucs (e.g. `musicgen-melody`) and want to change the download location for Demucs, refer to the [Torch Hub documentation](https://pytorch.org/docs/stable/hub.html#where-are-my-downloaded-models-saved).
+* Block-wise RoPE for long sequence modeling
+* 2D RoPE for grid-aware attention
+* LoRA fine-tuning on pretrained encoders/decoders
+* Alternative generation models, including:
 
+  * VAR + MaskGIT inspired methods (e.g., HMAR)
+
+These extensions improve rhythm consistency but provide limited gains beyond the baseline so far.
+
+---
+
+## In-Progress Work
+
+* Exploring **event-level set prediction** instead of pixel-wise autoregression.
+* Investigating a **DETR-inspired approach**:
+
+  * Predicting a set of notes per time step,
+  * Using cross-attention to music features or intermediate decoder states.
+* Improving structural constraints and playability modeling.
+
+---
 
 ## License
-* The code in this repository is released under the MIT license as found in the [LICENSE file](LICENSE).
-* The models weights in this repository are released under the CC-BY-NC 4.0 license as found in the [LICENSE_weights file](LICENSE_weights).
 
+To be decided.
 
-## Citation
-
-For the general framework of AudioCraft, please cite the following.
-```
-@inproceedings{copet2023simple,
-    title={Simple and Controllable Music Generation},
-    author={Jade Copet and Felix Kreuk and Itai Gat and Tal Remez and David Kant and Gabriel Synnaeve and Yossi Adi and Alexandre Défossez},
-    booktitle={Thirty-seventh Conference on Neural Information Processing Systems},
-    year={2023},
-}
-```
-
-When referring to a specific model, please cite as mentioned in the model specific README, e.g
-[./docs/MUSICGEN.md](./docs/MUSICGEN.md), [./docs/AUDIOGEN.md](./docs/AUDIOGEN.md), etc.
+---
