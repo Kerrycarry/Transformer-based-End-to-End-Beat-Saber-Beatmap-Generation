@@ -154,6 +154,7 @@ class BeatmapLMModel(StreamingModule):
                  transfer_efficient_backend: str = 'torch', representation_dim: int = 128, representation: str = "spectrogram", segment_duration: int = 512, 
                  ca_window_size: int = 0, sa_window_size: int = 4, autocast: bool = False,
                  mask_schedule: tp.List[int] = [1, 1, 2, 3, 5], use_mask_prediction: bool = False, use_abstract_position: bool = False, token_decomposition: bool = False, 
+                 empty_classifier_kwargs: dict = {},
                  **kwargs):
         super().__init__()
         self.cfg_coef = cfg_coef
@@ -180,10 +181,16 @@ class BeatmapLMModel(StreamingModule):
         self.segment_duration = segment_duration
         self.ca_window_size = ca_window_size
         self.sa_window_size = sa_window_size
+        self.use_empty_classifier = empty_classifier_kwargs['use_empty_classifier']
+        self.simgmoid_threshold = empty_classifier_kwargs['simgmoid_threshold']
         if self.block_self_attention:
             self.difficulty_emb = ScaledEmbedding(self.difficulty_num, transfer_dim * position_size)
             self.beatmap_emb = ScaledEmbedding(self.token_id_size, transfer_dim)
-            self.linear_out = nn.Linear(transfer_dim, self.token_id_size, bias=bias_proj)
+            if not self.use_empty_classifier:
+                self.linear_out = nn.Linear(transfer_dim, self.token_id_size, bias=bias_proj)
+            else:
+                self.linear_out = nn.Linear(transfer_dim, self.token_id_size - 1, bias=bias_proj)
+                self.empty_classifier = nn.Linear(transfer_dim, 2, bias=bias_proj)
         else:
             self.difficulty_emb = ScaledEmbedding(self.difficulty_num, transfer_dim)
             self.beatmap_emb = nn.ModuleList([ScaledEmbedding(self.token_id_size, transfer_dim) for _ in range(self.position_size)])
@@ -370,6 +377,8 @@ class BeatmapLMModel(StreamingModule):
         init_layer(self.linear_transfer, method=weight_init, init_depth=None, zero_bias_init=zero_bias_init)
         if self.block_self_attention:
             init_layer(self.linear_out, method=weight_init, init_depth=None, zero_bias_init=zero_bias_init)
+            if self.use_empty_classifier:
+                init_layer(self.empty_classifier, method=weight_init, init_depth=None, zero_bias_init=zero_bias_init)
         else:
             for linear in self.linear_out:
                 init_layer(linear, method=weight_init, init_depth=None, zero_bias_init=zero_bias_init)
@@ -577,6 +586,9 @@ class BeatmapLMModel(StreamingModule):
             out = self.out_norm2(out) 
         if self.block_self_attention:
             logit = self.linear_out(out) # [B, S*P, card]
+            if self.use_empty_classifier:
+                logit2 = self.empty_classifier(out)
+                return logit, logit2
         else:
             logit = torch.stack([self.linear_out[p](out) for p in range(self.position_size)], dim=2)
             B, S, P, C = logit.shape
@@ -612,7 +624,14 @@ class BeatmapLMModel(StreamingModule):
         """
         model = self if self._fsdp is None else self._fsdp
         logit = model(input_ = input, cross_attention_input = cross_attention_input) # [1, 1, card]
-
+        if self.use_empty_classifier:
+            logit1, logit2 = logit
+            logit = logit1
+            logit2 = logit2[..., 1]  # 取“note”这一类的 logit
+            p_has = torch.sigmoid(logit2)
+            has_note = p_has > self.simgmoid_threshold
+            has_note_expanded = has_note.unsqueeze(-1)
+            
         # Apply softmax for sampling if temp > 0. Else, do greedy sampling to avoid zero division error.
         if use_sampling and temp > 0.0:
             probs = torch.softmax(logit / temp, dim=-1)
@@ -624,6 +643,9 @@ class BeatmapLMModel(StreamingModule):
                 next_token = utils.multinomial(probs, num_samples=1)
         else:
             next_token = torch.argmax(logit, dim=-1, keepdim=True)
+
+        if self.use_empty_classifier:
+            next_token = torch.where(has_note_expanded, next_token, self.token_id_size-1)
 
         return next_token, logit
 

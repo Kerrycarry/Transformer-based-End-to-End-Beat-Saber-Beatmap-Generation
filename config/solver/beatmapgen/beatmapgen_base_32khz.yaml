@@ -134,6 +134,12 @@ beatmapgen_lm:
   mask_schedule: [1, 1, 2, 3, 5]
   use_abstract_position: False
   token_decomposition: False
+  empty_classifier_kwargs:
+    use_empty_classifier: False
+    alpha: 0.25
+    gamma: 2
+    loss_weight: 5
+    simgmoid_threshold: 0.85
 
 transformer_lm:
   lr: null # transfer learning lr

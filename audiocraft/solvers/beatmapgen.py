@@ -30,6 +30,7 @@ from ..modules.conditioners import JointEmbedCondition, SegmentWithAttributes, W
 from ..utils.cache import CachedBatchWriter, CachedBatchLoader
 from ..utils.samples.manager_beatmap import SampleManager
 from ..utils.utils import get_dataset_from_loader, is_jsonable, warn_once, model_hash
+from ..losses.focal_loss import FocalLoss
 class BeatmapGenSolver(base.StandardSolver):
     """Solver for MusicGen training task.
 
@@ -322,17 +323,39 @@ class BeatmapGenSolver(base.StandardSolver):
             ce_per_codebook (list of torch.Tensor): Cross entropy per codebook (detached).
         """
         B, S, P = targets.shape
-        assert logits.shape[:-1] == targets.view(B, -1).shape
-        targets = targets.view(B, -1)
-        if idx_to_mask is not None:
-            n_tokens_mask = idx_to_mask.shape[1]
-            batch_idx = torch.arange(B, device=targets.device).unsqueeze(1).expand(-1, n_tokens_mask)
-            targets = targets[batch_idx, idx_to_mask]
-            logits = logits[batch_idx, idx_to_mask, :]
-        logits_k = logits.contiguous().view(-1,logits.size(-1))
-        targets_k = targets.view(-1)
-        ce = F.cross_entropy(logits_k, targets_k)
-        
+        empty_classifier_kwargs = self.cfg.beatmapgen_lm.empty_classifier_kwargs
+        use_empty_classifier = empty_classifier_kwargs['use_empty_classifier']
+        alpha = empty_classifier_kwargs['alpha']
+        gamma = empty_classifier_kwargs['gamma']
+        loss_weight = empty_classifier_kwargs['loss_weight']
+        if not use_empty_classifier:
+            assert logits.shape[:-1] == targets.view(B, -1).shape
+            targets = targets.view(B, -1)
+            if idx_to_mask is not None:
+                n_tokens_mask = idx_to_mask.shape[1]
+                batch_idx = torch.arange(B, device=targets.device).unsqueeze(1).expand(-1, n_tokens_mask)
+                targets = targets[batch_idx, idx_to_mask]
+                logits = logits[batch_idx, idx_to_mask, :]
+            logits_k = logits.contiguous().view(-1,logits.size(-1))
+            targets_k = targets.view(-1)
+            ce = F.cross_entropy(logits_k, targets_k)
+        else:
+            logits1, logits2 = logits
+            assert logits1.shape[:-1] == targets.view(B, -1).shape
+            targets = targets.view(-1)
+            logits_k = logits1.contiguous().view(-1,logits1.size(-1))
+            empty_id = self.model.token_id_size - 1
+            note_mask = (targets != empty_id) # false for empty，true for note
+            # 筛选logits_k和targets,只取note的index的
+            logits_k = logits_k[note_mask]
+            targets_k = targets[note_mask]
+            ce = F.cross_entropy(logits_k, targets_k)
+            # 计算bce/focal loss
+            loss_fn = FocalLoss(alpha=alpha, gamma=gamma, num_classes=2)
+            note_mask = note_mask.to(torch.int64)
+            logits_k = logits2.contiguous().view(-1,logits2.size(-1))
+            be = loss_fn(logits_k, note_mask)
+            ce = ce + be*loss_weight
         # padding_id = self.model.token_id_size - 1
         # note_mask = (targets == padding_id) # 0 for notes, 1 for padding
         # logits = logits.view(B, S, P, -1)
