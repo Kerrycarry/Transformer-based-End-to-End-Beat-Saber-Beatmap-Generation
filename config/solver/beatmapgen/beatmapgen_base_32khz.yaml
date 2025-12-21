@@ -140,6 +140,7 @@ beatmapgen_lm:
     gamma: 2
     loss_weight: 5
     simgmoid_threshold: 0.85
+    simgmoid_threshold_list: [0.65, 0.75, 0.85]
 
 transformer_lm:
   lr: null # transfer learning lr

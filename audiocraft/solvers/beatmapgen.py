@@ -638,6 +638,8 @@ class BeatmapGenSolver(base.StandardSolver):
         ref_beatmap_file = [info.beatmap_file for info in segment_infos]
         gen_beatmap_file = [self.beatmap.detokenize(gen_beatmap_token.squeeze(0), segment_info.meta.bpm) for gen_beatmap_token, segment_info in zip(gen_beatmap_tokens, segment_infos) ]
         sample_id = [f"{segment_info.meta.id}_{segment_info.seek_time}" for segment_info in segment_infos]
+        if self.model.use_empty_classifier:
+            sample_id = [f"{item}_{self.model.simgmoid_threshold}" for item in sample_id]
         meta = [segment_info.meta for segment_info in segment_infos]
         bench_end = time.time()
 
@@ -729,19 +731,33 @@ class BeatmapGenSolver(base.StandardSolver):
                 **self.generation_params
             }
             if self.cfg.generate.lm.unprompted_samples:
-                if self.cfg.generate.lm.gen_gt_samples:
-                    # get the ground truth instead of generation
-                    self.logger.warn(
-                        "Use ground truth instead of audio generation as generate.lm.gen_gt_samples=true")
-                    rtf = 1.
+                empty_classifier_kwargs = self.cfg.beatmapgen_lm.empty_classifier_kwargs
+                use_empty_classifier = empty_classifier_kwargs['use_empty_classifier']
+                simgmoid_threshold_list = empty_classifier_kwargs['simgmoid_threshold_list']
+                if not use_empty_classifier:
+                    if self.cfg.generate.lm.gen_gt_samples:
+                        # get the ground truth instead of generation
+                        self.logger.warn(
+                            "Use ground truth instead of audio generation as generate.lm.gen_gt_samples=true")
+                        rtf = 1.
+                    else:
+                        gen_unprompted_outputs = self.run_generate_step(
+                            batch, gen_duration=target_duration, prompt_duration=None,
+                            **self.generation_params)
+                        rtf = gen_unprompted_outputs.pop('rtf')
+                    sample_manager.add_samples(
+                        epoch=self.epoch,
+                        conditioning=hydrated_conditions, generation_args=sample_generation_params, **gen_unprompted_outputs)
                 else:
-                    gen_unprompted_outputs = self.run_generate_step(
-                        batch, gen_duration=target_duration, prompt_duration=None,
-                        **self.generation_params)
-                    rtf = gen_unprompted_outputs.pop('rtf')
-                sample_manager.add_samples(
-                    epoch=self.epoch,
-                      conditioning=hydrated_conditions, generation_args=sample_generation_params, **gen_unprompted_outputs)
+                    for simgmoid_threshold in simgmoid_threshold_list:
+                        self.model.simgmoid_threshold = simgmoid_threshold
+                        gen_unprompted_outputs = self.run_generate_step(
+                            batch, gen_duration=target_duration, prompt_duration=None,
+                            **self.generation_params)
+                        rtf = gen_unprompted_outputs.pop('rtf')
+                        sample_manager.add_samples(
+                            epoch=self.epoch,
+                            conditioning=hydrated_conditions, generation_args=sample_generation_params, **gen_unprompted_outputs)
 
             metrics['rtf'] = rtf
             metrics = average(metrics)
