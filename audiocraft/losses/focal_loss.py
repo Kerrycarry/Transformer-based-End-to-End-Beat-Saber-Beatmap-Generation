@@ -30,9 +30,9 @@ class FocalLoss(nn.Module):
 
         self.gamma = gamma
         
-        print('Focal Loss:')
-        print('    Alpha = {}'.format(self.alpha))
-        print('    Gamma = {}'.format(self.gamma))
+        # print('Focal Loss:')
+        # print('    Alpha = {}'.format(self.alpha))
+        # print('    Gamma = {}'.format(self.gamma))
         
     def forward(self, preds, labels):
         """
