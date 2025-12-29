@@ -136,8 +136,8 @@ beatmapgen_lm:
   token_decomposition: False
   empty_classifier_kwargs:
     use_empty_classifier: False
-    alpha: 0.25
-    gamma: 2
+    alpha: null
+    gamma: 0
     loss_weight: 5
     simgmoid_threshold: 0.85
     simgmoid_threshold_list: [0.65, 0.75, 0.85]

@@ -185,10 +185,11 @@ class BeatmapLMModel(StreamingModule):
         self.simgmoid_threshold = empty_classifier_kwargs['simgmoid_threshold']
         if self.block_self_attention:
             self.difficulty_emb = ScaledEmbedding(self.difficulty_num, transfer_dim * position_size)
-            self.beatmap_emb = ScaledEmbedding(self.token_id_size, transfer_dim)
             if not self.use_empty_classifier:
+                self.beatmap_emb = ScaledEmbedding(self.token_id_size, transfer_dim)
                 self.linear_out = nn.Linear(transfer_dim, self.token_id_size, bias=bias_proj)
             else:
+                self.beatmap_emb = ScaledEmbedding(self.token_id_size, transfer_dim, padding_idx=self.token_id_size - 1)
                 self.linear_out = nn.Linear(transfer_dim, self.token_id_size - 1, bias=bias_proj)
                 self.empty_classifier = nn.Linear(transfer_dim, 2, bias=bias_proj)
         else:
@@ -627,9 +628,8 @@ class BeatmapLMModel(StreamingModule):
         if self.use_empty_classifier:
             logit1, logit2 = logit
             logit = logit1
-            logit2 = logit2[..., 1]  # 取“note”这一类的 logit
-            p_has = torch.sigmoid(logit2)
-            has_note = p_has > self.simgmoid_threshold
+            probs = torch.softmax(logit2, dim=-1)[..., 1:]# 取非空logit
+            has_note = probs.max(-1).values > self.simgmoid_threshold
             has_note_expanded = has_note.unsqueeze(-1)
             
         # Apply softmax for sampling if temp > 0. Else, do greedy sampling to avoid zero division error.
@@ -645,7 +645,11 @@ class BeatmapLMModel(StreamingModule):
             next_token = torch.argmax(logit, dim=-1, keepdim=True)
 
         if self.use_empty_classifier:
-            next_token = torch.where(has_note_expanded, next_token, self.token_id_size-1)
+            next_token = torch.where(
+                has_note_expanded,
+                next_token,
+                torch.full_like(next_token, self.token_id_size-1)
+            )
 
         return next_token, logit
 
